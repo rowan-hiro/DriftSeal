@@ -1,0 +1,8 @@
+AGENTS.md
+.decision-log/
+.intent-log/
+.gitignore
+.github/
+test/
+coverage/
+.DS_Store

@@ -1,0 +1,41 @@
+{
+  "name": "driftseal",
+  "version": "0.1.0",
+  "description": "Seal intent, verification, and decisions into an auditable workflow for agentic coding",
+  "keywords": [
+    "driftseal",
+    "agents",
+    "agentic-coding",
+    "agent-safety",
+    "developer-tools",
+    "intent-log",
+    "decision-log",
+    "madr"
+  ],
+  "bin": {
+    "driftseal": "bin/driftseal.js"
+  },
+  "files": [
+    "bin",
+    "skills",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruanboyu/driftseal.git"
+  },
+  "homepage": "https://github.com/ruanboyu/driftseal#readme",
+  "bugs": {
+    "url": "https://github.com/ruanboyu/driftseal/issues"
+  },
+  "author": "Ruan Boyu <boyuruan@gmail.com>",
+  "license": "MIT"
+}
