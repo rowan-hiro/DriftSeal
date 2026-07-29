@@ -12,8 +12,23 @@
     "decision-log",
     "madr"
   ],
+  "homepage": "https://github.com/ruanboyu/driftseal#readme",
+  "bugs": {
+    "url": "https://github.com/ruanboyu/driftseal/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruanboyu/driftseal.git"
+  },
+  "license": "MIT",
+  "author": "Ruan Boyu <boyuruan@gmail.com>",
+  "type": "commonjs",
+  "main": "index.js",
   "bin": {
     "driftseal": "bin/driftseal.js"
+  },
+  "directories": {
+    "test": "test"
   },
   "files": [
     "bin",
@@ -27,15 +42,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/ruanboyu/driftseal.git"
-  },
-  "homepage": "https://github.com/ruanboyu/driftseal#readme",
-  "bugs": {
-    "url": "https://github.com/ruanboyu/driftseal/issues"
-  },
-  "author": "Ruan Boyu <boyuruan@gmail.com>",
-  "license": "MIT"
+  }
 }
