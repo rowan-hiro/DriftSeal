@@ -66,7 +66,7 @@ driftseal end \
 
 如果范围发生变化，先把当前 intent 以 `partial` 或 `abandoned` 关闭，再开启新的 intent。发生 context loss 后，用 `driftseal status` 和 `driftseal log --last 3` 重新锚定当前目标。
 
-如果用户已经授权创建 Git commit，只把已验证的改动和刚关闭的 intent log 进行 stage 和 commit，就属于这一轮的持久化收尾，不需要额外开启一个只用于 commit 的 intent。准备 commit 时一旦需要修改内容，就必须开启新一轮。
+只负责构建、检查或记录已完成工作的单步命令（编译、跑测试、`git add`/`git commit`）不需要单独开启 intent。如果用户已经授权创建 Git commit，只把已验证的改动和刚关闭的 intent log 进行 stage 和 commit，就属于这一轮的持久化收尾。准备 commit 时一旦需要修改内容，就必须开启新一轮。
 
 ## 命令速览
 

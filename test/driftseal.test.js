@@ -923,7 +923,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /intent write-ahead log/);
   assert.match(first, /driftseal begin/);
   assert.match(first, /--decision <id>/);
-  assert.match(first, /running a mutating command/);
+  assert.match(first, /may need a rollback/);
+  assert.match(first, /need no intent/);
   assert.match(first, /An authorized Git commit/);
   assert.match(first, /finalizes that round without requiring a new intent/);
   assert.match(first, /Agent protocol: decision log/);
@@ -935,7 +936,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /driftseal decision list --status deferred --count/);
   assert.match(first, /driftseal decision update/);
   assert.match(first, /rejects a successful close/);
-  assert.match(first, /driftseal-version: 4/);
+  assert.match(first, /driftseal-version: 5/);
   assert.match(first, /<!-- \/driftseal -->/);
 
   runIn(['init']); // second run must not duplicate
@@ -950,7 +951,21 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
-  const versionThree = first
+  const versionFour = first
+    .replace('driftseal-version: 5', 'driftseal-version: 4')
+    .replace('driftseal-decisions-version: 5', 'driftseal-decisions-version: 4')
+    .replace(
+      '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+        '   making any other change that may need a rollback:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Single-step commands that only build, check, or record work already done\n' +
+        '   (compiling, running tests, `git add`/`git commit`) need no intent.',
+      '1. **Write intent first**, before modifying a file or running a mutating command:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.'
+    );
+  const versionThree = versionFour
     .replace('driftseal-version: 4', 'driftseal-version: 3')
     .replace('driftseal-decisions-version: 4', 'driftseal-decisions-version: 3')
     .replace(
@@ -964,9 +979,18 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 4/);
-  assert.match(upgraded, /driftseal-decisions-version: 4/);
+  assert.match(upgraded, /driftseal-version: 5/);
+  assert.match(upgraded, /driftseal-decisions-version: 5/);
   assert.match(upgraded, /# trailing user instructions/);
+
+  const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
+  const upgradeFourFile = path.join(upgradeFourCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
+  run(['init'], { cwd: upgradeFourCwd });
+  const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
+  assert.match(upgradedFour, /driftseal-version: 5/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 5/);
+  assert.match(upgradedFour, /need no intent/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
   const crlfFile = path.join(crlfCwd, 'AGENTS.md');
@@ -980,7 +1004,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 4/);
+  assert.match(upgradedCrLf, /driftseal-version: 5/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -1011,7 +1035,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 4', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 5', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -1041,14 +1065,14 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 4 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 5 -->\n', '')
     .replace('\n<!-- /driftseal-decisions -->', '');
   fs.writeFileSync(legacyFile, `# existing instructions\n\n${legacyDecision}\n`);
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 4/);
-  assert.match(migratedLegacy, /driftseal-version: 4/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 5/);
+  assert.match(migratedLegacy, /driftseal-version: 5/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
 });

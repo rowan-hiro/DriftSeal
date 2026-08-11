@@ -66,7 +66,7 @@ driftseal end \
 
 If the scope changes, close the current intent as `partial` or `abandoned`, then start a new one. After context loss, use `driftseal status` and `driftseal log --last 3` to re-anchor.
 
-If the user has authorized a Git commit, staging and committing only the verified changes and the just-closed intent log finalizes that round; it does not need a commit-only intent. Any content change made while preparing the commit starts a new round.
+Single-step commands that only build, check, or record work already done — compiling, running tests, `git add`/`git commit` — need no intent of their own. When a commit is authorized, staging and committing only the verified changes and the just-closed intent log finalizes that round. Any content change made while preparing the commit starts a new round.
 
 ## Commands
 

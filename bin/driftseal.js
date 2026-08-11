@@ -7,7 +7,7 @@
  * Intent-level write-ahead log and MADR decision log for agentic coding sessions.
  *
  * Protocol per work round:
- *   1. driftseal begin "<intent>" [--verify "<how to verify>"]   (before touching anything)
+ *   1. driftseal begin "<intent>" [--verify "<how to verify>"]   (before changes that may need a rollback)
  *   2. execute the intent
  *   3. driftseal end [--status ...] [--note ...] [--verify-result ...]  (reconcile against intent)
  *
@@ -35,7 +35,7 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const EVENT_SCHEMA_VERSION = 2;
-const PROTOCOL_VERSION = 4;
+const PROTOCOL_VERSION = 5;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
@@ -1018,9 +1018,12 @@ function intentProtocolBlock(version = PROTOCOL_VERSION) {
 
 This repo uses DriftSeal (\`driftseal\`) to prevent agent drift. Every work round:
 
-1. **Write intent first**, before modifying a file or running a mutating command:
+1. **Write intent first**, before modifying, creating, or deleting files, or
+   making any other change that may need a rollback:
    \`driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"\`.
    Add one \`--decision <id>\` for each existing decision this round may change.
+   Single-step commands that only build, check, or record work already done
+   (compiling, running tests, \`git add\`/\`git commit\`) need no intent.
 2. **Execute only the intent.** Scope change? Close the current intent
    (\`driftseal end -s partial|abandoned -n "<why>"\`) and \`driftseal begin\` a new one.
 3. **Verify, then close**: run the declared verification, then
@@ -1044,7 +1047,19 @@ ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version) {
-  return intentProtocolBlock(version).replace(
+  const v4 = intentProtocolBlock(version).replace(
+    '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+      '   making any other change that may need a rollback:\n' +
+      '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+      '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+      '   Single-step commands that only build, check, or record work already done\n' +
+      '   (compiling, running tests, `git add`/`git commit`) need no intent.',
+    '1. **Write intent first**, before modifying a file or running a mutating command:\n' +
+      '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+      '   Add one `--decision <id>` for each existing decision this round may change.'
+  );
+  if (version >= 4) return v4;
+  return v4.replace(
     '   by the next linked `decision update` or successful `end`. Closing as\n' +
       '   `failed` or `abandoned` cancels pending recovery for that intent.',
     '   by the next `decision update` or `end`.'
@@ -1489,6 +1504,7 @@ const commands = {
       knownManagedBlocks: [
         protocolEol(previousIntentProtocolBlock(2), eol),
         protocolEol(previousIntentProtocolBlock(3), eol),
+        protocolEol(previousIntentProtocolBlock(4), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -1502,6 +1518,7 @@ const commands = {
       knownManagedBlocks: [
         protocolEol(decisionProtocolBlock(2), eol),
         protocolEol(decisionProtocolBlock(3), eol),
+        protocolEol(decisionProtocolBlock(4), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });

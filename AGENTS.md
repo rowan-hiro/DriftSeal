@@ -4,8 +4,8 @@ This project (and any repo adopting it) uses DriftSeal (the `driftseal` CLI;
 see `bin/driftseal.js` and `README.md`) to prevent agent drift. Follow this
 protocol for **every** work round:
 
-1. **Write intent first.** Before modifying any file or running any mutating
-   command:
+1. **Write intent first.** Before modifying, creating, or deleting files — or
+   making any other change that may need a rollback:
 
    ```sh
    driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"
@@ -14,6 +14,8 @@ protocol for **every** work round:
    Keep the intent small enough to close in one round. If an intent is already
    open, `begin` refuses — close the stale one first (`driftseal end -s abandoned -n "<why>"`).
    Add one `--decision <id>` for each existing decision this round may change.
+   Single-step commands that only build, check, or record work already done
+   (compiling, running tests, `git add`/`git commit`) do not need an intent.
 
 2. **Execute only the intent.** If you discover the scope must change, do not
    silently drift: close the current intent (`partial` or `abandoned`, with a

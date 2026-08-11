@@ -35,8 +35,8 @@ open intent, stop mutating and coordinate instead of abandoning its work.
 
 ## Begin the Round
 
-Before modifying a file or running any mutating command, declare one objective
-and its proof:
+Before modifying, creating, or deleting files — or making any other change that
+may need a rollback — declare one objective and its proof:
 
 ```sh
 driftseal begin "<small objective for this round>" \
@@ -45,7 +45,9 @@ driftseal begin "<small objective for this round>" \
 
 Make the intent small enough to finish and verify in one round. Prefer an
 outcome-focused check over a vague activity such as "inspect the result."
-Starting the intent is the first permitted mutation.
+Starting the intent is the first permitted mutation. Single-step commands that
+only build, check, or record work already done — compiling, running tests,
+`git add`/`git commit` — need no intent of their own.
 
 When the round may change or confirm an existing decision, declare each one at
 the boundary with `--decision <id>`. Do not add decision links speculatively.
