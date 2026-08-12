@@ -9,3 +9,4 @@ coverage/
 .env
 .env.*
 !.env.example
+.kimi-code/
