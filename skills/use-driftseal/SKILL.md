@@ -5,181 +5,57 @@ description: Run repository work through the DriftSeal (`driftseal`) intent, ver
 
 # Use DriftSeal
 
-Run repository work as small, closed, auditable rounds. Treat the intent log,
-decision log, and Git history as complementary records rather than duplicate
-activity streams.
+This skill is the usage guide for DriftSeal: how to find it and which command
+or tool to reach for. The binding protocol — when an intent is required, how
+to close one honestly, when a decision record is warranted, how reclamation
+works — lives in the target repository's `AGENTS.md` (injected by
+`driftseal init`). Follow that file; do not substitute this guide or memory
+for it.
 
 ## Locate DriftSeal
 
 - Prefer the `driftseal_*` MCP tools when the DriftSeal MCP server is available
-  for the target repository. Use `driftseal_status`, `driftseal_begin`,
-  `driftseal_end`, and the corresponding decision tools instead of invoking the
-  CLI through a shell.
-- Work from the repository root unless its instructions specify another scope.
-- When MCP is unavailable, prefer `driftseal` from `PATH`. In a DriftSeal source
-  checkout, fall back to `node bin/driftseal.js` when the global command is
-  unavailable.
-- Follow the repository's `AGENTS.md`. Storage overrides such as
-  `DRIFTSEAL_HOME` apply to CLI use; the MCP server deliberately keeps state in
-  its fixed repository root.
-- If DriftSeal is unavailable, limit activity to read-only discovery and report the
-  blocker. Do not mutate the repository without the required log.
+  for the target repository. The server keeps state in its fixed repository
+  root and ignores storage-override environment variables.
+- Otherwise prefer `driftseal` from `PATH`, where `DRIFTSEAL_HOME` and
+  `DRIFTSEAL_DECISION_HOME` overrides apply. In a DriftSeal source checkout,
+  fall back to `node bin/driftseal.js`.
+- Use one interface consistently within a round.
+- If DriftSeal is unavailable, limit activity to read-only discovery and report
+  the blocker. Do not mutate the repository without the required log.
 
-Use one interface consistently within a round. The examples below use
-`driftseal`; map them directly to the same-named MCP workflow when MCP is
-available, or substitute the local source command when necessary.
+## Command Map
 
-## Re-anchor Before Acting
-
-1. Run `driftseal status` at the start of work.
-2. Run `driftseal log --last 3` after compaction, a resumed session, or uncertainty.
-3. Continue an open intent when it matches the requested work. Treat it as the
-   source of truth; do not open a duplicate intent.
-4. Close a conflicting intent as `partial` or `abandoned` with an honest note,
-   then begin the replacement round.
-
-Do not use `--force` merely for convenience. If another live actor owns the
-open intent, stop mutating and coordinate instead of abandoning its work.
-
-## Begin the Round
-
-Before modifying, creating, or deleting files — or making any other change that
-may need a rollback — declare one objective and its proof:
+Re-anchor after context loss or uncertainty:
 
 ```sh
-driftseal begin "<small objective for this round>" \
-  --verify "<exact command or outcome check>"
+driftseal status
+driftseal log --last 3        # add --all to include reclaimed records
 ```
 
-Make the intent small enough to finish and verify in one round. Prefer an
-outcome-focused check over a vague activity such as "inspect the result."
-Starting the intent is the first permitted mutation. Single-step commands that
-only build, check, or record work already done — compiling, running tests,
-`git add`/`git commit` — need no intent of their own.
-
-When the round may change or confirm an existing decision, declare each one at
-the boundary with `--decision <id>`. Do not add decision links speculatively.
-
-Read-only inspection needed to choose the objective or verifier may happen
-before `begin`. Do not let that inspection turn into unlogged implementation.
-
-## Execute Without Drift
-
-- Change only what the open intent covers.
-- Preserve unrelated worktree changes and other actors' edits.
-- If the objective expands or changes, close the current intent as `partial`
-  or `abandoned`, then start a new round before continuing.
-- If the declared verifier becomes invalid, record that honestly and start a
-  new round with the correct verifier instead of silently substituting proof.
-- If the user replaces the active request, reconcile the open intent before
-  acting on the replacement.
-
-## Record Decisions Selectively
-
-Before adding a decision record, ask what useful information would disappear
-if only the intent log and final Git commit remained.
-
-Add a MADR record only when it preserves at least one of these:
-
-- a rejected path worth preventing future agents from retrying;
-- an unresolved or deliberately deferred path with a concrete revisit trigger;
-- non-obvious rationale or trade-offs behind an accepted choice that is
-  long-lived, cross-cutting, or costly to reverse;
-- the reason an earlier decision became deprecated or superseded.
-
-Skip routine, local, readily reversible choices. Do not restate an accepted
-change that the intent and commit already explain.
-
-Use `proposed` for unresolved choices still under active consideration. Use
-`deferred` for choices that are deliberately postponed, and state the revisit
-trigger in the outcome or consequences. Use `rejected` for an explicitly
-ruled-out choice. Reserve `accepted` for the exceptional accepted decisions
-whose rationale would otherwise be lost.
-
-Count postponed choices with `driftseal decision list --status deferred --count`,
-then review them with `driftseal decision list --status deferred` so they do not
-disappear into the chronological log.
-
-For every decision explicitly linked by the open intent, reconcile its current
-status and rationale before a successful close:
+Run each work round as declared by the repository's protocol:
 
 ```sh
-driftseal decision update <id> \
-  --status <proposed|accepted|rejected|deferred|deprecated|superseded> \
-  --note "<what changed or was confirmed, and why>"
+driftseal begin "<objective>" --verify "<proof>" [--decision <id>]
+# ... do only what the intent covers ...
+driftseal end --status <status> --note "<what happened>" --verify-result "<proof output>"
 ```
 
-The update appends a decision history entry tied to the open intent. An
-unchanged decision still needs an explicit confirmation note. DriftSeal rejects a
-`completed` or `partial` close if any declared decision remains unreconciled;
-`failed` and `abandoned` remain available as escape paths.
-
-Do not edit a linked decision after reconciling it. Run `decision update` again
-so the final content hash is recorded. If an update is interrupted, rerun it or
-successfully close the linked intent; DriftSeal recovers only that intent's pending
-transaction. Closing as `failed` or `abandoned` cancels its pending recovery so
-historical conflicts cannot block future decision work.
+Record a decision only when the repository's decision protocol calls for one,
+and reconcile every linked decision before a successful close:
 
 ```sh
-driftseal decision add "<decision title>" \
-  --status deferred \
-  --context "<problem and constraints>" \
-  --outcome "<current disposition, rationale, and revisit trigger>" \
-  --option "<considered option>" \
-  --consequence "<result of this disposition>"
+driftseal decision add "<title>" --context "..." --outcome "..."
+driftseal decision update <id> [--status <status>] --note "<what changed or was confirmed>"
+driftseal decision list --status deferred
 ```
 
-## Verify and Close
-
-Run the declared verification exactly as written. Then close the intent before
-reporting success:
+Retire meaningless closed records (never touch the log files directly):
 
 ```sh
-driftseal end \
-  --status completed \
-  --note "<what actually happened>" \
-  --verify-result "<concise, honest result>"
+driftseal reclaim [id ...] --reason "<why>" [--dry-run]
+driftseal unreclaim <id> --reason "<why>"
 ```
 
-Choose the status from evidence:
-
-- `completed`: achieve the objective and pass the declared verification.
-- `partial`: leave useful work but do not achieve the whole objective.
-- `failed`: fail to produce a usable result or fail essential verification.
-- `abandoned`: intentionally stop or replace the round.
-
-Never leave an intent open merely because the work failed. Never report a
-completed result while the log still says `in_progress`.
-
-## Touch the Log Only Through DriftSeal
-
-Never read, edit, move, or delete `.intent-log/events.jsonl` (or anything under
-`$DRIFTSEAL_HOME`) directly — every read and write goes through `driftseal`
-commands or the MCP tools. When a closed record has become meaningless (for
-example a harness- or sandbox-caused `failed` round that says nothing about the
-project), retire it instead of deleting lines:
-
-```sh
-driftseal reclaim [id ...] --reason "<why these records are noise>"
-```
-
-Without ids, batch mode reclaims only closed `failed`/`abandoned` records that
-are unlinked to decisions and older than `--older-than` days (default 7);
-preview with `--dry-run`. Reclaiming `completed`/`partial` or decision-linked
-records requires explicit ids and `--force`. Reclaim only appends a marker —
-the log stays append-only, reclaimed records stay visible via `driftseal log
---all`, and `driftseal unreclaim <id> --reason "<why>"` restores one.
-
-## Persist the Round in Git
-
-Treat a focused Git commit as the third record: the intent says what was
-planned and how it was checked, the decision log preserves otherwise-lost
-context, and the commit shows what actually landed.
-
-When the user has authorized a commit, stage and commit only the verified
-changes, the closed intent events, and any relevant decision record. This
-bookkeeping finalizes the just-closed round and does not require a new intent.
-
-Keep this exception narrow. Open a new intent before making content changes,
-fixing a hook failure, rewriting history, rebasing, pushing, or including work
-outside the closed round.
+For exact flags, eligibility rules, and recovery behavior, run
+`driftseal help` and read the repository's `AGENTS.md`.
