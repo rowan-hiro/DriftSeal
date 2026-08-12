@@ -15,8 +15,11 @@ for it.
 ## Locate DriftSeal
 
 - Prefer the `driftseal_*` MCP tools when the DriftSeal MCP server is available
-  for the target repository. The server keeps state in its fixed repository
-  root and ignores storage-override environment variables.
+  for the target repository: `driftseal_status`, `driftseal_begin`,
+  `driftseal_end`, `driftseal_log`, `driftseal_reclaim`, `driftseal_unreclaim`,
+  and the `driftseal_decision_*` tools. Their input schemas come from the MCP
+  client, not from `driftseal help`. The server keeps state in its fixed
+  repository root and ignores storage-override environment variables.
 - Otherwise prefer `driftseal` from `PATH`, where `DRIFTSEAL_HOME` and
   `DRIFTSEAL_DECISION_HOME` overrides apply. In a DriftSeal source checkout,
   fall back to `node bin/driftseal.js`.
@@ -26,14 +29,17 @@ for it.
 
 ## Command Map
 
-Re-anchor after context loss or uncertainty:
+Re-anchor after context loss or uncertainty; when `status` reports an open
+intent, the repository protocol defines whether to resume or replace it:
 
 ```sh
 driftseal status
 driftseal log --last 3        # add --all to include reclaimed records
 ```
 
-Run each work round as declared by the repository's protocol:
+Run each work round as the repository's protocol directs (`-v`, `-s`, `-n`,
+and `-r` are the short forms of `--verify`, `--status`, `--note`, and
+`--verify-result`):
 
 ```sh
 driftseal begin "<objective>" --verify "<proof>" [--decision <id>]
@@ -41,8 +47,7 @@ driftseal begin "<objective>" --verify "<proof>" [--decision <id>]
 driftseal end --status <status> --note "<what happened>" --verify-result "<proof output>"
 ```
 
-Record a decision only when the repository's decision protocol calls for one,
-and reconcile every linked decision before a successful close:
+Record and reconcile decisions as the repository's decision protocol directs:
 
 ```sh
 driftseal decision add "<title>" --context "..." --outcome "..."
@@ -50,7 +55,7 @@ driftseal decision update <id> [--status <status>] --note "<what changed or was 
 driftseal decision list --status deferred
 ```
 
-Retire meaningless closed records (never touch the log files directly):
+Retire meaningless closed records as the repository's protocol directs:
 
 ```sh
 driftseal reclaim [id ...] --reason "<why>" [--dry-run]

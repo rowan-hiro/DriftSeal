@@ -35,7 +35,7 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const EVENT_SCHEMA_VERSION = 3;
-const PROTOCOL_VERSION = 6;
+const PROTOCOL_VERSION = 7;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
@@ -1133,7 +1133,9 @@ This repo uses DriftSeal (\`driftseal\`) to prevent agent drift. Every work roun
    just-closed log finalizes that round without requiring a new intent. Any content
    change made while preparing the commit does require a new intent.
 4. **Re-anchor after context loss**: run \`driftseal status\` and \`driftseal log --last 3\` before
-   doing anything else. The open intent is the source of truth.
+   doing anything else. The open intent is the source of truth: resume it when its
+   objective still matches the current task; otherwise close it (\`partial\` or
+   \`abandoned\`, with a note) and \`begin\` a new one.
 
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 \`.intent-log/events.jsonl\` (or anything under \`$DRIFTSEAL_HOME\`) directly; use
@@ -1146,7 +1148,14 @@ ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version) {
-  const v5 = intentProtocolBlock(version).replace(
+  const v6 = intentProtocolBlock(version).replace(
+    'doing anything else. The open intent is the source of truth: resume it when its\n' +
+      '   objective still matches the current task; otherwise close it (`partial` or\n' +
+      '   `abandoned`, with a note) and `begin` a new one.',
+    'doing anything else. The open intent is the source of truth.'
+  );
+  if (version >= 6) return v6;
+  const v5 = v6.replace(
     '\n**Log access goes only through DriftSeal.** Never read, edit, move, or delete\n' +
       '`.intent-log/events.jsonl` (or anything under `$DRIFTSEAL_HOME`) directly; use\n' +
       '`driftseal` commands or the MCP tools. Retire meaningless closed records with\n' +
@@ -1190,7 +1199,7 @@ revisiting, non-obvious rationale behind a long-lived or costly-to-reverse accep
 choice, or a deprecated or superseded decision. Do not record routine, local,
 readily reversible choices.
 
-\`driftseal decision add "<title>" --context "<problem and constraints>" --outcome "<decision and rationale>" --option "<considered option>" --consequence "<result>"\`
+\`driftseal decision add "<title>" --context "<problem and constraints>" --outcome "<decision and rationale>" --driver "<decision driver>" --option "<considered option>" --consequence "<result>"\`
 
 Add one \`--driver\`, \`--option\`, or \`--consequence\` flag per item. Use
 \`--status proposed|accepted|rejected|deferred|deprecated|superseded\` when needed.
@@ -1253,6 +1262,10 @@ then review them with \`driftseal decision list --status deferred\`.
 When an intent declares an existing decision with \`--decision <id>\`, use
 \`driftseal decision update\` to record its status transition or explicit confirmation.
 Commit \`.decision-log/\` with the code.`;
+}
+
+function previousDecisionProtocolBlock(version) {
+  return decisionProtocolBlock(version).replace(' --driver "<decision driver>"', '');
 }
 
 function upgradeManagedBlock({
@@ -1727,6 +1740,7 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(3), eol),
         protocolEol(previousIntentProtocolBlock(4), eol),
         protocolEol(previousIntentProtocolBlock(5), eol),
+        protocolEol(previousIntentProtocolBlock(6), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -1738,10 +1752,11 @@ const commands = {
       versionPattern: /^<!-- driftseal-decisions-version: (\d+) -->\r?$/m,
       replacement: decisionBlock,
       knownManagedBlocks: [
-        protocolEol(decisionProtocolBlock(2), eol),
-        protocolEol(decisionProtocolBlock(3), eol),
-        protocolEol(decisionProtocolBlock(4), eol),
-        protocolEol(decisionProtocolBlock(5), eol),
+        protocolEol(previousDecisionProtocolBlock(2), eol),
+        protocolEol(previousDecisionProtocolBlock(3), eol),
+        protocolEol(previousDecisionProtocolBlock(4), eol),
+        protocolEol(previousDecisionProtocolBlock(5), eol),
+        protocolEol(previousDecisionProtocolBlock(6), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });

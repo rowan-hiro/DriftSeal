@@ -1041,7 +1041,9 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /Log access goes only through DriftSeal/);
   assert.match(first, /driftseal reclaim \[id \.\.\.\] --reason/);
   assert.match(first, /never\s+deletes log lines/);
-  assert.match(first, /driftseal-version: 6/);
+  assert.match(first, /resume it when its\s+objective still matches/);
+  assert.match(first, /--driver "<decision driver>"/);
+  assert.match(first, /driftseal-version: 7/);
   assert.match(first, /<!-- \/driftseal -->/);
 
   runIn(['init']); // second run must not duplicate
@@ -1056,7 +1058,17 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
-  const versionFive = first
+  const versionSix = first
+    .replace('driftseal-version: 7', 'driftseal-version: 6')
+    .replace('driftseal-decisions-version: 7', 'driftseal-decisions-version: 6')
+    .replace(
+      'doing anything else. The open intent is the source of truth: resume it when its\n' +
+        '   objective still matches the current task; otherwise close it (`partial` or\n' +
+        '   `abandoned`, with a note) and `begin` a new one.',
+      'doing anything else. The open intent is the source of truth.'
+    )
+    .replace(' --driver "<decision driver>"', '');
+  const versionFive = versionSix
     .replace('driftseal-version: 6', 'driftseal-version: 5')
     .replace('driftseal-decisions-version: 6', 'driftseal-decisions-version: 5')
     .replace(
@@ -1095,16 +1107,25 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 6/);
-  assert.match(upgraded, /driftseal-decisions-version: 6/);
+  assert.match(upgraded, /driftseal-version: 7/);
+  assert.match(upgraded, /driftseal-decisions-version: 7/);
   assert.match(upgraded, /# trailing user instructions/);
+
+  const upgradeSixCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v6-'));
+  const upgradeSixFile = path.join(upgradeSixCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeSixFile, versionSix.trimEnd() + '\n');
+  run(['init'], { cwd: upgradeSixCwd });
+  const upgradedSix = fs.readFileSync(upgradeSixFile, 'utf8');
+  assert.match(upgradedSix, /driftseal-version: 7/);
+  assert.match(upgradedSix, /resume it when its\s+objective still matches/);
+  assert.match(upgradedSix, /--driver "<decision driver>"/);
 
   const upgradeFiveCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v5-'));
   const upgradeFiveFile = path.join(upgradeFiveCwd, 'AGENTS.md');
   fs.writeFileSync(upgradeFiveFile, versionFive.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFiveCwd });
   const upgradedFive = fs.readFileSync(upgradeFiveFile, 'utf8');
-  assert.match(upgradedFive, /driftseal-version: 6/);
+  assert.match(upgradedFive, /driftseal-version: 7/);
   assert.match(upgradedFive, /Log access goes only through DriftSeal/);
 
   const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
@@ -1112,8 +1133,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFourCwd });
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
-  assert.match(upgradedFour, /driftseal-version: 6/);
-  assert.match(upgradedFour, /driftseal-decisions-version: 6/);
+  assert.match(upgradedFour, /driftseal-version: 7/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 7/);
   assert.match(upgradedFour, /need no intent/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
@@ -1128,7 +1149,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 6/);
+  assert.match(upgradedCrLf, /driftseal-version: 7/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -1159,7 +1180,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 6', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 7', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -1189,14 +1210,15 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 6 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 7 -->\n', '')
+    .replace(' --driver "<decision driver>"', '')
     .replace('\n<!-- /driftseal-decisions -->', '');
   fs.writeFileSync(legacyFile, `# existing instructions\n\n${legacyDecision}\n`);
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 6/);
-  assert.match(migratedLegacy, /driftseal-version: 6/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 7/);
+  assert.match(migratedLegacy, /driftseal-version: 7/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
 });
