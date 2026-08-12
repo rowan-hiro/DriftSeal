@@ -56,7 +56,10 @@ function spawnResult(args, env) {
 test('package metadata identifies the DriftSeal CLI, ownership, and support URLs', () => {
   const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.equal(metadata.name, 'driftseal');
-  assert.deepEqual(metadata.bin, { driftseal: 'bin/driftseal.js' });
+  assert.deepEqual(metadata.bin, {
+    driftseal: 'bin/driftseal.js',
+    'driftseal-mcp': 'bin/driftseal-mcp.js',
+  });
   assert.deepEqual(metadata.repository, {
     type: 'git',
     url: 'git+https://github.com/ruanboyu/driftseal.git',

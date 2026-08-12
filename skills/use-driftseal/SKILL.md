@@ -11,15 +11,23 @@ activity streams.
 
 ## Locate DriftSeal
 
+- Prefer the `driftseal_*` MCP tools when the DriftSeal MCP server is available
+  for the target repository. Use `driftseal_status`, `driftseal_begin`,
+  `driftseal_end`, and the corresponding decision tools instead of invoking the
+  CLI through a shell.
 - Work from the repository root unless its instructions specify another scope.
-- Prefer `driftseal` from `PATH`. In a DriftSeal source checkout, fall back to
-  `node bin/driftseal.js` when the global command is unavailable.
-- Follow the repository's `AGENTS.md` and storage overrides such as `DRIFTSEAL_HOME`.
+- When MCP is unavailable, prefer `driftseal` from `PATH`. In a DriftSeal source
+  checkout, fall back to `node bin/driftseal.js` when the global command is
+  unavailable.
+- Follow the repository's `AGENTS.md`. Storage overrides such as
+  `DRIFTSEAL_HOME` apply to CLI use; the MCP server deliberately keeps state in
+  its fixed repository root.
 - If DriftSeal is unavailable, limit activity to read-only discovery and report the
   blocker. Do not mutate the repository without the required log.
 
-Use one command form consistently within a round. The examples below use
-`driftseal`; substitute the local source command when necessary.
+Use one interface consistently within a round. The examples below use
+`driftseal`; map them directly to the same-named MCP workflow when MCP is
+available, or substitute the local source command when necessary.
 
 ## Re-anchor Before Acting
 
