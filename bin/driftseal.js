@@ -40,6 +40,42 @@ const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
 
+class DriftSealError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'DriftSealError';
+  }
+}
+
+let activeOutput = null;
+
+function printLine(value = '') {
+  const text = String(value);
+  if (activeOutput) {
+    activeOutput.stdout += text + '\n';
+    return;
+  }
+  console.log(text);
+}
+
+function printError(value = '') {
+  const text = String(value);
+  if (activeOutput) {
+    activeOutput.stderr += text + '\n';
+    return;
+  }
+  console.error(text);
+}
+
+function writeOutput(value) {
+  const text = String(value);
+  if (activeOutput) {
+    activeOutput.stdout += text;
+    return;
+  }
+  process.stdout.write(text);
+}
+
 if (process.env._DRIFTSEAL_TEST_UMASK) {
   process.umask(Number.parseInt(process.env._DRIFTSEAL_TEST_UMASK, 8));
 }
@@ -176,7 +212,8 @@ function readEvents({ repairTail = false } = {}) {
     .map((line, i) => {
       try {
         return normalizeEvent(JSON.parse(line), i + 1);
-      } catch {
+      } catch (err) {
+        if (err instanceof DriftSealError) throw err;
         fail(`corrupt log line ${i + 1} in ${file}`);
       }
     });
@@ -928,8 +965,7 @@ function closeIntentAsEscape(events, record, requestedStatus, note, verifyResult
 }
 
 function fail(msg) {
-  console.error(`driftseal: error: ${msg}`);
-  process.exit(1);
+  throw new DriftSealError(msg);
 }
 
 function positiveInteger(value, flag) {
@@ -1003,6 +1039,32 @@ function render(rec) {
   if (rec.note) lines.push(`  note: ${rec.note}`);
   lines.push(`  began: ${rec.tsBegin}` + (rec.tsEnd ? `  ended: ${rec.tsEnd}` : ''));
   return lines.join('\n');
+}
+
+function publicIntent(rec) {
+  if (!rec) return null;
+  return {
+    id: rec.id,
+    intent: rec.intent,
+    verify: rec.verify,
+    decisions: [...rec.decisions],
+    status: rec.status,
+    note: rec.note,
+    verifyResult: rec.verifyResult,
+    beganAt: rec.tsBegin,
+    endedAt: rec.tsEnd,
+  };
+}
+
+function publicDecision(decision, { includeContent = false } = {}) {
+  const record = {
+    id: decision.id,
+    title: decision.title,
+    status: decision.status,
+    file: decision.file,
+  };
+  if (includeContent) record.content = decision.content;
+  return record;
 }
 
 const INTENT_PROTOCOL_MARKER = '<!-- driftseal -->';
@@ -1232,19 +1294,21 @@ const commands = {
         'superseded by --force',
         null
       );
-      console.error(`driftseal: ${status} ${open.id}`);
+      printError(`driftseal: ${status} ${open.id}`);
     }
 
     const id = nextId(events);
-    appendEvent({
+    events.push(appendEvent({
       type: 'begin',
       id,
       ts: new Date().toISOString(),
       intent,
       verify: flags.verify || null,
       decisions,
-    });
-    console.log(id);
+    }));
+    const record = fold(events).find((candidate) => candidate.id === id);
+    printLine(id);
+    return publicIntent(record);
   },
 
   end(argv) {
@@ -1279,8 +1343,9 @@ const commands = {
         flags.note,
         flags['verify-result']
       );
-      console.log(`${target.id} ${terminalStatus}`);
-      return;
+      const record = fold(events).find((candidate) => candidate.id === target.id);
+      printLine(`${target.id} ${terminalStatus}`);
+      return publicIntent(record);
     }
 
     if (['completed', 'partial'].includes(status) && target.decisions.length > 0) {
@@ -1317,15 +1382,17 @@ const commands = {
       }
     }
 
-    appendEvent({
+    events.push(appendEvent({
       type: 'end',
       id: target.id,
       ts: new Date().toISOString(),
       status,
       note: flags.note || null,
       verifyResult: flags['verify-result'] || null,
-    });
-    console.log(`${target.id} ${status}`);
+    }));
+    const record = fold(events).find((candidate) => candidate.id === target.id);
+    printLine(`${target.id} ${status}`);
+    return publicIntent(record);
   },
 
   status(argv) {
@@ -1333,10 +1400,11 @@ const commands = {
     if (positionals.length > 0) fail('usage: driftseal status');
     const open = openIntent(fold(readEvents({ repairTail: true })));
     if (!open) {
-      console.log('no intent in progress');
-      return;
+      printLine('no intent in progress');
+      return null;
     }
-    console.log(render(open));
+    printLine(render(open));
+    return publicIntent(open);
   },
 
   log(argv) {
@@ -1348,10 +1416,11 @@ const commands = {
       records = records.slice(-n);
     }
     if (records.length === 0) {
-      console.log('log is empty');
-      return;
+      printLine('log is empty');
+      return [];
     }
-    console.log(records.map(render).join('\n\n'));
+    printLine(records.map(render).join('\n\n'));
+    return records.map(publicIntent);
   },
 
   decision(argv) {
@@ -1392,8 +1461,9 @@ const commands = {
       });
       ensureDirectoryDurable(decisionDir());
       atomicCreateFile(path.join(decisionDir(), file), content);
-      console.log(path.join(decisionDir(), file));
-      return;
+      const decision = findDecision(String(id));
+      printLine(path.join(decisionDir(), file));
+      return publicDecision(decision, { includeContent: true });
     }
 
     if (subcommand === 'update') {
@@ -1431,8 +1501,9 @@ const commands = {
         fail('simulated interruption after decision write');
       }
       appendEvent(reconciliationEvent('decision_reconcile_commit', update));
-      console.log(`${decision.id} ${update.fromStatus} -> ${update.toStatus} (${intent.id})`);
-      return;
+      const reconciled = findDecision(decision.id);
+      printLine(`${decision.id} ${update.fromStatus} -> ${update.toStatus} (${intent.id})`);
+      return publicDecision(reconciled, { includeContent: true });
     }
 
     if (subcommand === 'list') {
@@ -1448,8 +1519,8 @@ const commands = {
       }
       const index = decisionIndex();
       if (flags.count && !status) {
-        console.log(index.length);
-        return;
+        printLine(index.length);
+        return { count: index.length };
       }
       let records = decisionCatalog(!status && last ? index.slice(-last) : index);
       if (status) {
@@ -1457,19 +1528,19 @@ const commands = {
       }
       if (status && last) records = records.slice(-last);
       if (flags.count) {
-        console.log(records.length);
-        return;
+        printLine(records.length);
+        return { count: records.length };
       }
       if (records.length === 0) {
-        console.log(status ? `no decision records with status ${status}` : 'decision log is empty');
-        return;
+        printLine(status ? `no decision records with status ${status}` : 'decision log is empty');
+        return [];
       }
-      console.log(
+      printLine(
         records
           .map((record) => `[${record.id}] ${titleCase(record.status)} — ${record.title}\n  ${record.file}`)
           .join('\n')
       );
-      return;
+      return records.map(publicDecision);
     }
 
     if (subcommand === 'show') {
@@ -1478,8 +1549,8 @@ const commands = {
         fail('usage: driftseal decision show <id>');
       }
       const decision = findDecision(positionals[0]);
-      process.stdout.write(decision.content);
-      return;
+      writeOutput(decision.content);
+      return publicDecision(decision, { includeContent: true });
     }
 
     fail('usage: driftseal decision add|update|list|show (run: driftseal help)');
@@ -1539,15 +1610,16 @@ const commands = {
     }
 
     if (updated === current) {
-      console.log('AGENTS.md already contains the DriftSeal protocols; nothing to do');
-      return;
+      printLine('AGENTS.md already contains the DriftSeal protocols; nothing to do');
+      return { changed: false, target };
     }
     atomicWriteFile(target, updated);
-    console.log(`DriftSeal protocol ${existed ? 'updated in' : 'written to'} ${target}`);
+    printLine(`DriftSeal protocol ${existed ? 'updated in' : 'written to'} ${target}`);
+    return { changed: true, target };
   },
 
   help() {
-    console.log(`DriftSeal — Seal the intent. Stop the drift.
+    printLine(`DriftSeal — Seal the intent. Stop the drift.
 
 Intent-level write-ahead log for agent sessions.
 
@@ -1573,6 +1645,7 @@ decision add options:
 
 intent log: $DRIFTSEAL_HOME/events.jsonl, or .intent-log/events.jsonl
 decision log: $DRIFTSEAL_DECISION_HOME, or .decision-log/ in the current directory`);
+    return null;
   },
 };
 
@@ -1595,11 +1668,10 @@ function mutationResources(cmd, argv) {
   return [logDir(), decisionDir()];
 }
 
-function main() {
-  const [cmd, ...rest] = process.argv.slice(2);
+function dispatch(argv) {
+  const [cmd, ...rest] = argv;
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
-    commands.help();
-    process.exit(cmd ? 0 : 1);
+    return { data: commands.help(), exitCode: cmd ? 0 : 1 };
   }
   const fn = commands[cmd];
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
@@ -1609,10 +1681,144 @@ function main() {
   const readsIntentLog = ['status', 'log'].includes(cmd);
   if (mutates || readsIntentLog) {
     const resources = readsIntentLog ? [logDir()] : mutationResources(cmd, rest);
-    withMutationLocks(resources, () => fn(rest));
-  } else {
-    fn(rest);
+    return { data: withMutationLocks(resources, () => fn(rest)), exitCode: 0 };
+  }
+  return { data: fn(rest), exitCode: 0 };
+}
+
+function repositoryRoot(root) {
+  if (typeof root !== 'string' || root.trim().length === 0) {
+    fail('repository root must be a non-empty path');
+  }
+  const resolved = path.resolve(root);
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    fail(`repository root does not exist: ${resolved}`);
+  }
+  if (!stat.isDirectory()) fail(`repository root is not a directory: ${resolved}`);
+  return fs.realpathSync(resolved);
+}
+
+function runCommand(argv, { root = process.cwd(), isolateStorage = false, capture = true } = {}) {
+  if (!Array.isArray(argv) || argv.some((arg) => typeof arg !== 'string')) {
+    fail('command arguments must be an array of strings');
+  }
+  if (capture && activeOutput) fail('nested captured DriftSeal commands are not supported');
+
+  const fixedRoot = repositoryRoot(root);
+  const previousCwd = process.cwd();
+  const previousIntentHome = process.env.DRIFTSEAL_HOME;
+  const previousDecisionHome = process.env.DRIFTSEAL_DECISION_HOME;
+  const output = { stdout: '', stderr: '', data: null, exitCode: 0 };
+  const previousOutput = activeOutput;
+
+  try {
+    process.chdir(fixedRoot);
+    if (isolateStorage) {
+      delete process.env.DRIFTSEAL_HOME;
+      delete process.env.DRIFTSEAL_DECISION_HOME;
+    }
+    if (capture) activeOutput = output;
+    const result = dispatch(argv);
+    output.data = result.data;
+    output.exitCode = result.exitCode;
+    return output;
+  } catch (err) {
+    if (capture) {
+      err.stdout = output.stdout;
+      err.stderr = output.stderr;
+    }
+    throw err;
+  } finally {
+    activeOutput = previousOutput;
+    process.chdir(previousCwd);
+    if (previousIntentHome === undefined) delete process.env.DRIFTSEAL_HOME;
+    else process.env.DRIFTSEAL_HOME = previousIntentHome;
+    if (previousDecisionHome === undefined) delete process.env.DRIFTSEAL_DECISION_HOME;
+    else process.env.DRIFTSEAL_DECISION_HOME = previousDecisionHome;
   }
 }
 
-main();
+function appendFlag(argv, flag, value) {
+  if (value !== undefined && value !== null && value !== '') argv.push(flag, String(value));
+}
+
+function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
+  const fixedRoot = repositoryRoot(root);
+  const call = (argv) => runCommand(argv, { root: fixedRoot, isolateStorage, capture: true }).data;
+  return Object.freeze({
+    root: fixedRoot,
+    status() {
+      return call(['status']);
+    },
+    begin({ intent, verify, decisions = [], force = false }) {
+      const argv = ['begin', intent];
+      appendFlag(argv, '--verify', verify);
+      for (const decision of decisions) appendFlag(argv, '--decision', decision);
+      if (force) argv.push('--force');
+      return call(argv);
+    },
+    end({ id, status, note, verifyResult } = {}) {
+      const argv = ['end'];
+      if (id) argv.push(String(id));
+      appendFlag(argv, '--status', status);
+      appendFlag(argv, '--note', note);
+      appendFlag(argv, '--verify-result', verifyResult);
+      return call(argv);
+    },
+    log({ last } = {}) {
+      const argv = ['log'];
+      appendFlag(argv, '--last', last);
+      return call(argv);
+    },
+    decisionAdd({ title, context, outcome, status, drivers = [], options = [], consequences = [] }) {
+      const argv = ['decision', 'add', title, '--context', context, '--outcome', outcome];
+      appendFlag(argv, '--status', status);
+      for (const driver of drivers) appendFlag(argv, '--driver', driver);
+      for (const option of options) appendFlag(argv, '--option', option);
+      for (const consequence of consequences) appendFlag(argv, '--consequence', consequence);
+      return call(argv);
+    },
+    decisionUpdate({ id, status, note }) {
+      const argv = ['decision', 'update', String(id), '--note', note];
+      appendFlag(argv, '--status', status);
+      return call(argv);
+    },
+    decisionList({ status, last, count = false } = {}) {
+      const argv = ['decision', 'list'];
+      appendFlag(argv, '--status', status);
+      appendFlag(argv, '--last', last);
+      if (count) argv.push('--count');
+      return call(argv);
+    },
+    decisionShow({ id }) {
+      return call(['decision', 'show', String(id)]);
+    },
+    init() {
+      return call(['init']);
+    },
+  });
+}
+
+function main() {
+  try {
+    const result = dispatch(process.argv.slice(2));
+    process.exitCode = result.exitCode;
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    console.error(`driftseal: error: ${message}`);
+    process.exitCode = 1;
+  }
+}
+
+module.exports = {
+  DECISION_STATUSES,
+  END_STATUSES,
+  DriftSealError,
+  createApi,
+  runCommand,
+};
+
+if (require.main === module) main();

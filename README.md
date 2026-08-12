@@ -12,7 +12,7 @@ Before an agent touches the code, DriftSeal records what this round will accompl
 seal intent → do the work → prove the result → close the round
 ```
 
-**One open intent. One declared proof. One durable trail.** No service, no database, no runtime dependencies—just a Node.js CLI and plain files that travel with the repo.
+**One open intent. One declared proof. One durable trail.** No service and no database—just local Node.js tools and plain files that travel with the repo.
 
 ## The problem is not speed. It is drift.
 
@@ -45,6 +45,44 @@ npm link
 ## Give your coding agent the complete workflow
 
 The package includes `skills/use-driftseal`, an agent-agnostic companion skill that drives repository work through the complete DriftSeal loop while keeping decision records selective. Install or link it using your agent runtime’s skill discovery convention, then invoke `use-driftseal` by name.
+
+## Use DriftSeal through MCP
+
+The same package includes `driftseal-mcp`, a local stdio MCP server. It exposes
+structured tools for the complete intent and decision workflow while reusing the
+same locking, WAL, atomic-write, schema, and recovery implementation as the CLI.
+The server never shells out to `driftseal` and does not parse CLI output.
+
+Fix the server to one repository when starting it:
+
+```sh
+driftseal-mcp --root /absolute/path/to/repository
+```
+
+For Codex, add the installed command as a stdio MCP server:
+
+```sh
+codex mcp add driftseal -- driftseal-mcp --root /absolute/path/to/repository
+```
+
+The root is startup configuration, not a tool input. In MCP mode DriftSeal also
+ignores inherited `DRIFTSEAL_HOME` and `DRIFTSEAL_DECISION_HOME` overrides, so a
+tool call cannot redirect writes outside the selected repository.
+
+The v1 server provides:
+
+| MCP capability | Purpose |
+| --- | --- |
+| `driftseal_status`, `driftseal_log` | Read the current intent and intent history. |
+| `driftseal_begin`, `driftseal_end` | Open and honestly close a work round. |
+| `driftseal_decision_list`, `driftseal_decision_show` | Find and read MADR records. |
+| `driftseal_decision_add`, `driftseal_decision_update` | Add selective decisions and reconcile linked ones. |
+| `driftseal://intent/current` | Read the current intent as a JSON resource. |
+| `driftseal://intents/recent` | Read the ten most recent intents as a JSON resource. |
+| `driftseal://decisions` | Read the decision catalog as a JSON resource. |
+
+The companion skill remains important: MCP supplies controlled, structured
+operations; the skill teaches the agent when to use them and how to avoid drift.
 
 ## A work round
 

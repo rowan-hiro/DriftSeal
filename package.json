@@ -1,6 +1,6 @@
 {
   "name": "driftseal",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Seal intent, verification, and decisions into an auditable workflow for agentic coding",
   "keywords": [
     "driftseal",
@@ -25,7 +25,8 @@
   "type": "commonjs",
   "main": "index.js",
   "bin": {
-    "driftseal": "bin/driftseal.js"
+    "driftseal": "bin/driftseal.js",
+    "driftseal-mcp": "bin/driftseal-mcp.js"
   },
   "directories": {
     "test": "test"
@@ -42,5 +43,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
   }
 }

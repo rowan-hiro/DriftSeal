@@ -12,7 +12,7 @@ Agentic coding 可以很快。**DriftSeal 让这种快不以失控为代价。**
 封存 intent → 执行工作 → 证明结果 → 关闭本轮
 ```
 
-**一个 open intent，一份预先声明的验证标准，一条可靠留存的工作轨迹。** 不需要 service，不需要 database，也没有 runtime dependencies；只有一个 Node.js CLI，以及跟着 repo 一起走的普通文件。
+**一个 open intent，一份预先声明的验证标准，一条可靠留存的工作轨迹。** 不需要 service，也不需要 database；只有本地 Node.js tools，以及跟着 repo 一起走的普通文件。
 
 ## 真正麻烦的不是慢，而是偏航
 
@@ -45,6 +45,44 @@ npm link
 ## 让 coding agent 掌握完整工作流
 
 npm package 内含 `skills/use-driftseal`。这是一个不绑定特定 agent runtime 的配套 skill，会按完整 DriftSeal 闭环执行仓库任务，同时克制地使用 decision record。按照所用 agent runtime 的 skill discovery 约定安装或 link，之后通过名称 `use-driftseal` 调用即可。
+
+## 通过 MCP 使用 DriftSeal
+
+同一个 package 还提供本地 stdio MCP server：`driftseal-mcp`。它为完整的
+intent 与 decision 工作流提供结构化 tools，并与 CLI 复用同一套锁、WAL、
+atomic write、schema 和 recovery 实现。server 不会启动 `driftseal` 子进程，
+也不需要解析 CLI 输出。
+
+启动时把 server 固定到一个 repository：
+
+```sh
+driftseal-mcp --root /absolute/path/to/repository
+```
+
+在 Codex 中，可以把安装后的命令添加为 stdio MCP server：
+
+```sh
+codex mcp add driftseal -- driftseal-mcp --root /absolute/path/to/repository
+```
+
+root 只能在启动时配置，不是 tool input。MCP 模式也会忽略继承到进程中的
+`DRIFTSEAL_HOME` 和 `DRIFTSEAL_DECISION_HOME` override，因此 tool call 不能把
+写入重定向到所选 repository 之外。
+
+v1 server 提供：
+
+| MCP capability | 用途 |
+| --- | --- |
+| `driftseal_status`, `driftseal_log` | 读取当前 intent 和 intent 历史。 |
+| `driftseal_begin`, `driftseal_end` | 开启并诚实关闭一轮工作。 |
+| `driftseal_decision_list`, `driftseal_decision_show` | 查找并读取 MADR record。 |
+| `driftseal_decision_add`, `driftseal_decision_update` | 克制地增加 decision，并 reconcile 已关联的 decision。 |
+| `driftseal://intent/current` | 以 JSON resource 读取当前 intent。 |
+| `driftseal://intents/recent` | 以 JSON resource 读取最近十条 intent。 |
+| `driftseal://decisions` | 以 JSON resource 读取 decision catalog。 |
+
+配套 skill 仍然不可替代：MCP 提供受控、结构化的操作，skill 则告诉 agent
+何时使用这些操作，以及怎样避免 drift。
 
 ## 一轮标准工作流
 
