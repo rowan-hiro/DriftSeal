@@ -62,11 +62,11 @@ test('package metadata identifies the DriftSeal CLI, ownership, and support URLs
   });
   assert.deepEqual(metadata.repository, {
     type: 'git',
-    url: 'git+https://github.com/ruanboyu/driftseal.git',
+    url: 'git+https://github.com/rowan-hiro/DriftSeal.git',
   });
-  assert.equal(metadata.homepage, 'https://github.com/ruanboyu/driftseal#readme');
+  assert.equal(metadata.homepage, 'https://github.com/rowan-hiro/DriftSeal#readme');
   assert.deepEqual(metadata.bugs, {
-    url: 'https://github.com/ruanboyu/driftseal/issues',
+    url: 'https://github.com/rowan-hiro/DriftSeal/issues',
   });
   assert.equal(metadata.author, 'Ruan Boyu <boyuruan@gmail.com>');
 });

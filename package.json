@@ -1,6 +1,6 @@
 {
   "name": "driftseal",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Seal intent, verification, and decisions into an auditable workflow for agentic coding",
   "keywords": [
     "driftseal",
@@ -12,13 +12,13 @@
     "decision-log",
     "madr"
   ],
-  "homepage": "https://github.com/ruanboyu/driftseal#readme",
+  "homepage": "https://github.com/rowan-hiro/DriftSeal#readme",
   "bugs": {
-    "url": "https://github.com/ruanboyu/driftseal/issues"
+    "url": "https://github.com/rowan-hiro/DriftSeal/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ruanboyu/driftseal.git"
+    "url": "git+https://github.com/rowan-hiro/DriftSeal.git"
   },
   "license": "MIT",
   "author": "Ruan Boyu <boyuruan@gmail.com>",
