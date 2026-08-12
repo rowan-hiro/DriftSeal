@@ -34,8 +34,8 @@ const DECISION_STATUSES = [
   'deprecated',
   'superseded',
 ];
-const EVENT_SCHEMA_VERSION = 2;
-const PROTOCOL_VERSION = 5;
+const EVENT_SCHEMA_VERSION = 3;
+const PROTOCOL_VERSION = 6;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
@@ -127,6 +127,13 @@ function normalizeEvent(event, line) {
 
   if (event.type === 'end') {
     if (!END_STATUSES.includes(event.status)) fail(`invalid end event on log line ${line}`);
+    return event;
+  }
+
+  if (event.type === 'reclaim' || event.type === 'unreclaim') {
+    if (typeof event.reason !== 'string' || event.reason.trim().length === 0) {
+      fail(`invalid ${event.type} event on log line ${line}`);
+    }
     return event;
   }
 
@@ -566,8 +573,28 @@ function fold(events) {
         tsEnd: null,
         note: null,
         verifyResult: null,
+        reclaimed: false,
+        reclaimReason: null,
+        reclaimedAt: null,
       });
       order.push(ev.id);
+    } else if (ev.type === 'reclaim' || ev.type === 'unreclaim') {
+      const rec = records.get(ev.id);
+      if (!rec) fail(`${ev.type} event references unknown intent id: ${ev.id}`);
+      if (ev.type === 'reclaim') {
+        if (rec.status === 'in_progress') {
+          fail(`cannot reclaim intent ${ev.id} while it is in_progress`);
+        }
+        if (rec.reclaimed) fail(`duplicate reclaim event for intent id: ${ev.id}`);
+        rec.reclaimed = true;
+        rec.reclaimReason = ev.reason;
+        rec.reclaimedAt = ev.ts;
+      } else {
+        if (!rec.reclaimed) fail(`unreclaim event for intent id that is not reclaimed: ${ev.id}`);
+        rec.reclaimed = false;
+        rec.reclaimReason = null;
+        rec.reclaimedAt = null;
+      }
     } else if (ev.type === 'end') {
       const rec = records.get(ev.id);
       if (!rec) fail(`end event references unknown intent id: ${ev.id}`);
@@ -1038,6 +1065,7 @@ function render(rec) {
   if (rec.verifyResult) lines.push(`  verify-result: ${rec.verifyResult}`);
   if (rec.note) lines.push(`  note: ${rec.note}`);
   lines.push(`  began: ${rec.tsBegin}` + (rec.tsEnd ? `  ended: ${rec.tsEnd}` : ''));
+  if (rec.reclaimed) lines.push(`  reclaimed: ${rec.reclaimReason}`);
   return lines.join('\n');
 }
 
@@ -1053,6 +1081,9 @@ function publicIntent(rec) {
     verifyResult: rec.verifyResult,
     beganAt: rec.tsBegin,
     endedAt: rec.tsEnd,
+    reclaimed: rec.reclaimed,
+    reclaimReason: rec.reclaimReason,
+    reclaimedAt: rec.reclaimedAt,
   };
 }
 
@@ -1104,12 +1135,27 @@ This repo uses DriftSeal (\`driftseal\`) to prevent agent drift. Every work roun
 4. **Re-anchor after context loss**: run \`driftseal status\` and \`driftseal log --last 3\` before
    doing anything else. The open intent is the source of truth.
 
+**Log access goes only through DriftSeal.** Never read, edit, move, or delete
+\`.intent-log/events.jsonl\` (or anything under \`$DRIFTSEAL_HOME\`) directly; use
+\`driftseal\` commands or the MCP tools. Retire meaningless closed records with
+\`driftseal reclaim [id ...] --reason "<why>"\` — it appends a marker, never
+deletes log lines; \`driftseal unreclaim <id> --reason "<why>"\` restores one.
+
 Log: \`.intent-log/events.jsonl\` (override with \`$DRIFTSEAL_HOME\`); commit it with the code.
 ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version) {
-  const v4 = intentProtocolBlock(version).replace(
+  const v5 = intentProtocolBlock(version).replace(
+    '\n**Log access goes only through DriftSeal.** Never read, edit, move, or delete\n' +
+      '`.intent-log/events.jsonl` (or anything under `$DRIFTSEAL_HOME`) directly; use\n' +
+      '`driftseal` commands or the MCP tools. Retire meaningless closed records with\n' +
+      '`driftseal reclaim [id ...] --reason "<why>"` — it appends a marker, never\n' +
+      'deletes log lines; `driftseal unreclaim <id> --reason "<why>"` restores one.\n',
+    ''
+  );
+  if (version >= 5) return v5;
+  const v4 = v5.replace(
     '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
       '   making any other change that may need a rollback:\n' +
       '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
@@ -1408,9 +1454,10 @@ const commands = {
   },
 
   log(argv) {
-    const { positionals, flags } = parseArgs(argv, { last: '-n' });
-    if (positionals.length > 0) fail('usage: driftseal log [--last N]');
+    const { positionals, flags } = parseArgs(argv, { last: '-n', all: 'boolean' });
+    if (positionals.length > 0) fail('usage: driftseal log [--last N] [--all]');
     let records = fold(readEvents({ repairTail: true }));
+    if (!flags.all) records = records.filter((record) => !record.reclaimed);
     if (flags.last) {
       const n = positiveInteger(flags.last, '--last');
       records = records.slice(-n);
@@ -1421,6 +1468,109 @@ const commands = {
     }
     printLine(records.map(render).join('\n\n'));
     return records.map(publicIntent);
+  },
+
+  reclaim(argv) {
+    const { positionals, flags } = parseArgs(argv, {
+      reason: '-r',
+      'older-than': 'single',
+      force: 'boolean',
+      'dry-run': 'boolean',
+    });
+    const reason = flags.reason && flags.reason.trim();
+    if (!reason) {
+      fail(
+        'usage: driftseal reclaim [id ...] --reason "<why>" [--older-than <days>] [--force] [--dry-run]'
+      );
+    }
+    let olderThanDays = 7;
+    if (flags['older-than'] !== undefined) {
+      olderThanDays = positiveInteger(flags['older-than'], '--older-than');
+    }
+
+    const records = fold(readEvents({ repairTail: true }));
+    let targets;
+    if (positionals.length > 0) {
+      const ids = [...new Set(positionals)];
+      targets = ids.map((id) => {
+        const record = records.find((candidate) => candidate.id === id);
+        if (!record) fail(`unknown intent id: ${id}`);
+        if (record.status === 'in_progress') {
+          fail(`cannot reclaim intent ${id} while it is in_progress`);
+        }
+        if (record.reclaimed) fail(`intent ${id} is already reclaimed`);
+        const routine = ['failed', 'abandoned'].includes(record.status) &&
+          record.decisions.length === 0;
+        if (!routine && !flags.force) {
+          fail(
+            `intent ${id} is ${record.status}` +
+              (record.decisions.length > 0 ? ' and linked to decisions' : '') +
+              '; re-run with --force to reclaim it anyway'
+          );
+        }
+        return record;
+      });
+    } else {
+      if (flags.force) fail('--force requires explicit intent ids');
+      const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+      targets = records.filter(
+        (record) =>
+          record.status !== 'in_progress' &&
+          ['failed', 'abandoned'].includes(record.status) &&
+          record.decisions.length === 0 &&
+          !record.reclaimed &&
+          Date.parse(record.tsEnd) < cutoff
+      );
+      if (targets.length === 0) {
+        printLine('no reclaimable intents');
+        return [];
+      }
+    }
+
+    if (flags['dry-run']) {
+      printLine(targets.map((record) => `${record.id} ${record.status} — ${record.intent}`).join('\n'));
+      return targets.map(publicIntent);
+    }
+
+    let events = readEvents({ repairTail: true });
+    for (const record of targets) {
+      events.push(
+        appendEvent({
+          type: 'reclaim',
+          id: record.id,
+          ts: new Date().toISOString(),
+          reason,
+        })
+      );
+    }
+    const reclaimed = fold(events).filter((record) =>
+      targets.some((target) => target.id === record.id)
+    );
+    printLine(targets.map((record) => `${record.id} reclaimed`).join('\n'));
+    return reclaimed.map(publicIntent);
+  },
+
+  unreclaim(argv) {
+    const { positionals, flags } = parseArgs(argv, { reason: '-r' });
+    const reason = flags.reason && flags.reason.trim();
+    if (positionals.length !== 1 || !reason) {
+      fail('usage: driftseal unreclaim <id> --reason "<why>"');
+    }
+    const events = readEvents({ repairTail: true });
+    const record = fold(events).find((candidate) => candidate.id === positionals[0]);
+    if (!record) fail(`unknown intent id: ${positionals[0]}`);
+    if (!record.reclaimed) fail(`intent ${positionals[0]} is not reclaimed`);
+    events.push(
+      appendEvent({
+        type: 'unreclaim',
+        id: record.id,
+        ts: new Date().toISOString(),
+        reason,
+      })
+    );
+    const restored = fold(events).find((candidate) => candidate.id === record.id);
+    printLine(`${record.id} unreclaimed`);
+    return publicIntent(restored);
   },
 
   decision(argv) {
@@ -1576,6 +1726,7 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(2), eol),
         protocolEol(previousIntentProtocolBlock(3), eol),
         protocolEol(previousIntentProtocolBlock(4), eol),
+        protocolEol(previousIntentProtocolBlock(5), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -1590,6 +1741,7 @@ const commands = {
         protocolEol(decisionProtocolBlock(2), eol),
         protocolEol(decisionProtocolBlock(3), eol),
         protocolEol(decisionProtocolBlock(4), eol),
+        protocolEol(decisionProtocolBlock(5), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });
@@ -1627,7 +1779,11 @@ usage:
   driftseal begin "<intent>" [--verify "<how to verify>"] [--decision <id>] [--force]
   driftseal end [id] [--status completed|partial|failed|abandoned] [--note "..."] [--verify-result "..."]
   driftseal status                     show the intent currently in progress (re-anchor after drift)
-  driftseal log [--last N]             show intent history
+  driftseal log [--last N] [--all]     show intent history (--all includes reclaimed records)
+  driftseal reclaim [id ...] --reason "<why>" [--older-than <days>] [--force] [--dry-run]
+                                 hide meaningless closed records without deleting them
+  driftseal unreclaim <id> --reason "<why>"
+                                 restore a reclaimed record to the visible log
   driftseal decision add "<title>" --context "..." --outcome "..." [options]
   driftseal decision update <id> [--status STATUS] --note "..."
                                  reconcile a linked decision in the open intent
@@ -1659,6 +1815,7 @@ function requestedEndStatus(argv) {
 
 function mutationResources(cmd, argv) {
   if (cmd === 'init') return [process.cwd()];
+  if (cmd === 'reclaim' || cmd === 'unreclaim') return [logDir()];
   if (cmd === 'begin' && !argv.some((arg) => arg === '--decision' || arg.startsWith('--decision='))) {
     return [logDir()];
   }
@@ -1676,7 +1833,7 @@ function dispatch(argv) {
   const fn = commands[cmd];
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
   const mutates =
-    ['begin', 'end', 'init'].includes(cmd) ||
+    ['begin', 'end', 'init', 'reclaim', 'unreclaim'].includes(cmd) ||
     (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
   const readsIntentLog = ['status', 'log'].includes(cmd);
   if (mutates || readsIntentLog) {
@@ -1768,10 +1925,21 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
       appendFlag(argv, '--verify-result', verifyResult);
       return call(argv);
     },
-    log({ last } = {}) {
+    log({ last, all = false } = {}) {
       const argv = ['log'];
       appendFlag(argv, '--last', last);
+      if (all) argv.push('--all');
       return call(argv);
+    },
+    reclaim({ ids = [], reason, olderThan, force = false, dryRun = false }) {
+      const argv = ['reclaim', ...ids.map(String), '--reason', reason];
+      appendFlag(argv, '--older-than', olderThan);
+      if (force) argv.push('--force');
+      if (dryRun) argv.push('--dry-run');
+      return call(argv);
+    },
+    unreclaim({ id, reason }) {
+      return call(['unreclaim', String(id), '--reason', reason]);
     },
     decisionAdd({ title, context, outcome, status, drivers = [], options = [], consequences = [] }) {
       const argv = ['decision', 'add', title, '--context', context, '--outcome', outcome];

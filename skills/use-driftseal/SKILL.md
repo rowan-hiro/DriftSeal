@@ -151,6 +151,25 @@ Choose the status from evidence:
 Never leave an intent open merely because the work failed. Never report a
 completed result while the log still says `in_progress`.
 
+## Touch the Log Only Through DriftSeal
+
+Never read, edit, move, or delete `.intent-log/events.jsonl` (or anything under
+`$DRIFTSEAL_HOME`) directly — every read and write goes through `driftseal`
+commands or the MCP tools. When a closed record has become meaningless (for
+example a harness- or sandbox-caused `failed` round that says nothing about the
+project), retire it instead of deleting lines:
+
+```sh
+driftseal reclaim [id ...] --reason "<why these records are noise>"
+```
+
+Without ids, batch mode reclaims only closed `failed`/`abandoned` records that
+are unlinked to decisions and older than `--older-than` days (default 7);
+preview with `--dry-run`. Reclaiming `completed`/`partial` or decision-linked
+records requires explicit ids and `--force`. Reclaim only appends a marker —
+the log stays append-only, reclaimed records stay visible via `driftseal log
+--all`, and `driftseal unreclaim <id> --reason "<why>"` restores one.
+
 ## Persist the Round in Git
 
 Treat a focused Git commit as the third record: the intent says what was

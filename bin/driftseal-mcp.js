@@ -77,6 +77,9 @@ function registerTools(server, api, z) {
     verifyResult: z.string().nullable(),
     beganAt: z.string(),
     endedAt: z.string().nullable(),
+    reclaimed: z.boolean(),
+    reclaimReason: z.string().nullable(),
+    reclaimedAt: z.string().nullable(),
   });
   const decisionRecord = z.object({
     id: z.string(),
@@ -163,15 +166,82 @@ function registerTools(server, api, z) {
     {
       title: 'List DriftSeal intent history',
       description:
-        'Review recent or complete DriftSeal intent history to re-anchor work and understand prior outcomes.',
-      inputSchema: { last: z.number().int().positive().max(100).optional() },
+        'Review recent or complete DriftSeal intent history to re-anchor work and understand prior outcomes. Reclaimed records are hidden unless includeReclaimed is set.',
+      inputSchema: {
+        last: z.number().int().positive().max(100).optional(),
+        includeReclaimed: z.boolean().default(false),
+      },
       outputSchema: { root: z.string(), intents: z.array(intentRecord) },
       annotations: readOnly,
     },
     async (input) =>
       guarded(() => {
-        const intents = api.log(input);
+        const intents = api.log({ last: input.last, all: input.includeReclaimed });
         return success({ root: api.root, intents }, `Found ${intents.length} DriftSeal intent records.`);
+      })
+  );
+
+  server.registerTool(
+    'driftseal_reclaim',
+    {
+      title: 'Reclaim DriftSeal intent records',
+      description:
+        'Hide meaningless closed intent records (for example harness- or sandbox-caused failures) by appending reclaim markers. Never deletes log lines. Without ids, reclaims failed/abandoned, decision-unlinked records older than olderThan days.',
+      inputSchema: {
+        ids: z
+          .array(z.string())
+          .default([])
+          .describe('Intent IDs to reclaim; omit for batch mode by age.'),
+        reason: nonEmpty.describe('Why these records are meaningless (required, kept in the log).'),
+        olderThan: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Batch mode retention window in days (default 7).'),
+        force: z
+          .boolean()
+          .default(false)
+          .describe('Allow reclaiming partial/completed or decision-linked records by explicit id.'),
+        dryRun: z.boolean().default(false),
+      },
+      outputSchema: { root: z.string(), intents: z.array(intentRecord) },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input) =>
+      guarded(() => {
+        const intents = api.reclaim({
+          ids: input.ids,
+          reason: input.reason,
+          olderThan: input.olderThan,
+          force: input.force,
+          dryRun: input.dryRun,
+        });
+        return success(
+          { root: api.root, intents },
+          input.dryRun
+            ? `${intents.length} DriftSeal intent records match.`
+            : `Reclaimed ${intents.length} DriftSeal intent records.`
+        );
+      })
+  );
+
+  server.registerTool(
+    'driftseal_unreclaim',
+    {
+      title: 'Restore a reclaimed DriftSeal intent record',
+      description: 'Restore one reclaimed intent record to the visible log by appending an unreclaim marker.',
+      inputSchema: {
+        id: z.string(),
+        reason: nonEmpty.describe('Why this record is being restored (required, kept in the log).'),
+      },
+      outputSchema: { root: z.string(), intent: intentRecord },
+      annotations: localWrite,
+    },
+    async (input) =>
+      guarded(() => {
+        const intent = api.unreclaim(input);
+        return success({ root: api.root, intent }, `Restored DriftSeal intent ${intent.id}.`);
       })
   );
 

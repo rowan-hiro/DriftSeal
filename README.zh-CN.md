@@ -75,6 +75,7 @@ v1 server 提供：
 | --- | --- |
 | `driftseal_status`, `driftseal_log` | 读取当前 intent 和 intent 历史。 |
 | `driftseal_begin`, `driftseal_end` | 开启并诚实关闭一轮工作。 |
+| `driftseal_reclaim`, `driftseal_unreclaim` | 用 append-only 标记隐藏已无意义的已关闭记录，或将其恢复。 |
 | `driftseal_decision_list`, `driftseal_decision_show` | 查找并读取 MADR record。 |
 | `driftseal_decision_add`, `driftseal_decision_update` | 克制地增加 decision，并 reconcile 已关联的 decision。 |
 | `driftseal://intent/current` | 以 JSON resource 读取当前 intent。 |
@@ -113,7 +114,9 @@ driftseal end \
 | `driftseal begin "<intent>" [-v "<verify>"] [--decision id] [--force]` | 开启一轮工作，并可关联已有 decision。 |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | 诚实地关闭 intent。 |
 | `driftseal status` | 查看当前进行中的 intent。 |
-| `driftseal log [-n N]` | 查看 intent 历史。 |
+| `driftseal log [-n N] [--all]` | 查看 intent 历史（`--all` 包含已回收的记录）。 |
+| `driftseal reclaim [id ...] --reason "..." [--older-than days] [--force] [--dry-run]` | 用 append-only 标记隐藏已无意义的已关闭记录。 |
+| `driftseal unreclaim <id> --reason "..."` | 把已回收的记录恢复到可见历史中。 |
 | `driftseal decision add "<title>" -c "..." -o "..."` | 写入编号化的 MADR decision。 |
 | `driftseal decision update <id> [-s status] -n "..."` | 在当前 intent 中 reconcile 已关联的 decision。 |
 | `driftseal decision list [-s status] [--last N \| --count]` | 列出或统计 decision records，也可按 status 筛选。 |
@@ -125,6 +128,19 @@ driftseal end \
 以 `completed` 或 `partial` 关闭前，必须用 `driftseal decision update` reconcile
 每一条关联 decision。update 可以改变当前 status，并会追加一条包含时间和
 intent ID 的 history。没有关联 decision 的 intent 仍沿用普通流程。
+
+## 回收已无意义的记录
+
+有些已关闭的记录会随着时间失去意义：harness 或 sandbox 导致的失败会被如实记录为
+`failed`，但它与项目本身无关。`driftseal reclaim` 可以在不改写历史的前提下让这类
+记录退场——它只是向同一个 append-only log 追加一条 `reclaim` 标记（必须附带
+`--reason`），被回收的记录会从 `driftseal log` 和 `driftseal status` 的输出中隐藏，
+但仍保留在 `events.jsonl` 中，并可通过 `log --all` 查看。若事后发现某条记录仍然
+重要，用 `driftseal unreclaim <id> --reason "..."` 恢复。
+
+不带 id 的批量模式只回收已关闭、未关联 decision、且早于 `--older-than` 天（默认 7
+天）的 `failed`/`abandoned` 记录；可以先用 `--dry-run` 预览。`completed` 和 `partial`
+记录，以及任何关联了 decision 的记录，只能按显式 id 加 `--force` 回收。
 
 ## 一致性与恢复
 
@@ -152,7 +168,7 @@ recovery 只处理当前 intent，因此历史冲突不会阻塞之后的 decisi
 
 ## 数据保存在哪里
 
-- `.intent-log/events.jsonl`：append-only intent log。
+- `.intent-log/events.jsonl`：append-only intent log。所有读写都必须经过 `driftseal`（CLI 或 MCP）——不要直接读取、修改、移动或删除该文件；需要让无意义的记录退场时使用 `driftseal reclaim`，而不是删除日志行。
 - `.decision-log/`：编号化的 MADR decision records。
 - 设置 `DRIFTSEAL_HOME` 或 `DRIFTSEAL_DECISION_HOME`，即可把对应 log 放到当前项目之外。
 

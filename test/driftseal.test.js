@@ -77,7 +77,7 @@ test('begin creates an in_progress intent and prints its id', () => {
   assert.match(id, /^\d{4}-\d{2}-\d{2}-001$/);
   const [ev] = events();
   assert.equal(ev.type, 'begin');
-  assert.equal(ev.schemaVersion, 2);
+  assert.equal(ev.schemaVersion, 3);
   assert.equal(ev.intent, 'add login form');
   assert.equal(ev.verify, 'npm test');
 });
@@ -915,6 +915,105 @@ test('log renders history, --last limits it', () => {
   assert.match(last, /three/);
 });
 
+test('reclaim hides a failed record behind a marker without deleting it', () => {
+  const { run, events } = setup();
+  const id = run(['begin', 'sandbox-bound step']).trim();
+  run(['end', '-s', 'failed', '-n', 'sandbox denied the write']);
+  const out = run(['reclaim', id, '--reason', 'harness sandbox noise, not project signal']);
+  assert.match(out, new RegExp(`${id} reclaimed`));
+
+  const evs = events();
+  const marker = evs.at(-1);
+  assert.equal(marker.type, 'reclaim');
+  assert.equal(marker.schemaVersion, 3);
+  assert.equal(marker.id, id);
+  assert.equal(marker.reason, 'harness sandbox noise, not project signal');
+  assert.ok(evs.some((ev) => ev.type === 'end' && ev.id === id)); // original lines kept
+
+  assert.match(run(['log']), /log is empty/);
+  const all = run(['log', '--all']);
+  assert.match(all, new RegExp(id));
+  assert.match(all, /reclaimed: harness sandbox noise/);
+});
+
+test('reclaim requires a reason and a closed, known intent', () => {
+  const { run, runFail } = setup();
+  const id = run(['begin', 'work']).trim();
+  assert.match(runFail(['reclaim', id]).stderr, /usage: driftseal reclaim/);
+  assert.match(runFail(['reclaim', id, '--reason', 'x']).stderr, /in_progress/);
+  assert.match(runFail(['reclaim', '1999-01-01-001', '--reason', 'x']).stderr, /unknown intent id/);
+  run(['end', '-s', 'failed']);
+  run(['reclaim', id, '--reason', 'noise']);
+  assert.match(runFail(['reclaim', id, '--reason', 'again']).stderr, /already reclaimed/);
+});
+
+test('reclaim of completed, partial, or decision-linked intents requires --force', () => {
+  const { run, runFail } = setup();
+  run(['decision', 'add', 'Keep WAL append-only', '--context', 'c', '--outcome', 'o']);
+  const done = run(['begin', 'finished work']).trim();
+  run(['end']);
+  const linked = run(['begin', 'linked work', '--decision', '1']).trim();
+  run(['end', '-s', 'failed', '-n', 'escape']);
+
+  assert.match(runFail(['reclaim', done, '--reason', 'x']).stderr, /--force/);
+  assert.match(runFail(['reclaim', linked, '--reason', 'x']).stderr, /--force/);
+  run(['reclaim', done, linked, '--reason', 'explicit cleanup', '--force']);
+  const all = run(['log', '--all']);
+  assert.match(all, /reclaimed: explicit cleanup/);
+  assert.equal(run(['log']), 'log is empty\n');
+});
+
+test('batch reclaim keeps fresh, completed, and decision-linked records', () => {
+  const { dir, run, runFail, events } = setup();
+  const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+  const fresh = new Date().toISOString();
+  const line = (ev) => JSON.stringify({ schemaVersion: 3, ...ev });
+  fs.writeFileSync(
+    path.join(dir, 'events.jsonl'),
+    [
+      line({ type: 'begin', id: '2020-01-01-001', ts: old, intent: 'old failure' }),
+      line({ type: 'end', id: '2020-01-01-001', ts: old, status: 'failed' }),
+      line({ type: 'begin', id: '2020-01-01-002', ts: old, intent: 'old abandonment' }),
+      line({ type: 'end', id: '2020-01-01-002', ts: old, status: 'abandoned' }),
+      line({ type: 'begin', id: '2020-01-01-003', ts: old, intent: 'old success' }),
+      line({ type: 'end', id: '2020-01-01-003', ts: old, status: 'completed' }),
+      line({ type: 'begin', id: '2020-01-01-004', ts: fresh, intent: 'fresh failure' }),
+      line({ type: 'end', id: '2020-01-01-004', ts: fresh, status: 'failed' }),
+    ].join('\n') + '\n'
+  );
+
+  const before = events().length;
+  const dry = run(['reclaim', '--reason', 'sandbox noise', '--dry-run']);
+  assert.match(dry, /2020-01-01-001/);
+  assert.match(dry, /2020-01-01-002/);
+  assert.doesNotMatch(dry, /2020-01-01-003/);
+  assert.doesNotMatch(dry, /2020-01-01-004/);
+  assert.equal(events().length, before); // dry-run appends nothing
+
+  assert.match(runFail(['reclaim', '--reason', 'x', '--force']).stderr, /--force requires explicit/);
+  run(['reclaim', '--reason', 'sandbox noise']);
+  const visible = run(['log']);
+  assert.doesNotMatch(visible, /old failure/);
+  assert.doesNotMatch(visible, /old abandonment/);
+  assert.match(visible, /old success/);
+  assert.match(visible, /fresh failure/);
+  assert.equal(events().filter((ev) => ev.type === 'reclaim').length, 2);
+  assert.match(run(['reclaim', '--reason', 'nothing left']), /no reclaimable intents/);
+});
+
+test('unreclaim restores a reclaimed record and requires one to be reclaimed', () => {
+  const { run, runFail, events } = setup();
+  const id = run(['begin', 'flaky round']).trim();
+  run(['end', '-s', 'failed']);
+  assert.match(runFail(['unreclaim', id, '--reason', 'x']).stderr, /not reclaimed/);
+  assert.match(runFail(['unreclaim', id]).stderr, /usage: driftseal unreclaim/);
+  run(['reclaim', id, '--reason', 'sandbox noise']);
+  assert.equal(run(['log']), 'log is empty\n');
+  run(['unreclaim', id, '--reason', 'actually relevant after all']);
+  assert.match(run(['log']), /flaky round/);
+  assert.equal(events().at(-1).type, 'unreclaim');
+});
+
 test('init injects the protocol into AGENTS.md, idempotently', () => {
   const { dir, run, runFail } = setup();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-init-'));
@@ -939,7 +1038,10 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /driftseal decision list --status deferred --count/);
   assert.match(first, /driftseal decision update/);
   assert.match(first, /rejects a successful close/);
-  assert.match(first, /driftseal-version: 5/);
+  assert.match(first, /Log access goes only through DriftSeal/);
+  assert.match(first, /driftseal reclaim \[id \.\.\.\] --reason/);
+  assert.match(first, /never\s+deletes log lines/);
+  assert.match(first, /driftseal-version: 6/);
   assert.match(first, /<!-- \/driftseal -->/);
 
   runIn(['init']); // second run must not duplicate
@@ -954,7 +1056,18 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
-  const versionFour = first
+  const versionFive = first
+    .replace('driftseal-version: 6', 'driftseal-version: 5')
+    .replace('driftseal-decisions-version: 6', 'driftseal-decisions-version: 5')
+    .replace(
+      '\n**Log access goes only through DriftSeal.** Never read, edit, move, or delete\n' +
+        '`.intent-log/events.jsonl` (or anything under `$DRIFTSEAL_HOME`) directly; use\n' +
+        '`driftseal` commands or the MCP tools. Retire meaningless closed records with\n' +
+        '`driftseal reclaim [id ...] --reason "<why>"` — it appends a marker, never\n' +
+        'deletes log lines; `driftseal unreclaim <id> --reason "<why>"` restores one.\n',
+      ''
+    );
+  const versionFour = versionFive
     .replace('driftseal-version: 5', 'driftseal-version: 4')
     .replace('driftseal-decisions-version: 5', 'driftseal-decisions-version: 4')
     .replace(
@@ -982,17 +1095,25 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 5/);
-  assert.match(upgraded, /driftseal-decisions-version: 5/);
+  assert.match(upgraded, /driftseal-version: 6/);
+  assert.match(upgraded, /driftseal-decisions-version: 6/);
   assert.match(upgraded, /# trailing user instructions/);
+
+  const upgradeFiveCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v5-'));
+  const upgradeFiveFile = path.join(upgradeFiveCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeFiveFile, versionFive.trimEnd() + '\n');
+  run(['init'], { cwd: upgradeFiveCwd });
+  const upgradedFive = fs.readFileSync(upgradeFiveFile, 'utf8');
+  assert.match(upgradedFive, /driftseal-version: 6/);
+  assert.match(upgradedFive, /Log access goes only through DriftSeal/);
 
   const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
   const upgradeFourFile = path.join(upgradeFourCwd, 'AGENTS.md');
   fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFourCwd });
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
-  assert.match(upgradedFour, /driftseal-version: 5/);
-  assert.match(upgradedFour, /driftseal-decisions-version: 5/);
+  assert.match(upgradedFour, /driftseal-version: 6/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 6/);
   assert.match(upgradedFour, /need no intent/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
@@ -1007,7 +1128,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 5/);
+  assert.match(upgradedCrLf, /driftseal-version: 6/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -1038,7 +1159,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 5', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 6', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -1068,14 +1189,14 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 5 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 6 -->\n', '')
     .replace('\n<!-- /driftseal-decisions -->', '');
   fs.writeFileSync(legacyFile, `# existing instructions\n\n${legacyDecision}\n`);
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 5/);
-  assert.match(migratedLegacy, /driftseal-version: 5/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 6/);
+  assert.match(migratedLegacy, /driftseal-version: 6/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
 });

@@ -76,6 +76,8 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
         'driftseal_begin',
         'driftseal_end',
         'driftseal_log',
+        'driftseal_reclaim',
+        'driftseal_unreclaim',
         'driftseal_decision_list',
         'driftseal_decision_show',
         'driftseal_decision_add',
@@ -84,6 +86,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     );
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_status').annotations.readOnlyHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_end').annotations.destructiveHint, true);
+    assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_reclaim').annotations.destructiveHint, true);
 
     const resources = await client.listResources();
     assert.deepEqual(
@@ -151,6 +154,34 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
 
     const history = await call(client, 'driftseal_log', { last: 10 });
     assert.equal(history.structuredContent.intents.length, 2);
+
+    const noReason = await call(client, 'driftseal_reclaim', { ids: ['x'] });
+    assert.equal(noReason.isError, true);
+
+    const reclaimed = await call(client, 'driftseal_reclaim', {
+      ids: [abandoned.structuredContent.intent.id],
+      reason: 'Clearing round was test scaffolding, not project signal.',
+    });
+    assert.equal(reclaimed.isError, undefined);
+    assert.equal(reclaimed.structuredContent.intents[0].reclaimed, true);
+    assert.equal(
+      reclaimed.structuredContent.intents[0].reclaimReason,
+      'Clearing round was test scaffolding, not project signal.'
+    );
+
+    const filtered = await call(client, 'driftseal_log', { last: 10 });
+    assert.equal(filtered.structuredContent.intents.length, 1);
+    const unfiltered = await call(client, 'driftseal_log', { last: 10, includeReclaimed: true });
+    assert.equal(unfiltered.structuredContent.intents.length, 2);
+
+    const restored = await call(client, 'driftseal_unreclaim', {
+      id: abandoned.structuredContent.intent.id,
+      reason: 'Kept for the integration test record.',
+    });
+    assert.equal(restored.structuredContent.intent.reclaimed, false);
+    const restoredHistory = await call(client, 'driftseal_log', { last: 10 });
+    assert.equal(restoredHistory.structuredContent.intents.length, 2);
+
     const currentResource = await client.readResource({ uri: 'driftseal://intent/current' });
     assert.equal(JSON.parse(currentResource.contents[0].text).intent, null);
 

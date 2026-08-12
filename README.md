@@ -75,6 +75,7 @@ The v1 server provides:
 | --- | --- |
 | `driftseal_status`, `driftseal_log` | Read the current intent and intent history. |
 | `driftseal_begin`, `driftseal_end` | Open and honestly close a work round. |
+| `driftseal_reclaim`, `driftseal_unreclaim` | Hide meaningless closed records behind append-only markers, or restore them. |
 | `driftseal_decision_list`, `driftseal_decision_show` | Find and read MADR records. |
 | `driftseal_decision_add`, `driftseal_decision_update` | Add selective decisions and reconcile linked ones. |
 | `driftseal://intent/current` | Read the current intent as a JSON resource. |
@@ -113,7 +114,9 @@ Single-step commands that only build, check, or record work already done — com
 | `driftseal begin "<intent>" [-v "<verify>"] [--decision id] [--force]` | Open a work-round intent and optionally link existing decisions. |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | Close an intent honestly. |
 | `driftseal status` | Show the intent currently in progress. |
-| `driftseal log [-n N]` | Review intent history. |
+| `driftseal log [-n N] [--all]` | Review intent history (`--all` includes reclaimed records). |
+| `driftseal reclaim [id ...] --reason "..." [--older-than days] [--force] [--dry-run]` | Hide meaningless closed records behind append-only markers. |
+| `driftseal unreclaim <id> --reason "..."` | Restore a reclaimed record to the visible log. |
 | `driftseal decision add "<title>" -c "..." -o "..."` | Write a numbered MADR decision. |
 | `driftseal decision update <id> [-s status] -n "..."` | Reconcile a linked decision in the open intent. |
 | `driftseal decision list [-s status] [--last N \| --count]` | List or count decision records, optionally filtered by status. |
@@ -126,6 +129,22 @@ decision must be reconciled with `driftseal decision update` before that intent 
 close as `completed` or `partial`. The update changes the current status when
 requested and appends a timestamped history entry tied to the intent. Intents
 without decision links keep the ordinary workflow.
+
+## Reclaiming noise records
+
+Some closed records stop mattering: a harness or sandbox failure is recorded
+honestly as `failed`, but it says nothing about the project. `driftseal
+reclaim` retires such records without rewriting history — it appends a
+`reclaim` marker (with a mandatory `--reason`) to the same append-only log,
+and reclaimed records disappear from `driftseal log` and `driftseal status`
+output while remaining in `events.jsonl` and visible with `log --all`.
+`driftseal unreclaim <id> --reason "..."` restores a record that turned out to
+matter.
+
+Without ids, batch mode reclaims only closed `failed`/`abandoned` records that
+are not linked to decisions and are older than `--older-than` days (default
+7); use `--dry-run` to preview. `completed` and `partial` records, and any
+decision-linked record, can only be reclaimed by explicit id with `--force`.
 
 ## Consistency and recovery
 
@@ -157,7 +176,7 @@ index.
 
 ## Storage
 
-- `.intent-log/events.jsonl` is the append-only intent log.
+- `.intent-log/events.jsonl` is the append-only intent log. All access goes through `driftseal` (CLI or MCP) — never read, edit, move, or delete it directly; use `driftseal reclaim` to retire meaningless records instead of deleting log lines.
 - `.decision-log/` contains numbered MADR decision records.
 - Set `DRIFTSEAL_HOME` or `DRIFTSEAL_DECISION_HOME` to store either log outside the current project.
 
