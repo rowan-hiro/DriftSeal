@@ -53,6 +53,54 @@ function spawnResult(args, env) {
   });
 }
 
+function setupGitRepository(prefix = 'driftseal-git-test-') {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'Test',
+    GIT_AUTHOR_EMAIL: 'test@example.com',
+    GIT_COMMITTER_NAME: 'Test',
+    GIT_COMMITTER_EMAIL: 'test@example.com',
+  };
+  delete env.DRIFTSEAL_HOME;
+  delete env.DRIFTSEAL_DECISION_HOME;
+  const git = (args, opts = {}) =>
+    execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...opts,
+    });
+  const gitFail = (args) => {
+    try {
+      git(args);
+    } catch (err) {
+      return err;
+    }
+    throw new Error(`expected failure: git ${args.join(' ')}`);
+  };
+  const run = (args, opts = {}) =>
+    execFileSync(process.execPath, [DRIFTSEAL, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...opts,
+    });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'test@example.com']);
+  git(['config', 'user.name', 'Test']);
+  run(['init']);
+  git([
+    'config',
+    '--local',
+    'merge.driftseal.driver',
+    `${process.execPath} ${DRIFTSEAL} absorb --git %O %A %B`,
+  ]);
+  return { cwd, env, git, gitFail, run };
+}
+
 test('package metadata identifies the DriftSeal CLI, ownership, and support URLs', () => {
   const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.equal(metadata.name, 'driftseal');
@@ -1035,9 +1083,11 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /driftseal begin/);
   assert.match(first, /--decision <id>/);
   assert.match(first, /may need a rollback/);
+  assert.match(first, /Git operations never need an intent/);
+  assert.match(first, /branch and worktree\s+management/);
+  assert.match(first, /merges, rebases, cherry-picks, tags, and pushes/);
+  assert.match(first, /normal authorization and safety requirements/);
   assert.match(first, /need no intent/);
-  assert.match(first, /An authorized Git commit/);
-  assert.match(first, /finalizes that round without requiring a new intent/);
   assert.match(first, /Agent protocol: decision log/);
   assert.match(first, /driftseal decision add/);
   assert.match(first, /cannot be\s+recovered from the intent log and Git history/);
@@ -1055,7 +1105,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /AGENTS\.md` protocol is the source of truth/);
   assert.match(first, /Use the `driftseal` CLI by\s+default/);
   assert.match(first, /MCP and lifecycle hooks are optional adapters/);
-  assert.match(first, /driftseal-version: 9/);
+  assert.match(first, /driftseal-version: 10/);
   assert.match(first, /driftseal absorb/);
   assert.match(first, /--abandon-theirs/);
   assert.match(first, /colliding decision ids are remapped/);
@@ -1073,7 +1123,35 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
-  const versionEight = first
+  const versionNine = first
+    .replace('driftseal-version: 10', 'driftseal-version: 9')
+    .replace('driftseal-decisions-version: 10', 'driftseal-decisions-version: 9')
+    .replace(
+      '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+        '   making any other non-Git change that may need a rollback:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Git operations never need an intent and are not included in the intent log;\n' +
+        '   Git maintains their history. This includes inspection, branch and worktree\n' +
+        '   management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.\n' +
+        '   Single-step commands that only build or check work already done, such as\n' +
+        '   compiling or running tests, also need no intent.',
+      '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+        '   making any other change that may need a rollback:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Single-step commands that only build, check, or record work already done\n' +
+        '   (compiling, running tests, `git add`/`git commit`) need no intent.'
+    )
+    .replace(
+      '   Git operations remain subject to normal authorization and safety requirements\n' +
+        '   even though they do not require an intent. Any non-Git content change made while\n' +
+        '   preparing a Git operation does require a new intent.',
+      '   An authorized Git commit that only stages and records the verified changes and\n' +
+        '   just-closed log finalizes that round without requiring a new intent. Any content\n' +
+        '   change made while preparing the commit does require a new intent.'
+    );
+  const versionEight = versionNine
     .replace('driftseal-version: 9', 'driftseal-version: 8')
     .replace('driftseal-decisions-version: 9', 'driftseal-decisions-version: 8')
     .replace(
@@ -1145,16 +1223,25 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 9/);
-  assert.match(upgraded, /driftseal-decisions-version: 9/);
+  assert.match(upgraded, /driftseal-version: 10/);
+  assert.match(upgraded, /driftseal-decisions-version: 10/);
   assert.match(upgraded, /# trailing user instructions/);
+
+  const upgradeNineCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v9-'));
+  const upgradeNineFile = path.join(upgradeNineCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeNineFile, versionNine.trimEnd() + '\n');
+  run(['init'], { cwd: upgradeNineCwd });
+  const upgradedNine = fs.readFileSync(upgradeNineFile, 'utf8');
+  assert.match(upgradedNine, /driftseal-version: 10/);
+  assert.match(upgradedNine, /Git operations never need an intent/);
+  assert.match(upgradedNine, /merges, rebases, cherry-picks, tags, and pushes/);
 
   const upgradeEightCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v8-'));
   const upgradeEightFile = path.join(upgradeEightCwd, 'AGENTS.md');
   fs.writeFileSync(upgradeEightFile, versionEight.trimEnd() + '\n');
   run(['init'], { cwd: upgradeEightCwd });
   const upgradedEight = fs.readFileSync(upgradeEightFile, 'utf8');
-  assert.match(upgradedEight, /driftseal-version: 9/);
+  assert.match(upgradedEight, /driftseal-version: 10/);
   assert.match(upgradedEight, /driftseal absorb/);
   assert.match(upgradedEight, /colliding decision ids are remapped/);
 
@@ -1163,7 +1250,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSevenFile, versionSeven.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSevenCwd });
   const upgradedSeven = fs.readFileSync(upgradeSevenFile, 'utf8');
-  assert.match(upgradedSeven, /driftseal-version: 9/);
+  assert.match(upgradedSeven, /driftseal-version: 10/);
   assert.match(upgradedSeven, /source of truth/);
   assert.match(upgradedSeven, /--driver "<decision driver>"/);
 
@@ -1172,7 +1259,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSixFile, versionSix.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSixCwd });
   const upgradedSix = fs.readFileSync(upgradeSixFile, 'utf8');
-  assert.match(upgradedSix, /driftseal-version: 9/);
+  assert.match(upgradedSix, /driftseal-version: 10/);
   assert.match(upgradedSix, /resume it when its\s+objective still matches/);
   assert.match(upgradedSix, /--driver "<decision driver>"/);
 
@@ -1181,7 +1268,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFiveFile, versionFive.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFiveCwd });
   const upgradedFive = fs.readFileSync(upgradeFiveFile, 'utf8');
-  assert.match(upgradedFive, /driftseal-version: 9/);
+  assert.match(upgradedFive, /driftseal-version: 10/);
   assert.match(upgradedFive, /Log access goes only through DriftSeal/);
 
   const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
@@ -1189,8 +1276,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFourCwd });
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
-  assert.match(upgradedFour, /driftseal-version: 9/);
-  assert.match(upgradedFour, /driftseal-decisions-version: 9/);
+  assert.match(upgradedFour, /driftseal-version: 10/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 10/);
   assert.match(upgradedFour, /need no intent/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
@@ -1205,7 +1292,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 9/);
+  assert.match(upgradedCrLf, /driftseal-version: 10/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -1236,7 +1323,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 9', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 10', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -1266,7 +1353,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 9 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 10 -->\n', '')
     .replace(' --driver "<decision driver>"', '')
     .replace(
       '\nAfter a merge, colliding decision ids are remapped with `driftseal absorb`;\n' +
@@ -1278,8 +1365,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 9/);
-  assert.match(migratedLegacy, /driftseal-version: 9/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 10/);
+  assert.match(migratedLegacy, /driftseal-version: 10/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
 });
@@ -2373,6 +2460,159 @@ test('absorb --git performs a 3-way merge and init installs the driver', () => {
   assert.equal(begins[2].intent, 'feature work');
   assert.match(begins[2].id, /-003$/);
   assert.equal(runIn(['log', '--last', '1']).includes('feature work'), true);
+});
+
+test('git merge stops on colliding decision ids and absorb preserves each side ownership', () => {
+  const { cwd, git, gitFail, run } = setupGitRepository('driftseal-git-decision-collision-');
+  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['commit', '-m', 'base']);
+
+  git(['checkout', '-b', 'feature']);
+  run(['decision', 'add', 'Feature choice', '-c', 'context', '-o', 'outcome']);
+  run(['begin', 'feature work', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'Confirm feature choice.']);
+  run(['end', '--status', 'completed', '--note', 'feature', '--verify-result', 'ok']);
+  git(['add', '.']);
+  git(['commit', '-m', 'feature']);
+
+  git(['checkout', 'main']);
+  run(['decision', 'add', 'Main choice', '-c', 'context', '-o', 'outcome']);
+  run(['begin', 'main work', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'Confirm main choice.']);
+  run(['end', '--status', 'completed', '--note', 'main', '--verify-result', 'ok']);
+  git(['add', '.']);
+  git(['commit', '-m', 'main']);
+
+  const mergeError = gitFail(['merge', 'feature', '--no-edit']);
+  assert.match(
+    `${mergeError.stdout || ''}${mergeError.stderr || ''}`,
+    /decision ids require worktree repair/
+  );
+  assert.match(git(['rev-parse', '--verify', 'MERGE_HEAD']), /^[a-f0-9]{40}\n$/);
+
+  const repaired = run(['absorb']);
+  assert.match(repaired, /decision 0001 \(theirs\) -> 0002/);
+  git(['add', '-A']);
+  git(['commit', '--no-edit']);
+
+  const decisions = run(['decision', 'list']);
+  assert.match(decisions, /0001.*Main choice/);
+  assert.match(decisions, /0002.*Feature choice/);
+  const events = fs
+    .readFileSync(path.join(cwd, '.intent-log', 'events.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  const begins = events.filter((event) => event.type === 'begin');
+  assert.deepEqual(begins.find((event) => event.intent === 'main work').decisions, ['0001']);
+  assert.deepEqual(begins.find((event) => event.intent === 'feature work').decisions, ['0002']);
+});
+
+test('absorb accepts an incoming-only edit to a decision from the shared Git base', () => {
+  const { cwd, env, git, run } = setupGitRepository('driftseal-git-one-sided-decision-');
+  run(['decision', 'add', 'Shared choice', '-c', 'context', '-o', 'outcome']);
+  run(['begin', 'record shared choice', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'Confirm shared choice.']);
+  run(['end', '--status', 'completed', '--note', 'base', '--verify-result', 'ok']);
+  git(['add', '.']);
+  git(['commit', '-m', 'base']);
+  git(['branch', 'feature']);
+
+  const featureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-feature-worktree-'));
+  fs.rmdirSync(featureRoot);
+  git(['worktree', 'add', featureRoot, 'feature']);
+  const runFeature = (args) =>
+    execFileSync(process.execPath, [DRIFTSEAL, ...args], {
+      cwd: featureRoot,
+      encoding: 'utf8',
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  const gitFeature = (args) =>
+    execFileSync('git', args, {
+      cwd: featureRoot,
+      encoding: 'utf8',
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+  run(['begin', 'main unrelated work']);
+  run(['end', '--status', 'completed', '--note', 'main', '--verify-result', 'ok']);
+  git(['add', '.intent-log/events.jsonl']);
+  git(['commit', '-m', 'main']);
+
+  runFeature(['begin', 'deprecate shared choice', '--decision', '1']);
+  runFeature(['decision', 'update', '1', '--status', 'deprecated', '--note', 'Feature edit.']);
+  runFeature(['end', '--status', 'completed', '--note', 'feature', '--verify-result', 'ok']);
+  gitFeature(['add', '.']);
+  gitFeature(['commit', '-m', 'feature']);
+
+  const output = run([
+    'absorb',
+    path.join(featureRoot, '.intent-log', 'events.jsonl'),
+    '--decisions',
+    path.join(featureRoot, '.decision-log'),
+  ]);
+  assert.match(output, /absorbed 1 intent/);
+  assert.doesNotMatch(output, /decision 0001 \(theirs\) ->/);
+  assert.match(run(['decision', 'show', '1']), /## Status\n\nDeprecated/);
+  assert.equal(fs.existsSync(path.join(cwd, '.decision-log', '0001-shared-choice.md')), true);
+});
+
+test('no-arg absorb uses merge parents to repair a previously successful corrupt merge', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-git-repair-merge-');
+  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['commit', '-m', 'base']);
+
+  git(['checkout', '-b', 'feature']);
+  run(['decision', 'add', 'Feature choice', '-c', 'context', '-o', 'outcome']);
+  run(['begin', 'feature work', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'Confirm feature choice.']);
+  run(['end', '--status', 'completed', '--note', 'feature', '--verify-result', 'ok']);
+  git(['add', '.']);
+  git(['commit', '-m', 'feature']);
+
+  git(['checkout', 'main']);
+  run(['decision', 'add', 'Main choice', '-c', 'context', '-o', 'outcome']);
+  run(['begin', 'main work', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'Confirm main choice.']);
+  run(['end', '--status', 'completed', '--note', 'main', '--verify-result', 'ok']);
+  git(['add', '.']);
+  git(['commit', '-m', 'main']);
+  git(['merge', 'feature', '--strategy', 'ours', '--no-edit']);
+
+  const oursText = git(['show', 'HEAD^1:.intent-log/events.jsonl']);
+  const theirsEvents = git(['show', 'HEAD^2:.intent-log/events.jsonl'])
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  const collidedId = theirsEvents.find((event) => event.type === 'begin').id;
+  const remappedId = collidedId.replace(/001$/, '002');
+  const remappedTheirs = theirsEvents.map((event) =>
+    event.id === collidedId ? { ...event, id: remappedId } : event
+  );
+  fs.writeFileSync(
+    path.join(cwd, '.intent-log', 'events.jsonl'),
+    `${oursText}${remappedTheirs.map(JSON.stringify).join('\n')}\n`
+  );
+  const featureDecision = git(['ls-tree', '-r', '--name-only', 'HEAD^2', '.decision-log']).trim();
+  fs.writeFileSync(
+    path.join(cwd, featureDecision),
+    git(['show', `HEAD^2:${featureDecision}`])
+  );
+
+  const repaired = run(['absorb']);
+  assert.match(repaired, /decision 0001 \(theirs\) -> 0002/);
+  const events = fs
+    .readFileSync(path.join(cwd, '.intent-log', 'events.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  const begins = events.filter((event) => event.type === 'begin');
+  assert.deepEqual(begins.find((event) => event.intent === 'main work').decisions, ['0001']);
+  assert.deepEqual(begins.find((event) => event.intent === 'feature work').decisions, ['0002']);
+  assert.match(run(['decision', 'list']), /0001.*Main choice/);
+  assert.match(run(['decision', 'list']), /0002.*Feature choice/);
 });
 
 test('absorb rejects incompatible flags', () => {

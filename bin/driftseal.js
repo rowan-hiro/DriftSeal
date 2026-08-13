@@ -36,7 +36,7 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const EVENT_SCHEMA_VERSION = 3;
-const PROTOCOL_VERSION = 9;
+const PROTOCOL_VERSION = 10;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
@@ -1136,11 +1136,14 @@ default; the companion skill only helps discover and resume the workflow, while
 MCP and lifecycle hooks are optional adapters.
 
 1. **Write intent first**, before modifying, creating, or deleting files, or
-   making any other change that may need a rollback:
+   making any other non-Git change that may need a rollback:
    \`driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"\`.
    Add one \`--decision <id>\` for each existing decision this round may change.
-   Single-step commands that only build, check, or record work already done
-   (compiling, running tests, \`git add\`/\`git commit\`) need no intent.
+   Git operations never need an intent and are not included in the intent log;
+   Git maintains their history. This includes inspection, branch and worktree
+   management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.
+   Single-step commands that only build or check work already done, such as
+   compiling or running tests, also need no intent.
 2. **Execute only the intent.** Scope change? Close the current intent
    (\`driftseal end -s partial|abandoned -n "<why>"\`) and \`driftseal begin\` a new one.
 3. **Verify, then close**: run the declared verification, then
@@ -1153,9 +1156,9 @@ MCP and lifecycle hooks are optional adapters.
    the final content hash is recorded. Interrupted reconciliation is recovered
    by the next linked \`decision update\` or successful \`end\`. Closing as
    \`failed\` or \`abandoned\` cancels pending recovery for that intent.
-   An authorized Git commit that only stages and records the verified changes and
-   just-closed log finalizes that round without requiring a new intent. Any content
-   change made while preparing the commit does require a new intent.
+   Git operations remain subject to normal authorization and safety requirements
+   even though they do not require an intent. Any non-Git content change made while
+   preparing a Git operation does require a new intent.
 4. **Re-anchor after context loss**: run \`driftseal status\` and \`driftseal log --last 3\` before
    doing anything else. The open intent is the source of truth: resume it when its
    objective still matches the current task; otherwise close it (\`partial\` or
@@ -1175,7 +1178,34 @@ ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version) {
-  const v8 = intentProtocolBlock(version).replace(
+  const v9 = intentProtocolBlock(version)
+    .replace(
+      '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+        '   making any other non-Git change that may need a rollback:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Git operations never need an intent and are not included in the intent log;\n' +
+        '   Git maintains their history. This includes inspection, branch and worktree\n' +
+        '   management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.\n' +
+        '   Single-step commands that only build or check work already done, such as\n' +
+        '   compiling or running tests, also need no intent.',
+      '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+        '   making any other change that may need a rollback:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Single-step commands that only build, check, or record work already done\n' +
+        '   (compiling, running tests, `git add`/`git commit`) need no intent.'
+    )
+    .replace(
+      '   Git operations remain subject to normal authorization and safety requirements\n' +
+        '   even though they do not require an intent. Any non-Git content change made while\n' +
+        '   preparing a Git operation does require a new intent.',
+      '   An authorized Git commit that only stages and records the verified changes and\n' +
+        '   just-closed log finalizes that round without requiring a new intent. Any content\n' +
+        '   change made while preparing the commit does require a new intent.'
+    );
+  if (version >= 9) return v9;
+  const v8 = v9.replace(
     '\nAfter a merge collision, run `driftseal absorb` rather than editing the log;\n' +
       'if both sides still have an open intent, add `--abandon-theirs` or\n' +
       '`--abandon-ours`.',
@@ -1308,7 +1338,9 @@ Commit \`.decision-log/\` with the code.`;
 }
 
 function previousDecisionProtocolBlock(version) {
-  const v8 = decisionProtocolBlock(version).replace(
+  const v9 = decisionProtocolBlock(version);
+  if (version >= 9) return v9;
+  const v8 = v9.replace(
     '\nAfter a merge, colliding decision ids are remapped with `driftseal absorb`;\n' +
       'concurrent edits of a shared decision are not auto-merged.',
     ''
@@ -2042,16 +2074,21 @@ function runHookReminder(event, argv) {
   return { changed: true, event, format };
 }
 
-function gitCapture(args, cwd = process.cwd()) {
+function gitCaptureRaw(args, cwd = process.cwd()) {
   try {
     return execFileSync('git', args, {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    });
   } catch {
     return null;
   }
+}
+
+function gitCapture(args, cwd = process.cwd()) {
+  const output = gitCaptureRaw(args, cwd);
+  return output === null ? null : output.trim();
 }
 
 function isGitWorkTree(cwd = process.cwd()) {
@@ -2070,6 +2107,32 @@ function gitMergeBase(cwd = process.cwd()) {
   const other = gitOtherHead(cwd);
   if (!other) return null;
   return gitCapture(['merge-base', 'HEAD', other], cwd);
+}
+
+function gitMergeBaseFor(left, right, cwd = process.cwd()) {
+  return gitCapture(['merge-base', left, right], cwd);
+}
+
+function gitReadFile(treeish, file, cwd = process.cwd()) {
+  return gitCaptureRaw(['show', `${treeish}:${file}`], cwd);
+}
+
+function gitFindCommitForFile(file, repositoryPath, cwd = process.cwd()) {
+  const blob = gitCapture(['hash-object', file], cwd);
+  const history = gitCapture(['rev-list', '--all', '--reflog', '--', repositoryPath], cwd);
+  if (!blob || !history) return null;
+  for (const commit of history.split('\n')) {
+    if (gitCapture(['rev-parse', `${commit}:${repositoryPath}`], cwd) === blob) return commit;
+  }
+  return null;
+}
+
+function gitMergeParents(cwd = process.cwd()) {
+  const line = gitCapture(['rev-list', '--parents', '-n', '1', 'HEAD'], cwd);
+  if (!line) return null;
+  const parts = line.split(/\s+/);
+  if (parts.length !== 3) return null;
+  return { ours: parts[1], theirs: parts[2] };
 }
 
 function gitDecisionIds(treeish, cwd = process.cwd()) {
@@ -2091,7 +2154,7 @@ function gitDecisionEntries(treeish, cwd = process.cwd()) {
     const name = path.basename(file);
     const match = name.match(/^(\d{4,})-.*\.md$/);
     if (!match) continue;
-    const content = gitCapture(['show', `${treeish}:${file}`], cwd);
+    const content = gitReadFile(treeish, file, cwd);
     if (content === null) continue;
     entries.push({
       id: normalizeDecisionId(match[1]),
@@ -2101,6 +2164,11 @@ function gitDecisionEntries(treeish, cwd = process.cwd()) {
     });
   }
   return entries;
+}
+
+function gitIntentRecords(treeish, cwd = process.cwd()) {
+  const content = gitReadFile(treeish, '.intent-log/events.jsonl', cwd);
+  return content === null ? [] : parseJsonlRecords(content, `${treeish}:.intent-log/events.jsonl`);
 }
 
 function canonicalEvent(event) {
@@ -2210,14 +2278,37 @@ function splitDuplicateDecisions(entries) {
   return { ours, theirs };
 }
 
-function planDecisionAbsorb({ oursEntries, theirsEntries, baseIds }) {
+function hasDuplicateDecisionIds(entries) {
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry.id)) return true;
+    seen.add(entry.id);
+  }
+  return false;
+}
+
+function hasDuplicateIntentBegins(records) {
+  const seen = new Set();
+  for (const record of records) {
+    if (record.event.type !== 'begin') continue;
+    if (seen.has(record.event.id)) return true;
+    seen.add(record.event.id);
+  }
+  return false;
+}
+
+function planDecisionAbsorb({ oursEntries, theirsEntries, baseEntries = [], baseIds = new Set() }) {
   const mappings = [];
   const copies = [];
   const decisionMap = new Map();
   const usedIds = new Set(oursEntries.map((entry) => entry.id));
   const oursById = new Map();
+  const baseById = new Map();
   for (const entry of oursEntries) {
     if (!oursById.has(entry.id)) oursById.set(entry.id, entry);
+  }
+  for (const entry of baseEntries) {
+    if (!baseById.has(entry.id)) baseById.set(entry.id, entry);
   }
 
   for (const entry of theirsEntries) {
@@ -2234,10 +2325,52 @@ function planDecisionAbsorb({ oursEntries, theirsEntries, baseIds }) {
       continue;
     }
     const oursContent = ours.content !== undefined ? ours.content : fs.readFileSync(ours.path, 'utf8');
-    if (contentHash(oursContent) === contentHash(theirsContent)) continue;
-    if (baseIds.has(entry.id)) {
+    const oursHash = contentHash(oursContent);
+    const theirsHash = contentHash(theirsContent);
+    if (oursHash === theirsHash) {
+      if (ours.file !== entry.file) {
+        copies.push({
+          fromFile: entry.file,
+          toFile: ours.file,
+          content: oursContent,
+          removeFile: entry.file,
+        });
+      }
+      continue;
+    }
+
+    const base = baseById.get(entry.id);
+    if (base) {
+      const baseContent = base.content !== undefined ? base.content : fs.readFileSync(base.path, 'utf8');
+      const baseHash = contentHash(baseContent);
+      if (oursHash === baseHash) {
+        copies.push({
+          fromFile: entry.file,
+          toFile: ours.file,
+          content: theirsContent,
+          removeFile: entry.file !== ours.file ? entry.file : null,
+        });
+        continue;
+      }
+      if (theirsHash === baseHash) {
+        if (entry.file !== ours.file) {
+          copies.push({
+            fromFile: entry.file,
+            toFile: ours.file,
+            content: oursContent,
+            removeFile: entry.file,
+          });
+        }
+        continue;
+      }
       fail(
         `decision ${entry.id} was edited on both sides; resolve ${ours.file} manually before absorbing`
+      );
+    }
+    if (baseIds.has(entry.id)) {
+      fail(
+        `decision ${entry.id} was edited on both sides or its base content is unavailable; ` +
+          `resolve ${ours.file} manually before absorbing`
       );
     }
     const newId = nextDecisionIdFromIds(usedIds);
@@ -2295,9 +2428,11 @@ function repairDuplicateIntentRecords(records, decisionMap) {
   const used = [];
   const mappings = [];
   const result = [];
+  let incomingSide = false;
   for (const record of records) {
     let event = record.event;
     if (event.type === 'begin' && seenBegins.has(event.id)) {
+      incomingSide = true;
       const { date } = parseIntentId(event.id);
       const newId = nextIdForDate(date, used);
       intentMap.set(event.id, newId);
@@ -2305,12 +2440,12 @@ function repairDuplicateIntentRecords(records, decisionMap) {
     } else if (event.type === 'begin') {
       seenBegins.add(event.id);
     }
-    const remapped = remapEvent(event, intentMap, decisionMap);
+    const remapped = remapEvent(event, intentMap, incomingSide ? decisionMap : new Map());
     const changed = remapped !== event && JSON.stringify(remapped) !== JSON.stringify(event);
     result.push(changed ? { event: remapped } : record);
     used.push(result.at(-1).event);
   }
-  return { records: result, mappings };
+  return { records: result, mappings, incomingSide };
 }
 
 function serializeRecords(records) {
@@ -2479,6 +2614,7 @@ function finishAbsorb({
   outputFile,
   intentCount,
   allowConflict = false,
+  followupMessage = null,
 }) {
   const { abandoned, conflict } = resolveOpenIntents(result, oursRecords, theirsRecords, abandon, {
     allowConflict,
@@ -2501,12 +2637,13 @@ function finishAbsorb({
   if (conflict) {
     printLine('multiple intents remain in progress; re-run with --abandon-theirs or --abandon-ours');
   }
+  if (followupMessage) printLine(followupMessage);
   return {
     mappings,
     abandoned,
     copies: copies.map((item) => item.toFile),
     outputFile,
-    exitCode: conflict ? 1 : 0,
+    exitCode: conflict || followupMessage ? 1 : 0,
   };
 }
 
@@ -2515,6 +2652,7 @@ function absorbFromStreams(ours, theirs, baseRecords, options) {
   const decisionPlan = planDecisionAbsorb({
     oursEntries: options.oursDecisionEntries || [],
     theirsEntries: options.theirsDecisionEntries || [],
+    baseEntries: options.baseDecisionEntries || [],
     baseIds: options.baseDecisionIds || new Set(),
   });
   const remapped = remapTheirsRecords(
@@ -2533,13 +2671,61 @@ function absorbFromStreams(ours, theirs, baseRecords, options) {
     dryRun: options.dryRun,
     outputFile: options.outputFile,
     allowConflict: options.allowConflict,
+    followupMessage: options.followupMessage,
     intentCount: streams.theirsNew.filter((record) => record.event.type === 'begin').length,
   });
+}
+
+function gitAbsorbRepairContext(records, decisionEntries) {
+  const pending = gitOtherHead();
+  if (pending) {
+    return {
+      ours: 'HEAD',
+      theirs: pending,
+      base: gitMergeBaseFor('HEAD', pending),
+    };
+  }
+  if (!hasDuplicateDecisionIds(decisionEntries) && !hasDuplicateIntentBegins(records)) return null;
+  const parents = gitMergeParents();
+  if (!parents) return null;
+  return {
+    ...parents,
+    base: gitMergeBaseFor(parents.ours, parents.theirs),
+  };
+}
+
+function absorbFromGitContext(context, { abandon, dryRun, outputFile }) {
+  const baseRecords = context.base ? gitIntentRecords(context.base) : [];
+  return absorbFromStreams(
+    gitIntentRecords(context.ours),
+    gitIntentRecords(context.theirs),
+    baseRecords,
+    {
+      abandon,
+      dryRun,
+      outputFile,
+      oursDecisionEntries: gitDecisionEntries(context.ours),
+      theirsDecisionEntries: gitDecisionEntries(context.theirs),
+      baseDecisionEntries: context.base ? gitDecisionEntries(context.base) : [],
+      baseDecisionIds: context.base
+        ? gitDecisionIds(context.base)
+        : collectDecisionIdsFromEvents(baseRecords.map((record) => record.event)),
+    }
+  );
 }
 
 function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
   const oursFile = logFile();
   const loaded = loadAbsorbSide(oursFile, oursFile, { repairTail: true, allowMissing: !otherFile });
+  const currentDecisionEntries = !otherFile
+    ? listDecisionEntries(decisionDir(), { allowDuplicates: true })
+    : [];
+  const gitContext = !otherFile
+    ? gitAbsorbRepairContext(loaded.records || [], currentDecisionEntries)
+    : null;
+  if (gitContext) {
+    return absorbFromGitContext(gitContext, { abandon, dryRun, outputFile: oursFile });
+  }
   if (loaded.conflict) {
     const baseIds = collectDecisionIdsFromEvents(
       loaded.ours.slice(0, commonPrefixLength(loaded.ours, loaded.theirs)).map((record) => record.event)
@@ -2555,22 +2741,29 @@ function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
         ? listDecisionEntries(otherDecisions)
         : splitDuplicateDecisions(listDecisionEntries(decisionDir(), { allowDuplicates: true })).theirs,
       baseDecisionIds,
+      baseDecisionEntries: gitBase ? gitDecisionEntries(gitBase) : [],
     });
   }
 
   if (!otherFile) {
-    const oursEntries = listDecisionEntries(decisionDir(), { allowDuplicates: true });
+    const oursEntries = currentDecisionEntries;
     const split = splitDuplicateDecisions(oursEntries);
-    const repaired = repairDuplicateIntentRecords(loaded.records, new Map());
     const gitBase = gitMergeBase();
     const decisionPlan = planDecisionAbsorb({
       oursEntries: split.ours,
       theirsEntries: split.theirs,
+      baseEntries: gitBase ? gitDecisionEntries(gitBase) : [],
       baseIds: gitBase ? gitDecisionIds(gitBase) : new Set(),
     });
-    const withDecisions = repairDuplicateIntentRecords(repaired.records, decisionPlan.decisionMap);
-    const result = withDecisions.records;
-    const mappings = [...repaired.mappings, ...withDecisions.mappings, ...decisionPlan.mappings];
+    const repaired = repairDuplicateIntentRecords(loaded.records, decisionPlan.decisionMap);
+    if (decisionPlan.mappings.length > 0 && !repaired.incomingSide) {
+      fail(
+        'cannot determine which intent records own the duplicate decision; ' +
+          'run absorb during the merge or provide the incoming log and decision directory'
+      );
+    }
+    const result = repaired.records;
+    const mappings = [...repaired.mappings, ...decisionPlan.mappings];
     const remappedIds = new Set(
       mappings.filter((mapping) => mapping.kind === 'intent').map((mapping) => mapping.to)
     );
@@ -2606,6 +2799,7 @@ function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
     outputFile: oursFile,
     oursDecisionEntries: listDecisionEntries(decisionDir()),
     theirsDecisionEntries: listDecisionEntries(otherDecisions || path.join(path.dirname(otherFile), '..', '.decision-log')),
+    baseDecisionEntries: gitBase ? gitDecisionEntries(gitBase) : [],
     baseDecisionIds,
   });
 }
@@ -2617,18 +2811,36 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
   if (base.conflict || ours.conflict || theirs.conflict) {
     fail('git merge driver received a log that still contains conflict markers');
   }
-  const otherHead = gitOtherHead();
-  const mergeBase = gitMergeBase();
+  const otherHead =
+    gitOtherHead() || gitFindCommitForFile(theirsFile, '.intent-log/events.jsonl');
+  const mergeBase = otherHead ? gitMergeBaseFor('HEAD', otherHead) : null;
+  let followupMessage = null;
+  if (!otherHead) {
+    followupMessage =
+      'incoming Git tree could not be identified safely; re-run driftseal absorb after Git stops the merge';
+  } else {
+    const decisionPlan = planDecisionAbsorb({
+      oursEntries: gitDecisionEntries('HEAD'),
+      theirsEntries: gitDecisionEntries(otherHead),
+      baseEntries: mergeBase ? gitDecisionEntries(mergeBase) : [],
+      baseIds: mergeBase
+        ? gitDecisionIds(mergeBase)
+        : collectDecisionIdsFromEvents(base.records.map((record) => record.event)),
+    });
+    const requiresDecisionRepair =
+      decisionPlan.mappings.length > 0 ||
+      decisionPlan.copies.some((copy) => copy.removeFile && copy.removeFile !== copy.toFile);
+    if (requiresDecisionRepair) {
+      followupMessage =
+        'decision ids require worktree repair; run driftseal absorb, then stage the repaired logs';
+    }
+  }
   return absorbFromStreams(ours.records, theirs.records, base.records, {
     abandon,
     dryRun,
     outputFile: oursFile,
     allowConflict: !abandon,
-    oursDecisionEntries: listDecisionEntries(decisionDir(), { allowDuplicates: true }),
-    theirsDecisionEntries: otherHead ? gitDecisionEntries(otherHead) : [],
-    baseDecisionIds: mergeBase
-      ? gitDecisionIds(mergeBase)
-      : collectDecisionIdsFromEvents(base.records.map((record) => record.event)),
+    followupMessage,
   });
 }
 
@@ -3099,6 +3311,7 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(6), eol),
         protocolEol(previousIntentProtocolBlock(7), eol),
         protocolEol(previousIntentProtocolBlock(8), eol),
+        protocolEol(previousIntentProtocolBlock(9), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -3117,6 +3330,7 @@ const commands = {
         protocolEol(previousDecisionProtocolBlock(6), eol),
         protocolEol(previousDecisionProtocolBlock(7), eol),
         protocolEol(previousDecisionProtocolBlock(8), eol),
+        protocolEol(previousDecisionProtocolBlock(9), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });
