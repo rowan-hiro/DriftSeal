@@ -34,7 +34,9 @@ cd your-project
 driftseal init
 ```
 
-`driftseal init` safely adds the protocol to `AGENTS.md` and can be run again without duplicating it. DriftSeal requires Node.js 18+.
+`driftseal init` writes the protocol to `AGENTS.md`, including how to `absorb`
+colliding worktree logs, and configures the local git merge driver. It can be
+run again without duplicating either. DriftSeal requires Node.js 18+.
 
 For local development from this checkout:
 
@@ -207,6 +209,8 @@ Single-step commands that only build, check, or record work already done — com
 | `driftseal log [-n N] [--all]` | Review intent history (`--all` includes reclaimed records). |
 | `driftseal reclaim [id ...] --reason "..." [--older-than days] [--force] [--dry-run]` | Hide meaningless closed records behind append-only markers. |
 | `driftseal unreclaim <id> --reason "..."` | Restore a reclaimed record to the visible log. |
+| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs \| --abandon-ours] [--dry-run]` | Merge another worktree's logs, remapping colliding intent and decision ids. |
+| `driftseal absorb --git <base> <ours> <theirs>` | Git merge driver for `.intent-log/events.jsonl`. |
 | `driftseal decision add "<title>" -c "..." -o "..."` | Write a numbered MADR decision. |
 | `driftseal decision update <id> [-s status] -n "..."` | Reconcile a linked decision in the open intent. |
 | `driftseal decision list [-s status] [--last N \| --count]` | List or count decision records, optionally filtered by status. |
@@ -215,7 +219,7 @@ Single-step commands that only build, check, or record work already done — com
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the repository-pinned MCP server into Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | Install advisory lifecycle reminders into Kimi Code, Claude Code, or Codex. |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | Emit the reminder a lifecycle hook injects; never blocks. |
-| `driftseal init` | Add the adoption protocol to `AGENTS.md`. |
+| `driftseal init` | Add the adoption protocol to `AGENTS.md` and configure the git merge driver. |
 | `driftseal --version` or `driftseal -V` | Print the installed DriftSeal version. |
 | `driftseal help` | Print CLI usage. |
 
@@ -269,9 +273,31 @@ contents. Status-filtered listing and counting parse all records because status
 is stored in each MADR document; DriftSeal does not maintain a stale-prone sidecar
 index.
 
+## Merging worktrees
+
+Two worktrees allocate intent and decision ids from their local logs, so a
+same-day parallel `begin` or `decision add` can collide when the branches
+merge. `driftseal absorb` rebuilds a valid log by keeping our ids and remapping
+the incoming side, then prints the mapping. A single lineage stays append-only;
+absorb is the one cross-lineage rewrite.
+
+```sh
+driftseal absorb ../other-worktree/.intent-log/events.jsonl \
+  --decisions ../other-worktree/.decision-log
+```
+
+With no path, `absorb` repairs the current log after a git conflict or a
+concatenated duplicate. If both sides still have an open intent, pass
+`--abandon-theirs` or `--abandon-ours`. Concurrent edits of a decision that
+already existed in the shared base are not auto-merged.
+
+`driftseal init` writes that absorb rule into `AGENTS.md`, plus `.gitattributes`
+and the local git merge driver so `events.jsonl` merges through `absorb --git`.
+Clones need `init` again because the driver lives in local git config.
+
 ## Storage
 
-- `.intent-log/events.jsonl` is the append-only intent log. All access goes through `driftseal` (CLI or MCP) — never read, edit, move, or delete it directly; use `driftseal reclaim` to retire meaningless records instead of deleting log lines.
+- `.intent-log/events.jsonl` is the append-only intent log. All access goes through `driftseal` (CLI or MCP) — never read, edit, move, or delete it directly; use `driftseal reclaim` to retire meaningless records instead of deleting log lines. After a merge collision, use `driftseal absorb` instead of editing the file.
 - `.decision-log/` contains numbered MADR decision records.
 - Set `DRIFTSEAL_HOME` or `DRIFTSEAL_DECISION_HOME` to store either log outside the current project.
 

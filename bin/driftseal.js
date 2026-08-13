@@ -36,7 +36,7 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const EVENT_SCHEMA_VERSION = 3;
-const PROTOCOL_VERSION = 8;
+const PROTOCOL_VERSION = 9;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
@@ -213,15 +213,19 @@ function readEvents({ repairTail = false, file = logFile() } = {}) {
       content = content.slice(0, validLength);
     }
   }
+  return parseJsonlRecords(content, file).map((record) => record.event);
+}
+
+function parseJsonlRecords(content, source = 'log') {
   return content
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line, i) => {
       try {
-        return normalizeEvent(JSON.parse(line), i + 1);
+        return { raw: line, event: normalizeEvent(JSON.parse(line), i + 1) };
       } catch (err) {
         if (err instanceof DriftSealError) throw err;
-        fail(`corrupt log line ${i + 1} in ${file}`);
+        fail(`corrupt log line ${i + 1} in ${source}`);
       }
     });
 }
@@ -714,16 +718,26 @@ function openIntent(records) {
   return open[0] || null;
 }
 
-function nextId(events) {
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+function parseIntentId(id) {
+  const match = String(id).match(/^(\d{4}-\d{2}-\d{2})-(\d+)$/);
+  if (!match) fail(`invalid intent id: ${id}`);
+  return { date: match[1], seq: Number.parseInt(match[2], 10) };
+}
+
+function nextIdForDate(date, events) {
   let maxSeq = 0;
+  const prefix = `${date}-`;
   for (const ev of events) {
-    if (ev.type === 'begin' && typeof ev.id === 'string' && ev.id.startsWith(today + '-')) {
-      const seq = parseInt(ev.id.slice(today.length + 1), 10);
+    if (ev.type === 'begin' && typeof ev.id === 'string' && ev.id.startsWith(prefix)) {
+      const seq = Number.parseInt(ev.id.slice(prefix.length), 10);
       if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
     }
   }
-  return `${today}-${String(maxSeq + 1).padStart(3, '0')}`;
+  return `${date}-${String(maxSeq + 1).padStart(3, '0')}`;
+}
+
+function nextId(events) {
+  return nextIdForDate(new Date().toISOString().slice(0, 10), events);
 }
 
 function normalizeDecisionId(value) {
@@ -771,23 +785,29 @@ function compareDecisionEntries(a, b) {
   return a.id.length - b.id.length || a.id.localeCompare(b.id) || a.file.localeCompare(b.file);
 }
 
-function decisionIndex() {
-  if (!fs.existsSync(decisionDir())) return [];
+function listDecisionEntries(dir, { allowDuplicates = false } = {}) {
+  if (!dir || !fs.existsSync(dir)) return [];
   const entries = [];
   const ids = new Map();
-  for (const entry of fs.readdirSync(decisionDir(), { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const match = entry.name.match(/^(\d{4,})-.*\.md$/);
     if (!match) continue;
-    const fullPath = path.join(decisionDir(), entry.name);
+    const fullPath = path.join(dir, entry.name);
     const stat = fs.lstatSync(fullPath);
     if (stat.isSymbolicLink()) fail(`decision record must not be a symbolic link: ${entry.name}`);
     if (!stat.isFile()) fail(`decision record is not a regular file: ${entry.name}`);
     const id = normalizeDecisionId(match[1]);
-    if (ids.has(id)) fail(`duplicate decision id ${id}: ${ids.get(id)}, ${entry.name}`);
-    ids.set(id, entry.name);
+    if (ids.has(id) && !allowDuplicates) {
+      fail(`duplicate decision id ${id}: ${ids.get(id)}, ${entry.name}`);
+    }
+    if (!ids.has(id)) ids.set(id, entry.name);
     entries.push({ id, file: entry.name, path: fullPath });
   }
   return entries.sort(compareDecisionEntries);
+}
+
+function decisionIndex() {
+  return listDecisionEntries(decisionDir());
 }
 
 function readDecision(entry) {
@@ -1146,13 +1166,23 @@ MCP and lifecycle hooks are optional adapters.
 \`driftseal\` commands or the MCP tools. Retire meaningless closed records with
 \`driftseal reclaim [id ...] --reason "<why>"\` — it appends a marker, never
 deletes log lines; \`driftseal unreclaim <id> --reason "<why>"\` restores one.
+After a merge collision, run \`driftseal absorb\` rather than editing the log;
+if both sides still have an open intent, add \`--abandon-theirs\` or
+\`--abandon-ours\`.
 
 Log: \`.intent-log/events.jsonl\` (override with \`$DRIFTSEAL_HOME\`); commit it with the code.
 ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version) {
-  const v7 = intentProtocolBlock(version).replace(
+  const v8 = intentProtocolBlock(version).replace(
+    '\nAfter a merge collision, run `driftseal absorb` rather than editing the log;\n' +
+      'if both sides still have an open intent, add `--abandon-theirs` or\n' +
+      '`--abandon-ours`.',
+    ''
+  );
+  if (version >= 8) return v8;
+  const v7 = v8.replace(
     '\nThis `AGENTS.md` protocol is the source of truth. Use the `driftseal` CLI by\n' +
       'default; the companion skill only helps discover and resume the workflow, while\n' +
       'MCP and lifecycle hooks are optional adapters.\n',
@@ -1220,6 +1250,8 @@ Count postponed choices with \`driftseal decision list --status deferred --count
 then review them with \`driftseal decision list --status deferred\`.
 When an intent declares an existing decision with \`--decision <id>\`, use
 \`driftseal decision update\` to record its status transition or explicit confirmation.
+After a merge, colliding decision ids are remapped with \`driftseal absorb\`;
+concurrent edits of a shared decision are not auto-merged.
 Commit \`.decision-log/\` with the code.
 ${DECISION_PROTOCOL_END}`;
 }
@@ -1276,8 +1308,13 @@ Commit \`.decision-log/\` with the code.`;
 }
 
 function previousDecisionProtocolBlock(version) {
-  if (version >= 7) return decisionProtocolBlock(version);
-  return decisionProtocolBlock(version).replace(' --driver "<decision driver>"', '');
+  const v8 = decisionProtocolBlock(version).replace(
+    '\nAfter a merge, colliding decision ids are remapped with `driftseal absorb`;\n' +
+      'concurrent edits of a shared decision are not auto-merged.',
+    ''
+  );
+  if (version >= 7) return v8;
+  return v8.replace(' --driver "<decision driver>"', '');
 }
 
 function upgradeManagedBlock({
@@ -2005,6 +2042,596 @@ function runHookReminder(event, argv) {
   return { changed: true, event, format };
 }
 
+function gitCapture(args, cwd = process.cwd()) {
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function isGitWorkTree(cwd = process.cwd()) {
+  return gitCapture(['rev-parse', '--is-inside-work-tree'], cwd) === 'true';
+}
+
+function gitOtherHead(cwd = process.cwd()) {
+  return (
+    gitCapture(['rev-parse', '--verify', 'MERGE_HEAD'], cwd) ||
+    gitCapture(['rev-parse', '--verify', 'REBASE_HEAD'], cwd) ||
+    gitCapture(['rev-parse', '--verify', 'CHERRY_PICK_HEAD'], cwd)
+  );
+}
+
+function gitMergeBase(cwd = process.cwd()) {
+  const other = gitOtherHead(cwd);
+  if (!other) return null;
+  return gitCapture(['merge-base', 'HEAD', other], cwd);
+}
+
+function gitDecisionIds(treeish, cwd = process.cwd()) {
+  const out = gitCapture(['ls-tree', '-r', '--name-only', treeish, '.decision-log'], cwd);
+  if (!out) return new Set();
+  const ids = new Set();
+  for (const file of out.split('\n')) {
+    const match = path.basename(file).match(/^(\d{4,})-.*\.md$/);
+    if (match) ids.add(normalizeDecisionId(match[1]));
+  }
+  return ids;
+}
+
+function gitDecisionEntries(treeish, cwd = process.cwd()) {
+  const out = gitCapture(['ls-tree', '-r', '--name-only', treeish, '.decision-log'], cwd);
+  if (!out) return [];
+  const entries = [];
+  for (const file of out.split('\n')) {
+    const name = path.basename(file);
+    const match = name.match(/^(\d{4,})-.*\.md$/);
+    if (!match) continue;
+    const content = gitCapture(['show', `${treeish}:${file}`], cwd);
+    if (content === null) continue;
+    entries.push({
+      id: normalizeDecisionId(match[1]),
+      file: name,
+      path: file,
+      content,
+    });
+  }
+  return entries;
+}
+
+function canonicalEvent(event) {
+  return Object.fromEntries(
+    Object.entries(event)
+      .filter(([, value]) => value !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
+}
+
+function eventsEqual(left, right) {
+  return JSON.stringify(canonicalEvent(left)) === JSON.stringify(canonicalEvent(right));
+}
+
+function commonPrefixLength(ours, theirs) {
+  let index = 0;
+  while (
+    index < ours.length &&
+    index < theirs.length &&
+    eventsEqual(ours[index].event, theirs[index].event)
+  ) {
+    index += 1;
+  }
+  return index;
+}
+
+function recordsHavePrefix(records, prefix) {
+  if (prefix.length > records.length) return false;
+  return prefix.every((record, index) => eventsEqual(record.event, records[index].event));
+}
+
+function parseConflictContent(content) {
+  if (!/^<<<<<<< /m.test(content)) return null;
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
+  const ours = [];
+  const theirs = [];
+  let mode = 'base';
+  for (const line of content.split(/\r?\n/)) {
+    if (line.startsWith('<<<<<<< ')) {
+      mode = 'ours';
+      continue;
+    }
+    if (line.startsWith('||||||| ')) {
+      mode = 'ancestor';
+      continue;
+    }
+    if (line.startsWith('=======')) {
+      mode = 'theirs';
+      continue;
+    }
+    if (line.startsWith('>>>>>>> ')) {
+      mode = 'base';
+      continue;
+    }
+    if (mode === 'base') {
+      ours.push(line);
+      theirs.push(line);
+    } else if (mode === 'ours') {
+      ours.push(line);
+    } else if (mode === 'theirs') {
+      theirs.push(line);
+    }
+  }
+  return { oursText: ours.join(eol), theirsText: theirs.join(eol) };
+}
+
+function collectDecisionIdsFromEvents(events) {
+  const ids = new Set();
+  for (const event of events) {
+    if (Array.isArray(event.decisions)) {
+      for (const id of event.decisions) ids.add(normalizeDecisionId(id));
+    }
+    if (event.decisionId) ids.add(normalizeDecisionId(event.decisionId));
+  }
+  return ids;
+}
+
+function nextDecisionIdFromIds(ids) {
+  if (ids.size === 0) return '0001';
+  let max = 0n;
+  for (const id of ids) {
+    const value = BigInt(id);
+    if (value > max) max = value;
+  }
+  return String(max + 1n).padStart(4, '0');
+}
+
+function decisionSlugFromFile(file) {
+  return file.replace(/^\d+-/, '').replace(/\.md$/, '');
+}
+
+function rewriteDecisionId(content, newId) {
+  return content.replace(/^# [0-9]+\. /, `# ${String(BigInt(newId))}. `);
+}
+
+function splitDuplicateDecisions(entries) {
+  const ours = [];
+  const theirs = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry.id)) theirs.push(entry);
+    else {
+      seen.add(entry.id);
+      ours.push(entry);
+    }
+  }
+  return { ours, theirs };
+}
+
+function planDecisionAbsorb({ oursEntries, theirsEntries, baseIds }) {
+  const mappings = [];
+  const copies = [];
+  const decisionMap = new Map();
+  const usedIds = new Set(oursEntries.map((entry) => entry.id));
+  const oursById = new Map();
+  for (const entry of oursEntries) {
+    if (!oursById.has(entry.id)) oursById.set(entry.id, entry);
+  }
+
+  for (const entry of theirsEntries) {
+    const ours = oursById.get(entry.id);
+    const theirsContent = entry.content !== undefined ? entry.content : fs.readFileSync(entry.path, 'utf8');
+    if (!ours) {
+      copies.push({
+        fromFile: entry.file,
+        toFile: entry.file,
+        content: theirsContent,
+        removeFile: null,
+      });
+      usedIds.add(entry.id);
+      continue;
+    }
+    const oursContent = ours.content !== undefined ? ours.content : fs.readFileSync(ours.path, 'utf8');
+    if (contentHash(oursContent) === contentHash(theirsContent)) continue;
+    if (baseIds.has(entry.id)) {
+      fail(
+        `decision ${entry.id} was edited on both sides; resolve ${ours.file} manually before absorbing`
+      );
+    }
+    const newId = nextDecisionIdFromIds(usedIds);
+    usedIds.add(newId);
+    decisionMap.set(entry.id, newId);
+    mappings.push({ kind: 'decision', from: entry.id, to: newId });
+    copies.push({
+      fromFile: entry.file,
+      toFile: `${newId}-${decisionSlugFromFile(entry.file)}.md`,
+      content: rewriteDecisionId(theirsContent, newId),
+      removeFile: entry.file !== ours.file ? entry.file : null,
+    });
+  }
+  return { decisionMap, mappings, copies };
+}
+
+function remapEvent(event, intentMap, decisionMap) {
+  const next = { ...event };
+  if (intentMap.has(event.id)) next.id = intentMap.get(event.id);
+  if (Array.isArray(next.decisions) && next.decisions.length > 0) {
+    next.decisions = next.decisions.map((id) => {
+      const normalized = normalizeDecisionId(id);
+      return decisionMap.get(normalized) || id;
+    });
+  }
+  if (next.decisionId) {
+    const normalized = normalizeDecisionId(next.decisionId);
+    if (decisionMap.has(normalized)) next.decisionId = decisionMap.get(normalized);
+  }
+  return next;
+}
+
+function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap) {
+  const intentMap = new Map();
+  const mappings = [];
+  const used = [...oursUsedEvents];
+  const records = theirsNew.map((record) => {
+    let event = record.event;
+    if (event.type === 'begin' && used.some((item) => item.type === 'begin' && item.id === event.id)) {
+      const { date } = parseIntentId(event.id);
+      const newId = nextIdForDate(date, used);
+      intentMap.set(event.id, newId);
+      mappings.push({ kind: 'intent', from: event.id, to: newId });
+    }
+    event = remapEvent(event, intentMap, decisionMap);
+    used.push(event);
+    return { event };
+  });
+  return { records, mappings };
+}
+
+function repairDuplicateIntentRecords(records, decisionMap) {
+  const seenBegins = new Set();
+  const intentMap = new Map();
+  const used = [];
+  const mappings = [];
+  const result = [];
+  for (const record of records) {
+    let event = record.event;
+    if (event.type === 'begin' && seenBegins.has(event.id)) {
+      const { date } = parseIntentId(event.id);
+      const newId = nextIdForDate(date, used);
+      intentMap.set(event.id, newId);
+      mappings.push({ kind: 'intent', from: event.id, to: newId });
+    } else if (event.type === 'begin') {
+      seenBegins.add(event.id);
+    }
+    const remapped = remapEvent(event, intentMap, decisionMap);
+    const changed = remapped !== event && JSON.stringify(remapped) !== JSON.stringify(event);
+    result.push(changed ? { event: remapped } : record);
+    used.push(result.at(-1).event);
+  }
+  return { records: result, mappings };
+}
+
+function serializeRecords(records) {
+  if (records.length === 0) return '';
+  return `${records.map((record) => record.raw || JSON.stringify(record.event)).join('\n')}\n`;
+}
+
+function writeJsonl(file, records) {
+  ensureDirectoryDurable(path.dirname(file));
+  atomicWriteFile(file, serializeRecords(records));
+}
+
+function applyDecisionCopies(copies, dryRun) {
+  if (dryRun || copies.length === 0) return;
+  ensureDirectoryDurable(decisionDir());
+  for (const item of copies) {
+    atomicWriteFile(path.join(decisionDir(), item.toFile), item.content);
+    if (item.removeFile && item.removeFile !== item.toFile) {
+      const stale = path.join(decisionDir(), item.removeFile);
+      if (fs.existsSync(stale)) {
+        fs.unlinkSync(stale);
+        fsyncDirectory(decisionDir());
+      }
+    }
+  }
+}
+
+function countAbsorbedIntents(records) {
+  return records.filter((record) => record.event.type === 'begin').length;
+}
+
+function printAbsorbReport({ mappings, abandoned, intentCount }) {
+  const remappedIntents = mappings.filter((mapping) => mapping.kind === 'intent').length;
+  const remappedDecisions = mappings.filter((mapping) => mapping.kind === 'decision').length;
+  printLine(
+    `absorbed ${intentCount} intent(s), remapped ${remappedIntents} intent id(s), ${remappedDecisions} decision id(s)`
+  );
+  for (const mapping of mappings) {
+    if (mapping.kind === 'intent') printLine(`${mapping.from} (theirs) -> ${mapping.to}`);
+    else printLine(`decision ${mapping.from} (theirs) -> ${mapping.to}`);
+  }
+  if (abandoned) printLine(`abandoned ${abandoned} during absorb`);
+}
+
+function abandonOpenIntent(records, targetId, side) {
+  records.push({
+    event: {
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      type: 'end',
+      id: targetId,
+      ts: new Date().toISOString(),
+      status: 'abandoned',
+      note: `abandoned during absorb (--abandon-${side})`,
+      verifyResult: null,
+    },
+  });
+  return targetId;
+}
+
+function resolveOpenIntents(result, oursRecords, theirsRecords, abandon, { allowConflict = false } = {}) {
+  const oursOpen = openIntent(fold(oursRecords.map((record) => record.event)));
+  const theirsOpen = openIntent(fold(theirsRecords.map((record) => record.event)));
+  try {
+    openIntent(fold(result.map((record) => record.event)));
+    return { abandoned: null, conflict: false };
+  } catch (err) {
+    if (!(err instanceof DriftSealError) || !/multiple intents in progress/.test(err.message)) {
+      throw err;
+    }
+    if (abandon === 'theirs' && theirsOpen) {
+      return { abandoned: abandonOpenIntent(result, theirsOpen.id, 'theirs'), conflict: false };
+    }
+    if (abandon === 'ours' && oursOpen) {
+      return { abandoned: abandonOpenIntent(result, oursOpen.id, 'ours'), conflict: false };
+    }
+    if (allowConflict) return { abandoned: null, conflict: true };
+    fail(`${err.message}; re-run with --abandon-theirs or --abandon-ours`);
+  }
+}
+
+function mergeRecordStreams(ours, theirs, baseRecords) {
+  const inferred = ours.slice(0, commonPrefixLength(ours, theirs));
+  const prefix = baseRecords && baseRecords.length > 0 ? baseRecords : inferred;
+  if (!recordsHavePrefix(ours, prefix) || !recordsHavePrefix(theirs, prefix)) {
+    fail('cannot absorb: shared history does not match the base log');
+  }
+  return {
+    base: prefix,
+    oursNew: ours.slice(prefix.length),
+    theirsNew: theirs.slice(prefix.length),
+  };
+}
+
+function GITATTRIBUTES_MERGE_LINE() {
+  return '.intent-log/events.jsonl merge=driftseal';
+}
+
+function ensureGitAttributes() {
+  const target = path.join(process.cwd(), '.gitattributes');
+  const line = GITATTRIBUTES_MERGE_LINE();
+  const existed = fs.existsSync(target);
+  const current = existed ? fs.readFileSync(target, 'utf8') : '';
+  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  const lines = current.split(/\r?\n/);
+  if (lines.some((entry) => entry.trim() === line)) return { changed: false, target };
+  const prefix = current.length === 0 || current.endsWith('\n') || current.endsWith('\r\n') ? '' : eol;
+  const next = `${current}${prefix}${line}${eol}`;
+  atomicWriteFile(target, next);
+  return { changed: true, target };
+}
+
+function ensureGitMergeDriver() {
+  if (!isGitWorkTree()) return { changed: false, configured: false };
+  const name = gitCapture(['config', '--local', '--get', 'merge.driftseal.name']);
+  const driver = gitCapture(['config', '--local', '--get', 'merge.driftseal.driver']);
+  const expectedName = 'DriftSeal intent log merge';
+  const expectedDriver = 'driftseal absorb --git %O %A %B';
+  if (name === expectedName && driver === expectedDriver) {
+    return { changed: false, configured: true };
+  }
+  execFileSync('git', ['config', '--local', 'merge.driftseal.name', expectedName], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  execFileSync('git', ['config', '--local', 'merge.driftseal.driver', expectedDriver], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  return { changed: true, configured: true };
+}
+
+function absorbUsage() {
+  return (
+    'usage: driftseal absorb [other-events.jsonl] [--decisions <dir>] [--abandon-theirs | --abandon-ours] [--dry-run]\n' +
+    '   or: driftseal absorb --git <base> <ours> <theirs>'
+  );
+}
+
+function loadAbsorbSide(file, label, { repairTail = false, allowMissing = false } = {}) {
+  if (!fs.existsSync(file)) {
+    if (allowMissing) return { records: [], conflict: false };
+    fail(`intent log not found: ${file}`);
+  }
+  let content = fs.readFileSync(file, 'utf8');
+  if (repairTail && !/^<<<<<<< /m.test(content)) {
+    readEvents({ file, repairTail: true });
+    content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  }
+  const conflict = parseConflictContent(content);
+  if (conflict) {
+    return {
+      ours: parseJsonlRecords(conflict.oursText, `${label} ours`),
+      theirs: parseJsonlRecords(conflict.theirsText, `${label} theirs`),
+      conflict: true,
+    };
+  }
+  return { records: parseJsonlRecords(content, label), conflict: false };
+}
+
+function finishAbsorb({
+  result,
+  oursRecords,
+  theirsRecords,
+  mappings,
+  copies,
+  abandon,
+  dryRun,
+  outputFile,
+  intentCount,
+  allowConflict = false,
+}) {
+  const { abandoned, conflict } = resolveOpenIntents(result, oursRecords, theirsRecords, abandon, {
+    allowConflict,
+  });
+  fold(result.map((record) => record.event));
+  if (!conflict) openIntent(fold(result.map((record) => record.event)));
+  if (!dryRun) {
+    writeJsonl(outputFile, result);
+    applyDecisionCopies(copies, dryRun);
+  }
+  if (intentCount === 0 && mappings.length === 0 && copies.length === 0 && !abandoned) {
+    printLine('nothing to absorb');
+  } else {
+    printAbsorbReport({
+      mappings,
+      abandoned,
+      intentCount,
+    });
+  }
+  if (conflict) {
+    printLine('multiple intents remain in progress; re-run with --abandon-theirs or --abandon-ours');
+  }
+  return {
+    mappings,
+    abandoned,
+    copies: copies.map((item) => item.toFile),
+    outputFile,
+    exitCode: conflict ? 1 : 0,
+  };
+}
+
+function absorbFromStreams(ours, theirs, baseRecords, options) {
+  const streams = mergeRecordStreams(ours, theirs, baseRecords);
+  const decisionPlan = planDecisionAbsorb({
+    oursEntries: options.oursDecisionEntries || [],
+    theirsEntries: options.theirsDecisionEntries || [],
+    baseIds: options.baseDecisionIds || new Set(),
+  });
+  const remapped = remapTheirsRecords(
+    streams.theirsNew,
+    [...streams.base, ...streams.oursNew].map((record) => record.event),
+    decisionPlan.decisionMap
+  );
+  const result = [...streams.base, ...streams.oursNew, ...remapped.records];
+  return finishAbsorb({
+    result,
+    oursRecords: [...streams.base, ...streams.oursNew],
+    theirsRecords: [...streams.base, ...remapped.records],
+    mappings: [...remapped.mappings, ...decisionPlan.mappings],
+    copies: decisionPlan.copies,
+    abandon: options.abandon,
+    dryRun: options.dryRun,
+    outputFile: options.outputFile,
+    allowConflict: options.allowConflict,
+    intentCount: streams.theirsNew.filter((record) => record.event.type === 'begin').length,
+  });
+}
+
+function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
+  const oursFile = logFile();
+  const loaded = loadAbsorbSide(oursFile, oursFile, { repairTail: true, allowMissing: !otherFile });
+  if (loaded.conflict) {
+    const baseIds = collectDecisionIdsFromEvents(
+      loaded.ours.slice(0, commonPrefixLength(loaded.ours, loaded.theirs)).map((record) => record.event)
+    );
+    const gitBase = gitMergeBase();
+    const baseDecisionIds = gitBase ? gitDecisionIds(gitBase) : baseIds;
+    return absorbFromStreams(loaded.ours, loaded.theirs, null, {
+      abandon,
+      dryRun,
+      outputFile: oursFile,
+      oursDecisionEntries: listDecisionEntries(decisionDir(), { allowDuplicates: true }),
+      theirsDecisionEntries: otherDecisions
+        ? listDecisionEntries(otherDecisions)
+        : splitDuplicateDecisions(listDecisionEntries(decisionDir(), { allowDuplicates: true })).theirs,
+      baseDecisionIds,
+    });
+  }
+
+  if (!otherFile) {
+    const oursEntries = listDecisionEntries(decisionDir(), { allowDuplicates: true });
+    const split = splitDuplicateDecisions(oursEntries);
+    const repaired = repairDuplicateIntentRecords(loaded.records, new Map());
+    const gitBase = gitMergeBase();
+    const decisionPlan = planDecisionAbsorb({
+      oursEntries: split.ours,
+      theirsEntries: split.theirs,
+      baseIds: gitBase ? gitDecisionIds(gitBase) : new Set(),
+    });
+    const withDecisions = repairDuplicateIntentRecords(repaired.records, decisionPlan.decisionMap);
+    const result = withDecisions.records;
+    const mappings = [...repaired.mappings, ...withDecisions.mappings, ...decisionPlan.mappings];
+    const remappedIds = new Set(
+      mappings.filter((mapping) => mapping.kind === 'intent').map((mapping) => mapping.to)
+    );
+    const oursRecords = result.filter((record) => !remappedIds.has(record.event.id));
+    return finishAbsorb({
+      result,
+      oursRecords: oursRecords.length > 0 ? oursRecords : result,
+      theirsRecords: result,
+      mappings,
+      copies: decisionPlan.copies,
+      abandon,
+      dryRun,
+      outputFile: oursFile,
+      intentCount: remappedIds.size,
+    });
+  }
+
+  const theirs = loadAbsorbSide(otherFile, otherFile);
+  if (theirs.conflict) fail(`incoming log still contains conflict markers: ${otherFile}`);
+  const otherRoot = path.resolve(path.dirname(otherFile), '..');
+  const otherHead = isGitWorkTree(otherRoot) ? gitCapture(['rev-parse', 'HEAD'], otherRoot) : null;
+  const gitBase = otherHead ? gitCapture(['merge-base', 'HEAD', otherHead]) : gitMergeBase();
+  const baseDecisionIds = gitBase
+    ? gitDecisionIds(gitBase)
+    : collectDecisionIdsFromEvents(
+        loaded.records
+          .slice(0, commonPrefixLength(loaded.records, theirs.records))
+          .map((record) => record.event)
+      );
+  return absorbFromStreams(loaded.records, theirs.records, null, {
+    abandon,
+    dryRun,
+    outputFile: oursFile,
+    oursDecisionEntries: listDecisionEntries(decisionDir()),
+    theirsDecisionEntries: listDecisionEntries(otherDecisions || path.join(path.dirname(otherFile), '..', '.decision-log')),
+    baseDecisionIds,
+  });
+}
+
+function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
+  const base = loadAbsorbSide(baseFile, baseFile, { allowMissing: true });
+  const ours = loadAbsorbSide(oursFile, oursFile);
+  const theirs = loadAbsorbSide(theirsFile, theirsFile);
+  if (base.conflict || ours.conflict || theirs.conflict) {
+    fail('git merge driver received a log that still contains conflict markers');
+  }
+  const otherHead = gitOtherHead();
+  const mergeBase = gitMergeBase();
+  return absorbFromStreams(ours.records, theirs.records, base.records, {
+    abandon,
+    dryRun,
+    outputFile: oursFile,
+    allowConflict: !abandon,
+    oursDecisionEntries: listDecisionEntries(decisionDir(), { allowDuplicates: true }),
+    theirsDecisionEntries: otherHead ? gitDecisionEntries(otherHead) : [],
+    baseDecisionIds: mergeBase
+      ? gitDecisionIds(mergeBase)
+      : collectDecisionIdsFromEvents(base.records.map((record) => record.event)),
+  });
+}
+
 const commands = {
   begin(argv) {
     const { positionals, flags } = parseArgs(argv, {
@@ -2425,6 +3052,29 @@ const commands = {
     fail(hookUsage());
   },
 
+  absorb(argv) {
+    const { positionals, flags } = parseArgs(argv, {
+      git: 'boolean',
+      decisions: 'single',
+      'abandon-theirs': 'boolean',
+      'abandon-ours': 'boolean',
+      'dry-run': 'boolean',
+    });
+    if (flags['abandon-theirs'] && flags['abandon-ours']) {
+      fail('cannot combine --abandon-theirs and --abandon-ours');
+    }
+    const abandon = flags['abandon-theirs'] ? 'theirs' : flags['abandon-ours'] ? 'ours' : null;
+    const dryRun = Boolean(flags['dry-run']);
+
+    if (flags.git) {
+      if (positionals.length !== 3) fail(absorbUsage());
+      if (flags.decisions) fail('--decisions cannot be combined with --git');
+      return absorbGit(positionals[0], positionals[1], positionals[2], { abandon, dryRun });
+    }
+    if (positionals.length > 1) fail(absorbUsage());
+    return absorbLogs(positionals[0], flags.decisions, { abandon, dryRun });
+  },
+
   init(argv) {
     const { positionals } = parseArgs(argv, {});
     if (positionals.length > 0) fail('usage: driftseal init');
@@ -2448,6 +3098,7 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(5), eol),
         protocolEol(previousIntentProtocolBlock(6), eol),
         protocolEol(previousIntentProtocolBlock(7), eol),
+        protocolEol(previousIntentProtocolBlock(8), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -2465,6 +3116,7 @@ const commands = {
         protocolEol(previousDecisionProtocolBlock(5), eol),
         protocolEol(previousDecisionProtocolBlock(6), eol),
         protocolEol(previousDecisionProtocolBlock(7), eol),
+        protocolEol(previousDecisionProtocolBlock(8), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });
@@ -2484,12 +3136,28 @@ const commands = {
       updated += separator + additions.join(eol + eol) + eol;
     }
 
-    if (updated === current) {
+    const attributes = ensureGitAttributes();
+    let driver = { changed: false, configured: false };
+    try {
+      driver = ensureGitMergeDriver();
+    } catch (err) {
+      printLine(`warning: could not configure git merge driver: ${err && err.message ? err.message : err}`);
+    }
+
+    if (updated === current && !attributes.changed && !driver.changed) {
       printLine('AGENTS.md already contains the DriftSeal protocols; nothing to do');
       return { changed: false, target };
     }
-    atomicWriteFile(target, updated);
-    printLine(`DriftSeal protocol ${existed ? 'updated in' : 'written to'} ${target}`);
+    if (updated !== current) {
+      atomicWriteFile(target, updated);
+      printLine(`DriftSeal protocol ${existed ? 'updated in' : 'written to'} ${target}`);
+    }
+    if (attributes.changed) {
+      printLine(`Configured git merge attribute: ${attributes.target}`);
+    }
+    if (driver.changed) {
+      printLine('Configured local git merge driver for DriftSeal intent logs');
+    }
     return { changed: true, target };
   },
 
@@ -2507,6 +3175,11 @@ usage:
                                  hide meaningless closed records without deleting them
   driftseal unreclaim <id> --reason "<why>"
                                  restore a reclaimed record to the visible log
+  driftseal absorb [other-events.jsonl] [--decisions <dir>]
+                 [--abandon-theirs | --abandon-ours] [--dry-run]
+                                 merge another intent log, remapping colliding ids
+  driftseal absorb --git <base> <ours> <theirs>
+                                 git merge driver for .intent-log/events.jsonl
   driftseal decision add "<title>" --context "..." --outcome "..." [options]
   driftseal decision update <id> [--status STATUS] --note "..."
                                  reconcile a linked decision in the open intent
@@ -2524,7 +3197,7 @@ usage:
                                  targets: kimi-code (global only), claude-code, codex (prompt only)
   driftseal hook prompt|stop [--format plain|claude-code]
                                  emit the reminder a lifecycle hook injects; never blocks
-  driftseal init                       inject intent and decision protocols into ./AGENTS.md
+  driftseal init                       inject protocols into ./AGENTS.md and configure the git merge driver
   driftseal --version | -V             print the installed DriftSeal version
   driftseal help
 
@@ -2559,6 +3232,7 @@ function mutationResources(cmd, argv) {
   if (cmd === 'hook') return [parseHookInstallRequest(argv.slice(1)).configDir];
   if (cmd === 'init') return [process.cwd()];
   if (cmd === 'reclaim' || cmd === 'unreclaim') return [logDir()];
+  if (cmd === 'absorb') return [logDir(), decisionDir()];
   if (cmd === 'begin' && !argv.some((arg) => arg === '--decision' || arg.startsWith('--decision='))) {
     return [logDir()];
   }
@@ -2580,13 +3254,14 @@ function dispatch(argv) {
   const fn = commands[cmd];
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
   const mutates =
-    ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim'].includes(cmd) ||
+    ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
     (cmd === 'hook' && rest[0] === 'install') ||
     (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
   const readsIntentLog = ['status', 'log'].includes(cmd);
   if (mutates || readsIntentLog) {
     const resources = readsIntentLog ? [logDir()] : mutationResources(cmd, rest);
-    return { data: withMutationLocks(resources, () => fn(rest)), exitCode: 0 };
+    const data = withMutationLocks(resources, () => fn(rest));
+    return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0 };
   }
   return { data: fn(rest), exitCode: 0 };
 }

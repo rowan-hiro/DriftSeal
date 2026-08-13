@@ -37,5 +37,13 @@ requires. For command syntax, run:
 driftseal help
 ```
 
+## After a merge
+
+If `status` or `log` fails with a duplicate id, or the intent log has conflict
+markers, run `driftseal absorb` instead of editing `.intent-log/events.jsonl`.
+When both sides still have an open intent, add `--abandon-theirs` or
+`--abandon-ours`. `driftseal init` also configures the local git merge driver;
+clones need `init` again for that driver.
+
 Do not treat this skill, MCP descriptions, or lifecycle-hook reminders as
 additional policy. If they conflict with `AGENTS.md`, follow `AGENTS.md`.

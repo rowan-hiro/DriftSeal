@@ -7,7 +7,7 @@ and decision records in `.decision-log/` (override with
 `$DRIFTSEAL_DECISION_HOME`); both are meant to be committed.
 
 <!-- driftseal -->
-<!-- driftseal-version: 8 -->
+<!-- driftseal-version: 9 -->
 
 ## Agent protocol: intent write-ahead log
 
@@ -48,12 +48,15 @@ MCP and lifecycle hooks are optional adapters.
 `driftseal` commands or the MCP tools. Retire meaningless closed records with
 `driftseal reclaim [id ...] --reason "<why>"` — it appends a marker, never
 deletes log lines; `driftseal unreclaim <id> --reason "<why>"` restores one.
+After a merge collision, run `driftseal absorb` rather than editing the log;
+if both sides still have an open intent, add `--abandon-theirs` or
+`--abandon-ours`.
 
 Log: `.intent-log/events.jsonl` (override with `$DRIFTSEAL_HOME`); commit it with the code.
 <!-- /driftseal -->
 
 <!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 8 -->
+<!-- driftseal-decisions-version: 9 -->
 
 ## Agent protocol: decision log
 
@@ -73,5 +76,7 @@ Count postponed choices with `driftseal decision list --status deferred --count`
 then review them with `driftseal decision list --status deferred`.
 When an intent declares an existing decision with `--decision <id>`, use
 `driftseal decision update` to record its status transition or explicit confirmation.
+After a merge, colliding decision ids are remapped with `driftseal absorb`;
+concurrent edits of a shared decision are not auto-merged.
 Commit `.decision-log/` with the code.
 <!-- /driftseal-decisions -->

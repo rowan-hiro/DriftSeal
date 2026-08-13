@@ -34,7 +34,8 @@ cd your-project
 driftseal init
 ```
 
-`driftseal init` 会安全地把协议加入 `AGENTS.md`，重复运行也不会产生副本。DriftSeal 需要 Node.js 18+。
+`driftseal init` 会把协议写入 `AGENTS.md`（包括 worktree 撞号后如何 `absorb`），
+并配置 local git merge driver。重复运行不会产生副本。DriftSeal 需要 Node.js 18+。
 
 从当前 checkout 本地开发时：
 
@@ -201,6 +202,8 @@ driftseal end \
 | `driftseal log [-n N] [--all]` | 查看 intent 历史（`--all` 包含已回收的记录）。 |
 | `driftseal reclaim [id ...] --reason "..." [--older-than days] [--force] [--dry-run]` | 用 append-only 标记隐藏已无意义的已关闭记录。 |
 | `driftseal unreclaim <id> --reason "..."` | 把已回收的记录恢复到可见历史中。 |
+| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs \| --abandon-ours] [--dry-run]` | 合并另一条 worktree 的日志，并给撞号的 intent / decision id 重新编号。 |
+| `driftseal absorb --git <base> <ours> <theirs>` | `.intent-log/events.jsonl` 的 git merge driver。 |
 | `driftseal decision add "<title>" -c "..." -o "..."` | 写入编号化的 MADR decision。 |
 | `driftseal decision update <id> [-s status] -n "..."` | 在当前 intent 中 reconcile 已关联的 decision。 |
 | `driftseal decision list [-s status] [--last N \| --count]` | 列出或统计 decision records，也可按 status 筛选。 |
@@ -209,7 +212,7 @@ driftseal end \
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |
-| `driftseal init` | 把接入协议写入 `AGENTS.md`。 |
+| `driftseal init` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。 |
 | `driftseal --version` 或 `driftseal -V` | 输出当前安装的 DriftSeal 版本。 |
 | `driftseal help` | 查看 CLI 用法。 |
 
@@ -255,9 +258,24 @@ recovery 只处理当前 intent，因此历史冲突不会阻塞之后的 decisi
 时仍需解析全部 records，因为 status 保存在各个 MADR 文档中；DriftSeal 不维护容易
 滞后的 sidecar index。
 
+## 合并 worktree
+
+两条 worktree 各自按本地日志分配 intent / decision id，同一天并行 `begin` 或 `decision add`，分支合并时就会撞号。`driftseal absorb` 保留我方编号、给进来的一侧重编号，并打印对照表。单线 WAL 仍然只追加；absorb 是唯一允许的跨谱系重写。
+
+```sh
+driftseal absorb ../other-worktree/.intent-log/events.jsonl \
+  --decisions ../other-worktree/.decision-log
+```
+
+不带 path 时，`absorb` 修复当前日志里的冲突标记或已经拼在一起的重复 id。两边都还有未关闭 intent 时，必须加上 `--abandon-theirs` 或 `--abandon-ours`。共享 base 里已经存在、又被两边同时改过的 decision，不会自动合并。
+
+`driftseal init` 会把这条 absorb 规则写入 `AGENTS.md`，同时写入 `.gitattributes`
+并配置 local git merge driver，让 `events.jsonl` 走 `absorb --git`。clone 之后
+需要再跑一次 `init`，因为 driver 只存在于 local git config。
+
 ## 数据保存在哪里
 
-- `.intent-log/events.jsonl`：append-only intent log。所有读写都必须经过 `driftseal`（CLI 或 MCP）——不要直接读取、修改、移动或删除该文件；需要让无意义的记录退场时使用 `driftseal reclaim`，而不是删除日志行。
+- `.intent-log/events.jsonl`：append-only intent log。所有读写都必须经过 `driftseal`（CLI 或 MCP）——不要直接读取、修改、移动或删除该文件；需要让无意义的记录退场时使用 `driftseal reclaim`，而不是删除日志行。合并撞号时用 `driftseal absorb`，不要手改这个文件。
 - `.decision-log/`：编号化的 MADR decision records。
 - 设置 `DRIFTSEAL_HOME` 或 `DRIFTSEAL_DECISION_HOME`，即可把对应 log 放到当前项目之外。
 
