@@ -115,35 +115,35 @@ v1 server 提供：
 
 ## 用 hook 持续提醒 agent
 
-对于支持 lifecycle hook 的 agent，可以在每轮回答前（`UserPromptSubmit`）和
-回答完毕后（`Stop`）注入一条简短的 DriftSeal 提醒。提醒是建议性的——它
-提示 agent 考虑本轮是否需要开启 intent、是否还有未关闭的 intent 需要验证
-并 `driftseal end`；它从不阻断对话，并且在还没有 intent log 的 repository
-中保持沉默。
+对于支持 lifecycle hook 的 agent，可以在每轮回答前（`UserPromptSubmit`）
+注入一条简短的 DriftSeal 提醒，并在回答完毕时（`Stop`）显示警告。提醒是
+建议性的——它提示是否需要开启 intent、是否还有未关闭的 intent 需要验证并
+`driftseal end`；它不会强制模型再跑一轮，并且在还没有 intent log 的
+repository 中保持沉默。
 
 安装方式：
 
 ```sh
 cd /path/to/repository
-driftseal hook install --target kimi-code
+driftseal hook install --target kimi-code --scope global
 driftseal hook install --target claude-code
 driftseal hook install --target codex
 ```
 
 | Target | 项目级配置 | 全局配置 |
 | --- | --- | --- |
-| `kimi-code` | `.kimi-code/config.toml` | `~/.kimi-code/config.toml` 或 `$KIMI_CODE_HOME/config.toml` |
+| `kimi-code` | 不支持 | `~/.kimi-code/config.toml` 或 `$KIMI_CODE_HOME/config.toml` |
 | `claude-code` | `.claude/settings.json` | `~/.claude/settings.json` |
 | `codex` | `.codex/hooks.json` | `~/.codex/hooks.json` |
 
 与 `mcp install` 一样，hook 安装器支持 `--scope global`、
 `--root <repository>` 和 `--force`，重复安装是幂等的，并保留无关的配置项。
-安装后的 hook 调用 `driftseal hook prompt` 和 `driftseal hook stop`，这两条
-命令始终以 exit 0 结束；`--format claude-code` 会把提醒包装成 Claude Code
-要求的 `hookSpecificOutput.additionalContext` JSON 结构。Codex 只安装
-prompt hook：它的 `Stop` 事件无法注入建议性上下文（plain stdout 在该事件
-下是无效的，而 `decision: "block"` 会强制多跑一轮）。OpenCode 和 Cursor
-目前还没有可用的 hook 入口。
+Kimi Code 只在全局 `config.toml` 中记录 hook，因此该 target 必须指定
+`--scope global`。Claude Code 的 prompt 提醒使用
+`hookSpecificOutput.additionalContext`，`Stop` 提醒则使用只显示在 UI 中的
+`systemMessage`，不会造成 continuation loop。Codex 只安装 prompt hook，
+因为它的 `Stop` 事件没有建议性上下文通道。Hook 命令会从当前目录开始向上
+查找 intent log。OpenCode 和 Cursor 目前还没有可用的 hook 入口。
 
 ## 一轮标准工作流
 

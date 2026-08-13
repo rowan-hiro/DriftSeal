@@ -1759,7 +1759,7 @@ test('hook prompt and stop emit advisory reminders once an intent log exists', (
   assert.equal(fs.existsSync(path.join(dir, 'events.jsonl')), true);
 });
 
-test('hook output supports the claude-code additionalContext format', () => {
+test('hook output uses Claude Code context for prompt and a non-continuing Stop warning', () => {
   const { run } = setup();
   run(['begin', 'format check']);
 
@@ -1768,20 +1768,28 @@ test('hook output supports the claude-code additionalContext format', () => {
   assert.match(prompt.hookSpecificOutput.additionalContext, /DriftSeal reminder/);
 
   const stop = JSON.parse(run(['hook', 'stop', '--format=claude-code']));
-  assert.equal(stop.hookSpecificOutput.hookEventName, 'Stop');
-  assert.match(stop.hookSpecificOutput.additionalContext, /still in_progress/);
+  assert.match(stop.systemMessage, /still in_progress/);
+  assert.equal(stop.hookSpecificOutput, undefined);
 });
 
-test('hook install configures Kimi Code TOML hooks idempotently and preserves config', () => {
+test('hook install configures global Kimi Code hooks and preserves following TOML tables', () => {
   const { run, runFail } = setup();
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-kimi-')));
-  const configDir = path.join(root, '.kimi-code');
+  const configDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-kimi-home-')));
   const configFile = path.join(configDir, 'config.toml');
-  fs.mkdirSync(configDir);
+  const env = { ...process.env, KIMI_CODE_HOME: configDir };
   fs.writeFileSync(configFile, 'model = "kimi-test"\n\n[[hooks]]\nevent = "PreToolUse"\ncommand = "other-hook"\n');
 
-  const installed = run(['hook', 'install', '--target', 'kimi-code'], { cwd: root });
-  assert.match(installed, /Installed DriftSeal hooks for Kimi Code \(project\)/);
+  assert.match(
+    runFail(['hook', 'install', '--target', 'kimi-code'], { cwd: root, env }).stderr,
+    /Kimi Code hooks support only global scope/
+  );
+
+  const installed = run(['hook', 'install', '--target', 'kimi-code', '--scope', 'global'], {
+    cwd: root,
+    env,
+  });
+  assert.match(installed, /Installed DriftSeal hooks for Kimi Code \(global\)/);
   const first = fs.readFileSync(configFile, 'utf8');
   assert.match(first, /^model = "kimi-test"/);
   assert.match(first, /\[\[hooks\]\]\nevent = "PreToolUse"\ncommand = "other-hook"/);
@@ -1791,18 +1799,44 @@ test('hook install configures Kimi Code TOML hooks idempotently and preserves co
   );
 
   assert.match(
-    run(['hook', 'install', '--target=kimi-code'], { cwd: root }),
-    /already installed for Kimi Code \(project\)/
+    run(['hook', 'install', '--target=kimi-code', '--scope=global'], { cwd: root, env }),
+    /already installed for Kimi Code \(global\)/
   );
   assert.equal(fs.readFileSync(configFile, 'utf8'), first);
 
   fs.writeFileSync(configFile, first.replace('timeout = 5\n\n[[hooks]]', 'timeout = 9\n\n[[hooks]]'));
   assert.match(
-    runFail(['hook', 'install', '--target', 'kimi-code'], { cwd: root }).stderr,
+    runFail(['hook', 'install', '--target', 'kimi-code', '--scope', 'global'], { cwd: root, env })
+      .stderr,
     /already defines driftseal hooks.*--force/
   );
-  run(['hook', 'install', '--target', 'kimi-code', '--force'], { cwd: root });
-  assert.equal(fs.readFileSync(configFile, 'utf8'), first);
+  fs.appendFileSync(configFile, '\n[workspace]\nadditional_dir = ["/tmp/shared"]\n');
+  run(['hook', 'install', '--target', 'kimi-code', '--scope', 'global', '--force'], {
+    cwd: root,
+    env,
+  });
+  const forced = fs.readFileSync(configFile, 'utf8');
+  assert.match(forced, /\[workspace\]\nadditional_dir = \["\/tmp\/shared"\]/);
+  assert.doesNotMatch(forced, /timeout = 9/);
+  assert.match(
+    forced,
+    /\[\[hooks\]\]\nevent = "UserPromptSubmit"\ncommand = "driftseal hook prompt"\ntimeout = 5/
+  );
+});
+
+test('hook reminders find an initialized repository from a nested working directory', () => {
+  const { run } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-ancestor-')));
+  const nested = path.join(root, 'packages', 'app');
+  fs.mkdirSync(nested, { recursive: true });
+  const env = { ...process.env };
+  delete env.DRIFTSEAL_HOME;
+  delete env.DRIFTSEAL_DECISION_HOME;
+
+  run(['begin', 'test ancestor discovery'], { cwd: root, env });
+  assert.match(run(['hook', 'prompt'], { cwd: nested, env }), /DriftSeal reminder/);
+  assert.match(run(['hook', 'stop'], { cwd: nested, env }), /still in_progress/);
+  run(['end', '--status', 'abandoned'], { cwd: root, env });
 });
 
 test('hook install configures Claude Code settings hooks and keeps sibling entries', () => {

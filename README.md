@@ -117,37 +117,37 @@ operations; the skill teaches the agent when to use them and how to avoid drift.
 
 ## Keep the agent reminded through hooks
 
-Agents that support lifecycle hooks can inject a short DriftSeal reminder twice
-per turn: before the agent starts answering (`UserPromptSubmit`) and when it
-finishes (`Stop`). The reminders are advisory — they ask the agent to consider
-whether the round needs an intent, and whether an open intent still needs its
-verification and `driftseal end`; they never block the turn, and they stay
-silent in repositories without an intent log.
+Agents that support lifecycle hooks can inject a short DriftSeal reminder before
+the agent starts answering (`UserPromptSubmit`) and surface a warning when it
+finishes (`Stop`). The reminders are advisory — they ask whether the round needs
+an intent and whether an open intent still needs verification and
+`driftseal end`; they never force another model turn, and they stay silent in
+repositories without an intent log.
 
 Install them with:
 
 ```sh
 cd /path/to/repository
-driftseal hook install --target kimi-code
+driftseal hook install --target kimi-code --scope global
 driftseal hook install --target claude-code
 driftseal hook install --target codex
 ```
 
 | Target | Project config | Global config |
 | --- | --- | --- |
-| `kimi-code` | `.kimi-code/config.toml` | `~/.kimi-code/config.toml` or `$KIMI_CODE_HOME/config.toml` |
+| `kimi-code` | Not supported | `~/.kimi-code/config.toml` or `$KIMI_CODE_HOME/config.toml` |
 | `claude-code` | `.claude/settings.json` | `~/.claude/settings.json` |
 | `codex` | `.codex/hooks.json` | `~/.codex/hooks.json` |
 
 Like `mcp install`, the hook installer accepts `--scope global`,
 `--root <repository>`, and `--force`, is idempotent, and preserves unrelated
-config entries. The installed hooks call `driftseal hook prompt` and
-`driftseal hook stop`, which always exit 0; `--format claude-code` wraps the
-reminder in the `hookSpecificOutput.additionalContext` JSON shape Claude Code
-expects. Codex installs only the prompt hook: its `Stop` event accepts no
-advisory context (plain stdout is invalid there, and `decision: "block"` would
-force an extra continuation turn). OpenCode and Cursor have no supported hook
-surface for this yet.
+config entries. Kimi Code documents hooks only in its global `config.toml`, so
+its target requires `--scope global`. Claude Code receives prompt context through
+`hookSpecificOutput.additionalContext`; its `Stop` reminder uses a UI-only
+`systemMessage`, avoiding a continuation loop. Codex installs only the prompt
+hook because its `Stop` event has no advisory context channel. Hook commands
+search the current directory and its ancestors for an intent log. OpenCode and
+Cursor have no supported hook surface for this yet.
 
 ## A work round
 

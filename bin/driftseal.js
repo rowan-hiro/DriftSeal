@@ -191,8 +191,7 @@ function normalizeEvent(event, line) {
   fail(`unknown event type "${event.type}" on log line ${line}`);
 }
 
-function readEvents({ repairTail = false } = {}) {
-  const file = logFile();
+function readEvents({ repairTail = false, file = logFile() } = {}) {
   if (!fs.existsSync(file)) return [];
   let content = fs.readFileSync(file, 'utf8');
   const rawLines = content.split('\n');
@@ -1551,7 +1550,10 @@ function hookConfigLocation(target, scope, root) {
     const userDir = process.env.KIMI_CODE_HOME
       ? path.resolve(process.env.KIMI_CODE_HOME)
       : path.join(home, '.kimi-code');
-    const configDir = scope === 'project' ? path.join(root, '.kimi-code') : userDir;
+    if (scope === 'project') {
+      fail('Kimi Code hooks support only global scope; re-run with --scope global');
+    }
+    const configDir = userDir;
     return { configDir, configFile: path.join(configDir, 'config.toml') };
   }
   if (target === 'claude-code') {
@@ -1615,13 +1617,18 @@ function kimiHookSection(eol = '\n') {
 
 /** Ranges of [[hooks]] tables whose command invokes driftseal hook. */
 function driftsealHookBlockRanges(content) {
-  const tables = [...content.matchAll(/^[ \t]*\[\[[^\r\n]+\]\][ \t]*(?:#.*)?\r?$/gm)];
+  const tables = [
+    ...content.matchAll(/^[ \t]*\[(?:\[[^\]\r\n]+\]|[^\]\r\n]+)\][ \t]*(?:#.*)?\r?$/gm),
+  ];
   const ranges = [];
   for (let index = 0; index < tables.length; index++) {
     const start = tables[index].index;
     const end = index + 1 < tables.length ? tables[index + 1].index : content.length;
     const body = content.slice(start, end);
-    if (/^[ \t]*\[\[hooks\]\]/.test(tables[index][0]) && /driftseal\s+hook\s/.test(body)) {
+    if (
+      /^[ \t]*\[\[hooks\]\]/.test(tables[index][0]) &&
+      /^[ \t]*command[ \t]*=[ \t]*["']driftseal\s+hook\s/m.test(body)
+    ) {
       ranges.push({ start, end, body });
     }
   }
@@ -1682,9 +1689,9 @@ function installKimiHook(request) {
 }
 
 /**
- * Hook groups per JSON-config target. Codex gets only the prompt hook: its
- * Stop event accepts no advisory context (plain stdout is invalid there, and
- * decision:block would force an extra continuation turn).
+ * Hook groups per JSON-config target. Codex gets only the prompt hook. Claude
+ * Code also gets Stop, but its output is a UI-only systemMessage so the hook
+ * does not force another model turn.
  */
 function jsonHookGroups(target) {
   if (target === 'codex') {
@@ -1768,9 +1775,25 @@ function installHook(request) {
   return request.target === 'kimi-code' ? installKimiHook(request) : installJsonHook(request);
 }
 
-/** Advisory reminder text; null when the repo has no intent log yet. */
+function hookLogFile() {
+  if (process.env.DRIFTSEAL_HOME) {
+    const configured = logFile();
+    return fs.existsSync(configured) ? configured : null;
+  }
+  let current = path.resolve(process.cwd());
+  while (true) {
+    const candidate = path.join(current, '.intent-log', 'events.jsonl');
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+/** Advisory reminder text; null when no ancestor has an intent log yet. */
 function hookReminder(event) {
-  if (!fs.existsSync(logFile())) return null;
+  const file = hookLogFile();
+  if (!file) return null;
   if (event === 'prompt') {
     return (
       'DriftSeal reminder: if this round will modify files or anything else that may need a ' +
@@ -1779,7 +1802,7 @@ function hookReminder(event) {
       'reminder when it does not apply.'
     );
   }
-  const open = openIntent(fold(readEvents()));
+  const open = openIntent(fold(readEvents({ file })));
   if (open) {
     return (
       `DriftSeal reminder: intent ${open.id} is still in_progress: "${open.intent}". ` +
@@ -1810,11 +1833,16 @@ function runHookReminder(event, argv) {
   }
   if (reminder === null) return { changed: false, event, format };
   if (format === 'claude-code') {
-    printLine(
-      JSON.stringify({
-        hookSpecificOutput: { hookEventName: HOOK_EVENT_NAMES[event], additionalContext: reminder },
-      })
-    );
+    const output =
+      event === 'stop'
+        ? { systemMessage: reminder }
+        : {
+            hookSpecificOutput: {
+              hookEventName: HOOK_EVENT_NAMES[event],
+              additionalContext: reminder,
+            },
+          };
+    printLine(JSON.stringify(output));
   } else {
     printLine(reminder);
   }
@@ -2328,7 +2356,7 @@ usage:
                                  targets: codex, kimi-code, opencode, claude-code, cursor
   driftseal hook install --target TARGET [--scope project|global] [--root <repository>] [--force]
                                  install advisory lifecycle hooks (default: project)
-                                 targets: kimi-code, claude-code, codex (prompt hook only)
+                                 targets: kimi-code (global only), claude-code, codex (prompt only)
   driftseal hook prompt|stop [--format plain|claude-code]
                                  emit the reminder a lifecycle hook injects; never blocks
   driftseal init                       inject intent and decision protocols into ./AGENTS.md
