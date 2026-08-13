@@ -1686,7 +1686,7 @@ function directoryDigest(directory) {
   function visit(current, relative) {
     const stat = fs.lstatSync(current);
     if (stat.isDirectory()) {
-      digest.update(`directory\0${relative}\0${stat.mode & 0o777}\0`);
+      digest.update(`directory\0${relative}\0`);
       for (const name of fs.readdirSync(current).sort()) {
         visit(path.join(current, name), relative ? path.join(relative, name) : name);
       }
@@ -2301,6 +2301,7 @@ function planDecisionAbsorb({ oursEntries, theirsEntries, baseEntries = [], base
   const mappings = [];
   const copies = [];
   const decisionMap = new Map();
+  const hashMap = new Map();
   const usedIds = new Set(oursEntries.map((entry) => entry.id));
   const oursById = new Map();
   const baseById = new Map();
@@ -2377,17 +2378,21 @@ function planDecisionAbsorb({ oursEntries, theirsEntries, baseEntries = [], base
     usedIds.add(newId);
     decisionMap.set(entry.id, newId);
     mappings.push({ kind: 'decision', from: entry.id, to: newId });
+    const rewritten = rewriteDecisionId(theirsContent, newId);
+    const originalHash = contentHash(theirsContent);
+    const rewrittenHash = contentHash(rewritten);
+    if (originalHash !== rewrittenHash) hashMap.set(originalHash, rewrittenHash);
     copies.push({
       fromFile: entry.file,
       toFile: `${newId}-${decisionSlugFromFile(entry.file)}.md`,
-      content: rewriteDecisionId(theirsContent, newId),
+      content: rewritten,
       removeFile: entry.file !== ours.file ? entry.file : null,
     });
   }
-  return { decisionMap, mappings, copies };
+  return { decisionMap, hashMap, mappings, copies };
 }
 
-function remapEvent(event, intentMap, decisionMap) {
+function remapEvent(event, intentMap, decisionMap, hashMap = new Map()) {
   const next = { ...event };
   if (intentMap.has(event.id)) next.id = intentMap.get(event.id);
   if (Array.isArray(next.decisions) && next.decisions.length > 0) {
@@ -2400,10 +2405,15 @@ function remapEvent(event, intentMap, decisionMap) {
     const normalized = normalizeDecisionId(next.decisionId);
     if (decisionMap.has(normalized)) next.decisionId = decisionMap.get(normalized);
   }
+  for (const field of ['oldHash', 'newHash', 'fileHash']) {
+    if (typeof next[field] === 'string' && hashMap.has(next[field])) {
+      next[field] = hashMap.get(next[field]);
+    }
+  }
   return next;
 }
 
-function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap) {
+function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap, hashMap = new Map()) {
   const intentMap = new Map();
   const mappings = [];
   const used = [...oursUsedEvents];
@@ -2415,14 +2425,14 @@ function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap) {
       intentMap.set(event.id, newId);
       mappings.push({ kind: 'intent', from: event.id, to: newId });
     }
-    event = remapEvent(event, intentMap, decisionMap);
+    event = remapEvent(event, intentMap, decisionMap, hashMap);
     used.push(event);
     return { event };
   });
   return { records, mappings };
 }
 
-function repairDuplicateIntentRecords(records, decisionMap) {
+function repairDuplicateIntentRecords(records, decisionMap, hashMap = new Map()) {
   const seenBegins = new Set();
   const intentMap = new Map();
   const used = [];
@@ -2440,7 +2450,12 @@ function repairDuplicateIntentRecords(records, decisionMap) {
     } else if (event.type === 'begin') {
       seenBegins.add(event.id);
     }
-    const remapped = remapEvent(event, intentMap, incomingSide ? decisionMap : new Map());
+    const remapped = remapEvent(
+      event,
+      intentMap,
+      incomingSide ? decisionMap : new Map(),
+      incomingSide ? hashMap : new Map()
+    );
     const changed = remapped !== event && JSON.stringify(remapped) !== JSON.stringify(event);
     result.push(changed ? { event: remapped } : record);
     used.push(result.at(-1).event);
@@ -2658,7 +2673,8 @@ function absorbFromStreams(ours, theirs, baseRecords, options) {
   const remapped = remapTheirsRecords(
     streams.theirsNew,
     [...streams.base, ...streams.oursNew].map((record) => record.event),
-    decisionPlan.decisionMap
+    decisionPlan.decisionMap,
+    decisionPlan.hashMap
   );
   const result = [...streams.base, ...streams.oursNew, ...remapped.records];
   return finishAbsorb({
@@ -2755,7 +2771,11 @@ function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
       baseEntries: gitBase ? gitDecisionEntries(gitBase) : [],
       baseIds: gitBase ? gitDecisionIds(gitBase) : new Set(),
     });
-    const repaired = repairDuplicateIntentRecords(loaded.records, decisionPlan.decisionMap);
+    const repaired = repairDuplicateIntentRecords(
+      loaded.records,
+      decisionPlan.decisionMap,
+      decisionPlan.hashMap
+    );
     if (decisionPlan.mappings.length > 0 && !repaired.incomingSide) {
       fail(
         'cannot determine which intent records own the duplicate decision; ' +

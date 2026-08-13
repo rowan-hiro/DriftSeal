@@ -1403,6 +1403,26 @@ test('skill install uses each platform project directory and is idempotent', () 
   }
 });
 
+test('skill install remains idempotent when directory permissions differ', {
+  skip: process.platform === 'win32',
+}, () => {
+  const { run } = setup();
+  const root = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-directory-mode-'))
+  );
+  const sourceDir = path.join(__dirname, '..', 'skills', 'use-driftseal');
+  const skillDir = path.join(root, '.agents', 'skills', 'use-driftseal');
+  run(['skill', 'install', '--target', 'codex'], { cwd: root });
+
+  const sourceMode = fs.statSync(sourceDir).mode & 0o777;
+  fs.chmodSync(skillDir, sourceMode === 0o700 ? 0o755 : 0o700);
+  assert.notEqual(fs.statSync(skillDir).mode & 0o777, sourceMode);
+  assert.match(
+    run(['skill', 'install', '--target', 'codex'], { cwd: root }),
+    /already installed for Codex \(project\)/
+  );
+});
+
 test('skill install uses each platform global directory', () => {
   const { dir, run } = setup();
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-root-')));
@@ -2334,6 +2354,79 @@ test('absorb remaps colliding decision ids and their event references', () => {
   assert.match(ours.run(['decision', 'list']), /0001/);
   assert.match(ours.run(['decision', 'list']), /0002/);
   assert.match(ours.run(['decision', 'show', '2']), /Theirs choice/);
+});
+
+test('absorb remapping of a colliding decision keeps a still-open incoming intent closable', () => {
+  const ours = setup();
+  const theirs = setup();
+  ours.run(['decision', 'add', 'Ours choice', '-c', 'context', '-o', 'outcome']);
+  theirs.run(['decision', 'add', 'Theirs choice', '-c', 'context', '-o', 'outcome']);
+  ours.run(['begin', 'use ours', '--decision', '1']);
+  ours.run(['decision', 'update', '1', '--note', 'Confirmed ours.']);
+  ours.run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']);
+  theirs.run(['begin', 'use theirs', '--decision', '1']);
+  theirs.run(['decision', 'update', '1', '--note', 'Confirmed theirs.']);
+
+  const out = ours.run([
+    'absorb',
+    path.join(theirs.dir, 'events.jsonl'),
+    '--decisions',
+    path.join(theirs.dir, 'decisions'),
+  ]);
+  assert.match(out, /decision 0001 \(theirs\) -> 0002/);
+  assert.match(ours.run(['status']), /use theirs/);
+
+  const closed = ours.run([
+    'end',
+    '--status',
+    'completed',
+    '--note',
+    'done',
+    '--verify-result',
+    'ok',
+  ]);
+  assert.match(closed, /completed/);
+  assert.equal(ours.events().at(-1).type, 'end');
+  assert.equal(ours.events().at(-1).status, 'completed');
+});
+
+test('absorb remapping recovers a pending incoming reconciliation after a colliding rewrite', () => {
+  const ours = setup();
+  const theirs = setup();
+  ours.run(['decision', 'add', 'Ours choice', '-c', 'context', '-o', 'outcome']);
+  theirs.run(['decision', 'add', 'Theirs choice', '-c', 'context', '-o', 'outcome']);
+  ours.run(['begin', 'use ours', '--decision', '1']);
+  ours.run(['decision', 'update', '1', '--note', 'Confirmed ours.']);
+  ours.run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']);
+  theirs.run(['begin', 'use theirs', '--decision', '1']);
+  const interrupted = theirs.runFail(
+    ['decision', 'update', '1', '--note', 'Confirmed theirs.'],
+    {
+      env: {
+        ...process.env,
+        DRIFTSEAL_HOME: theirs.dir,
+        DRIFTSEAL_DECISION_HOME: path.join(theirs.dir, 'decisions'),
+        _DRIFTSEAL_TEST_CRASH_AFTER_DECISION_WRITE: '1',
+      },
+    }
+  );
+  assert.match(interrupted.stderr, /simulated interruption/);
+  assert.equal(theirs.events().at(-1).type, 'decision_reconcile_prepare');
+
+  const out = ours.run([
+    'absorb',
+    path.join(theirs.dir, 'events.jsonl'),
+    '--decisions',
+    path.join(theirs.dir, 'decisions'),
+  ]);
+  assert.match(out, /decision 0001 \(theirs\) -> 0002/);
+  assert.match(
+    ours.run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']),
+    /completed/
+  );
+  const remapped = ours.events().filter((event) => event.decisionId === '0002');
+  assert.ok(remapped.some((event) => event.type === 'decision_reconcile_prepare'));
+  assert.ok(remapped.some((event) => event.type === 'decision_reconcile_commit'));
 });
 
 test('absorb rejects concurrent edits of a shared decision', () => {
