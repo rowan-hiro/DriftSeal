@@ -113,6 +113,38 @@ v1 server 提供：
 配套 skill 仍然不可替代：MCP 提供受控、结构化的操作，skill 则告诉 agent
 何时使用这些操作，以及怎样避免 drift。
 
+## 用 hook 持续提醒 agent
+
+对于支持 lifecycle hook 的 agent，可以在每轮回答前（`UserPromptSubmit`）和
+回答完毕后（`Stop`）注入一条简短的 DriftSeal 提醒。提醒是建议性的——它
+提示 agent 考虑本轮是否需要开启 intent、是否还有未关闭的 intent 需要验证
+并 `driftseal end`；它从不阻断对话，并且在还没有 intent log 的 repository
+中保持沉默。
+
+安装方式：
+
+```sh
+cd /path/to/repository
+driftseal hook install --target kimi-code
+driftseal hook install --target claude-code
+driftseal hook install --target codex
+```
+
+| Target | 项目级配置 | 全局配置 |
+| --- | --- | --- |
+| `kimi-code` | `.kimi-code/config.toml` | `~/.kimi-code/config.toml` 或 `$KIMI_CODE_HOME/config.toml` |
+| `claude-code` | `.claude/settings.json` | `~/.claude/settings.json` |
+| `codex` | `.codex/hooks.json` | `~/.codex/hooks.json` |
+
+与 `mcp install` 一样，hook 安装器支持 `--scope global`、
+`--root <repository>` 和 `--force`，重复安装是幂等的，并保留无关的配置项。
+安装后的 hook 调用 `driftseal hook prompt` 和 `driftseal hook stop`，这两条
+命令始终以 exit 0 结束；`--format claude-code` 会把提醒包装成 Claude Code
+要求的 `hookSpecificOutput.additionalContext` JSON 结构。Codex 只安装
+prompt hook：它的 `Stop` 事件无法注入建议性上下文（plain stdout 在该事件
+下是无效的，而 `decision: "block"` 会强制多跑一轮）。OpenCode 和 Cursor
+目前还没有可用的 hook 入口。
+
 ## 一轮标准工作流
 
 修改文件前，先声明这轮工作的目标：
@@ -150,6 +182,8 @@ driftseal end \
 | `driftseal decision list [-s status] [--last N \| --count]` | 列出或统计 decision records，也可按 status 筛选。 |
 | `driftseal decision show <id>` | 查看单条 decision record。 |
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
+| `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
+| `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |
 | `driftseal init` | 把接入协议写入 `AGENTS.md`。 |
 | `driftseal help` | 查看 CLI 用法。 |
 

@@ -10,3 +10,7 @@ coverage/
 .env.*
 !.env.example
 .kimi-code/
+.codex/
+.cursor/
+.claude/
+.opencode/

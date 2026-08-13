@@ -115,6 +115,40 @@ The v1 server provides:
 The companion skill remains important: MCP supplies controlled, structured
 operations; the skill teaches the agent when to use them and how to avoid drift.
 
+## Keep the agent reminded through hooks
+
+Agents that support lifecycle hooks can inject a short DriftSeal reminder twice
+per turn: before the agent starts answering (`UserPromptSubmit`) and when it
+finishes (`Stop`). The reminders are advisory — they ask the agent to consider
+whether the round needs an intent, and whether an open intent still needs its
+verification and `driftseal end`; they never block the turn, and they stay
+silent in repositories without an intent log.
+
+Install them with:
+
+```sh
+cd /path/to/repository
+driftseal hook install --target kimi-code
+driftseal hook install --target claude-code
+driftseal hook install --target codex
+```
+
+| Target | Project config | Global config |
+| --- | --- | --- |
+| `kimi-code` | `.kimi-code/config.toml` | `~/.kimi-code/config.toml` or `$KIMI_CODE_HOME/config.toml` |
+| `claude-code` | `.claude/settings.json` | `~/.claude/settings.json` |
+| `codex` | `.codex/hooks.json` | `~/.codex/hooks.json` |
+
+Like `mcp install`, the hook installer accepts `--scope global`,
+`--root <repository>`, and `--force`, is idempotent, and preserves unrelated
+config entries. The installed hooks call `driftseal hook prompt` and
+`driftseal hook stop`, which always exit 0; `--format claude-code` wraps the
+reminder in the `hookSpecificOutput.additionalContext` JSON shape Claude Code
+expects. Codex installs only the prompt hook: its `Stop` event accepts no
+advisory context (plain stdout is invalid there, and `decision: "block"` would
+force an extra continuation turn). OpenCode and Cursor have no supported hook
+surface for this yet.
+
 ## A work round
 
 Declare the round before changing files:
@@ -152,6 +186,8 @@ Single-step commands that only build, check, or record work already done — com
 | `driftseal decision list [-s status] [--last N \| --count]` | List or count decision records, optionally filtered by status. |
 | `driftseal decision show <id>` | Read one decision record. |
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the repository-pinned MCP server into Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
+| `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | Install advisory lifecycle reminders into Kimi Code, Claude Code, or Codex. |
+| `driftseal hook prompt\|stop [--format plain\|claude-code]` | Emit the reminder a lifecycle hook injects; never blocks. |
 | `driftseal init` | Add the adoption protocol to `AGENTS.md`. |
 | `driftseal help` | Print CLI usage. |
 

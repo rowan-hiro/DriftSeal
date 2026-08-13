@@ -1,4 +1,4 @@
-# 1. Reclaim noise intent records with append-only markers, never log rewrites
+# 5. Reclaim noise intent records with append-only markers, never log rewrites
 
 Date: 2026-08-12
 

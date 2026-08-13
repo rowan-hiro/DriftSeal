@@ -1534,6 +1534,293 @@ function installMcp(request) {
   return request.target === 'codex' ? installCodexMcp(request) : installJsonMcp(request);
 }
 
+const HOOK_TARGETS = ['kimi-code', 'claude-code', 'codex'];
+const HOOK_EVENTS = ['prompt', 'stop'];
+const HOOK_EVENT_NAMES = { prompt: 'UserPromptSubmit', stop: 'Stop' };
+
+function hookUsage() {
+  return (
+    'usage: driftseal hook install --target <kimi-code|claude-code|codex> [--scope project|global] [--root <repository>] [--force]\n' +
+    '       driftseal hook prompt|stop [--format plain|claude-code]'
+  );
+}
+
+function hookConfigLocation(target, scope, root) {
+  const home = os.homedir();
+  if (target === 'kimi-code') {
+    const userDir = process.env.KIMI_CODE_HOME
+      ? path.resolve(process.env.KIMI_CODE_HOME)
+      : path.join(home, '.kimi-code');
+    const configDir = scope === 'project' ? path.join(root, '.kimi-code') : userDir;
+    return { configDir, configFile: path.join(configDir, 'config.toml') };
+  }
+  if (target === 'claude-code') {
+    const configDir = scope === 'project' ? path.join(root, '.claude') : path.join(home, '.claude');
+    return { configDir, configFile: path.join(configDir, 'settings.json') };
+  }
+  if (target === 'codex') {
+    const configDir = scope === 'project' ? path.join(root, '.codex') : path.join(home, '.codex');
+    return { configDir, configFile: path.join(configDir, 'hooks.json') };
+  }
+  fail(`unsupported hook target "${target}"`);
+}
+
+function parseHookInstallRequest(argv) {
+  const { positionals, flags } = parseArgs(argv, {
+    target: 'single',
+    scope: 'single',
+    root: 'single',
+    force: 'boolean',
+  });
+  if (positionals.length > 0 || !flags.target) {
+    fail(hookUsage());
+  }
+
+  const target = flags.target.toLowerCase();
+  if (!HOOK_TARGETS.includes(target)) {
+    fail(`unsupported hook target "${flags.target}" (expected: ${HOOK_TARGETS.join(', ')})`);
+  }
+  const scope = (flags.scope || 'project').toLowerCase();
+  if (!MCP_SCOPES.includes(scope)) {
+    fail(`invalid hook install scope "${scope}" (expected: ${MCP_SCOPES.join(', ')})`);
+  }
+  const root = repositoryRoot(flags.root || process.cwd());
+  const { configDir, configFile } = hookConfigLocation(target, scope, root);
+  return {
+    target,
+    targetLabel: MCP_TARGET_LABELS[target],
+    scope,
+    root,
+    force: Boolean(flags.force),
+    configDir,
+    configFile,
+  };
+}
+
+function hookCommand(event, format) {
+  return format === 'plain' ? `driftseal hook ${event}` : `driftseal hook ${event} --format ${format}`;
+}
+
+function kimiHookSection(eol = '\n') {
+  const blocks = HOOK_EVENTS.map((event) =>
+    [
+      '[[hooks]]',
+      `event = "${HOOK_EVENT_NAMES[event]}"`,
+      `command = ${tomlString(hookCommand(event, 'plain'))}`,
+      'timeout = 5',
+    ].join(eol)
+  );
+  return blocks.join(eol + eol);
+}
+
+/** Ranges of [[hooks]] tables whose command invokes driftseal hook. */
+function driftsealHookBlockRanges(content) {
+  const tables = [...content.matchAll(/^[ \t]*\[\[[^\r\n]+\]\][ \t]*(?:#.*)?\r?$/gm)];
+  const ranges = [];
+  for (let index = 0; index < tables.length; index++) {
+    const start = tables[index].index;
+    const end = index + 1 < tables.length ? tables[index + 1].index : content.length;
+    const body = content.slice(start, end);
+    if (/^[ \t]*\[\[hooks\]\]/.test(tables[index][0]) && /driftseal\s+hook\s/.test(body)) {
+      ranges.push({ start, end, body });
+    }
+  }
+  return ranges;
+}
+
+function installKimiHook(request) {
+  const { configDir, configFile, force, scope, target, targetLabel } = request;
+  const existed = fs.existsSync(configFile);
+  const current = existed ? fs.readFileSync(configFile, 'utf8') : '';
+  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  const section = kimiHookSection(eol);
+  const ranges = driftsealHookBlockRanges(current);
+  let updated;
+
+  if (ranges.length === 0) {
+    const separator =
+      current.length === 0
+        ? ''
+        : current.endsWith(eol + eol)
+          ? ''
+          : current.endsWith(eol)
+            ? eol
+            : eol + eol;
+    updated = current + separator + section + eol;
+  } else {
+    const existing = ranges
+      .map((range) => range.body.trim().replace(/\r\n/g, '\n'))
+      .join('\n\n');
+    if (ranges.length === HOOK_EVENTS.length && existing === section.replace(/\r\n/g, '\n')) {
+      printLine(`DriftSeal hooks are already installed for ${targetLabel} (${scope}): ${configFile}`);
+      return { changed: false, target, scope, configFile };
+    }
+    if (!force) {
+      fail(
+        `${targetLabel} config already defines driftseal hooks in ${configFile}; ` +
+          're-run with --force to replace those entries'
+      );
+    }
+    let stripped = current;
+    for (const range of [...ranges].reverse()) {
+      stripped = stripped.slice(0, range.start) + stripped.slice(range.end);
+    }
+    stripped = stripped.replace(new RegExp(`(?:\\r?\\n){3,}$`), eol + eol);
+    const separator =
+      stripped.length === 0 || stripped.endsWith(eol + eol)
+        ? ''
+        : stripped.endsWith(eol)
+          ? eol
+          : eol + eol;
+    updated = stripped + separator + section + eol;
+  }
+
+  ensureDirectoryDurable(configDir);
+  atomicWriteFile(configFile, updated);
+  printLine(`Installed DriftSeal hooks for ${targetLabel} (${scope}): ${configFile}`);
+  return { changed: true, target, scope, configFile };
+}
+
+/**
+ * Hook groups per JSON-config target. Codex gets only the prompt hook: its
+ * Stop event accepts no advisory context (plain stdout is invalid there, and
+ * decision:block would force an extra continuation turn).
+ */
+function jsonHookGroups(target) {
+  if (target === 'codex') {
+    return {
+      [HOOK_EVENT_NAMES.prompt]: [
+        { hooks: [{ type: 'command', command: hookCommand('prompt', 'plain') }] },
+      ],
+    };
+  }
+  const groups = {};
+  for (const event of HOOK_EVENTS) {
+    groups[HOOK_EVENT_NAMES[event]] = [
+      { hooks: [{ type: 'command', command: hookCommand(event, 'claude-code') }] },
+    ];
+  }
+  return groups;
+}
+
+/** True when every hook group in the list is one of ours. */
+function isDriftsealHookGroup(group) {
+  return (
+    jsonObject(group) &&
+    Array.isArray(group.hooks) &&
+    group.hooks.some(
+      (hook) => jsonObject(hook) && typeof hook.command === 'string' && /\bdriftseal hook\s/.test(hook.command)
+    )
+  );
+}
+
+function installJsonHook(request) {
+  const { configDir, configFile, force, scope, target, targetLabel } = request;
+  const config = readJsonConfig(configFile, targetLabel, target);
+  if (config.hooks === undefined) config.hooks = {};
+  if (!jsonObject(config.hooks)) {
+    fail(`${targetLabel} config field hooks must be a JSON object: ${configFile}`);
+  }
+
+  const groups = jsonHookGroups(target);
+  let changed = false;
+  let conflict = false;
+  for (const eventName of Object.keys(groups)) {
+    const existing = config.hooks[eventName];
+    if (existing === undefined) {
+      changed = true;
+      continue;
+    }
+    if (!Array.isArray(existing)) {
+      fail(`${targetLabel} config field hooks.${eventName} must be an array: ${configFile}`);
+    }
+    const ours = existing.filter(isDriftsealHookGroup);
+    if (ours.length === 0) {
+      changed = true;
+    } else if (ours.some((group) => JSON.stringify(group) !== JSON.stringify(groups[eventName][0]))) {
+      changed = true;
+      conflict = true;
+    }
+  }
+
+  if (!changed) {
+    printLine(`DriftSeal hooks are already installed for ${targetLabel} (${scope}): ${configFile}`);
+    return { changed: false, target, scope, configFile };
+  }
+  if (conflict && !force) {
+    fail(
+      `${targetLabel} config already defines driftseal hooks in ${configFile}; ` +
+        're-run with --force to replace those entries'
+    );
+  }
+
+  for (const [eventName, group] of Object.entries(groups)) {
+    const existing = config.hooks[eventName] || [];
+    config.hooks[eventName] = [...existing.filter((entry) => !isDriftsealHookGroup(entry)), ...group];
+  }
+  ensureDirectoryDurable(configDir);
+  atomicWriteFile(configFile, JSON.stringify(config, null, 2) + '\n');
+  printLine(`Installed DriftSeal hooks for ${targetLabel} (${scope}): ${configFile}`);
+  return { changed: true, target, scope, configFile };
+}
+
+function installHook(request) {
+  return request.target === 'kimi-code' ? installKimiHook(request) : installJsonHook(request);
+}
+
+/** Advisory reminder text; null when the repo has no intent log yet. */
+function hookReminder(event) {
+  if (!fs.existsSync(logFile())) return null;
+  if (event === 'prompt') {
+    return (
+      'DriftSeal reminder: if this round will modify files or anything else that may need a ' +
+      'rollback, begin an intent first: driftseal begin "<intent>" --verify "<check>". ' +
+      'Questions, read-only exploration, and single-step checks need no intent — skip this ' +
+      'reminder when it does not apply.'
+    );
+  }
+  const open = openIntent(fold(readEvents()));
+  if (open) {
+    return (
+      `DriftSeal reminder: intent ${open.id} is still in_progress: "${open.intent}". ` +
+      'If its work is done, run the declared verification and close it with driftseal end; ' +
+      'if this turn was unrelated, ignore this reminder.'
+    );
+  }
+  return (
+    'DriftSeal reminder: no intent is open. If this round changed files without one, consider ' +
+    'whether the work should have been logged; ignore this reminder when nothing changed.'
+  );
+}
+
+function runHookReminder(event, argv) {
+  const { positionals, flags } = parseArgs(argv, { format: 'single' });
+  if (positionals.length > 0) fail(hookUsage());
+  const format = (flags.format || 'plain').toLowerCase();
+  if (!['plain', 'claude-code'].includes(format)) {
+    fail(`unsupported hook output format "${flags.format}" (expected: plain, claude-code)`);
+  }
+
+  // Hooks must never block the agent: any failure exits quietly with no output.
+  let reminder = null;
+  try {
+    reminder = hookReminder(event);
+  } catch {
+    reminder = null;
+  }
+  if (reminder === null) return { changed: false, event, format };
+  if (format === 'claude-code') {
+    printLine(
+      JSON.stringify({
+        hookSpecificOutput: { hookEventName: HOOK_EVENT_NAMES[event], additionalContext: reminder },
+      })
+    );
+  } else {
+    printLine(reminder);
+  }
+  return { changed: true, event, format };
+}
+
 const commands = {
   begin(argv) {
     const { positionals, flags } = parseArgs(argv, {
@@ -1939,6 +2226,17 @@ const commands = {
     return installMcp(request);
   },
 
+  hook(argv) {
+    const [subcommand, ...rest] = argv;
+    if (subcommand === 'install') {
+      return installHook(parseHookInstallRequest(rest));
+    }
+    if (HOOK_EVENTS.includes(subcommand)) {
+      return runHookReminder(subcommand, rest);
+    }
+    fail(hookUsage());
+  },
+
   init(argv) {
     const { positionals } = parseArgs(argv, {});
     if (positionals.length > 0) fail('usage: driftseal init');
@@ -2028,6 +2326,11 @@ usage:
   driftseal mcp install --target TARGET [--scope project|global] [--root <repository>] [--force]
                                  install the repository-pinned MCP server (default: project)
                                  targets: codex, kimi-code, opencode, claude-code, cursor
+  driftseal hook install --target TARGET [--scope project|global] [--root <repository>] [--force]
+                                 install advisory lifecycle hooks (default: project)
+                                 targets: kimi-code, claude-code, codex (prompt hook only)
+  driftseal hook prompt|stop [--format plain|claude-code]
+                                 emit the reminder a lifecycle hook injects; never blocks
   driftseal init                       inject intent and decision protocols into ./AGENTS.md
   driftseal help
 
@@ -2053,6 +2356,7 @@ function requestedEndStatus(argv) {
 
 function mutationResources(cmd, argv) {
   if (cmd === 'mcp') return [parseMcpInstallRequest(argv).configDir];
+  if (cmd === 'hook') return [parseHookInstallRequest(argv.slice(1)).configDir];
   if (cmd === 'init') return [process.cwd()];
   if (cmd === 'reclaim' || cmd === 'unreclaim') return [logDir()];
   if (cmd === 'begin' && !argv.some((arg) => arg === '--decision' || arg.startsWith('--decision='))) {
@@ -2073,6 +2377,7 @@ function dispatch(argv) {
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
   const mutates =
     ['begin', 'end', 'init', 'mcp', 'reclaim', 'unreclaim'].includes(cmd) ||
+    (cmd === 'hook' && rest[0] === 'install') ||
     (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
   const readsIntentLog = ['status', 'log'].includes(cmd);
   if (mutates || readsIntentLog) {

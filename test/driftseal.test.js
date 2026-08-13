@@ -1734,3 +1734,213 @@ test('ids increment within the same day', () => {
   assert.match(a, /-001$/);
   assert.match(b, /-002$/);
 });
+
+test('hook prompt and stop emit advisory reminders once an intent log exists', () => {
+  const { dir, run } = setup();
+
+  // No intent log yet: hooks stay silent and still exit 0.
+  assert.equal(run(['hook', 'prompt']), '');
+  assert.equal(run(['hook', 'stop']), '');
+
+  run(['begin', 'create the log']);
+  run(['end']);
+
+  const prompt = run(['hook', 'prompt']);
+  assert.match(prompt, /DriftSeal reminder: if this round will modify files/);
+  assert.match(prompt, /need no intent/);
+
+  const stopped = run(['hook', 'stop']);
+  assert.match(stopped, /no intent is open/);
+
+  const intentId = run(['begin', 'keep an intent open', '--verify', 'npm test']).trim();
+  const openStop = run(['hook', 'stop']);
+  assert.match(openStop, new RegExp(`intent ${intentId} is still in_progress`));
+  assert.match(openStop, /driftseal end/);
+  assert.equal(fs.existsSync(path.join(dir, 'events.jsonl')), true);
+});
+
+test('hook output supports the claude-code additionalContext format', () => {
+  const { run } = setup();
+  run(['begin', 'format check']);
+
+  const prompt = JSON.parse(run(['hook', 'prompt', '--format', 'claude-code']));
+  assert.equal(prompt.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(prompt.hookSpecificOutput.additionalContext, /DriftSeal reminder/);
+
+  const stop = JSON.parse(run(['hook', 'stop', '--format=claude-code']));
+  assert.equal(stop.hookSpecificOutput.hookEventName, 'Stop');
+  assert.match(stop.hookSpecificOutput.additionalContext, /still in_progress/);
+});
+
+test('hook install configures Kimi Code TOML hooks idempotently and preserves config', () => {
+  const { run, runFail } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-kimi-')));
+  const configDir = path.join(root, '.kimi-code');
+  const configFile = path.join(configDir, 'config.toml');
+  fs.mkdirSync(configDir);
+  fs.writeFileSync(configFile, 'model = "kimi-test"\n\n[[hooks]]\nevent = "PreToolUse"\ncommand = "other-hook"\n');
+
+  const installed = run(['hook', 'install', '--target', 'kimi-code'], { cwd: root });
+  assert.match(installed, /Installed DriftSeal hooks for Kimi Code \(project\)/);
+  const first = fs.readFileSync(configFile, 'utf8');
+  assert.match(first, /^model = "kimi-test"/);
+  assert.match(first, /\[\[hooks\]\]\nevent = "PreToolUse"\ncommand = "other-hook"/);
+  assert.match(
+    first,
+    /\[\[hooks\]\]\nevent = "UserPromptSubmit"\ncommand = "driftseal hook prompt"\ntimeout = 5\n\n\[\[hooks\]\]\nevent = "Stop"\ncommand = "driftseal hook stop"\ntimeout = 5\n$/
+  );
+
+  assert.match(
+    run(['hook', 'install', '--target=kimi-code'], { cwd: root }),
+    /already installed for Kimi Code \(project\)/
+  );
+  assert.equal(fs.readFileSync(configFile, 'utf8'), first);
+
+  fs.writeFileSync(configFile, first.replace('timeout = 5\n\n[[hooks]]', 'timeout = 9\n\n[[hooks]]'));
+  assert.match(
+    runFail(['hook', 'install', '--target', 'kimi-code'], { cwd: root }).stderr,
+    /already defines driftseal hooks.*--force/
+  );
+  run(['hook', 'install', '--target', 'kimi-code', '--force'], { cwd: root });
+  assert.equal(fs.readFileSync(configFile, 'utf8'), first);
+});
+
+test('hook install configures Claude Code settings hooks and keeps sibling entries', () => {
+  const { run, runFail } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-claude-')));
+  const configDir = path.join(root, '.claude');
+  const configFile = path.join(configDir, 'settings.json');
+  fs.mkdirSync(configDir);
+  const existing = {
+    theme: 'dark',
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'guard' }] }],
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'driftseal hook prompt --format old' }] }],
+    },
+  };
+  fs.writeFileSync(configFile, JSON.stringify(existing, null, 2) + '\n');
+
+  assert.match(
+    runFail(['hook', 'install', '--target', 'claude-code'], { cwd: root }).stderr,
+    /already defines driftseal hooks.*--force/
+  );
+
+  run(['hook', 'install', '--target', 'claude-code', '--force'], { cwd: root });
+  const updated = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.equal(updated.theme, 'dark');
+  assert.deepEqual(updated.hooks.PreToolUse, existing.hooks.PreToolUse);
+  assert.deepEqual(updated.hooks.UserPromptSubmit, [
+    { hooks: [{ type: 'command', command: 'driftseal hook prompt --format claude-code' }] },
+  ]);
+  assert.deepEqual(updated.hooks.Stop, [
+    { hooks: [{ type: 'command', command: 'driftseal hook stop --format claude-code' }] },
+  ]);
+
+  assert.match(
+    run(['hook', 'install', '--target', 'claude-code'], { cwd: root }),
+    /already installed for Claude Code \(project\)/
+  );
+});
+
+test('hook install configures Codex hooks.json with only the prompt hook', () => {
+  const { run, runFail } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-codex-')));
+  const configDir = path.join(root, '.codex');
+  const configFile = path.join(configDir, 'hooks.json');
+  fs.mkdirSync(configDir);
+  const existing = {
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'guard' }] }],
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'driftseal hook prompt --format old' }] }],
+    },
+  };
+  fs.writeFileSync(configFile, JSON.stringify(existing, null, 2) + '\n');
+
+  // A stale driftseal entry conflicts until --force replaces it.
+  assert.match(
+    runFail(['hook', 'install', '--target', 'codex'], { cwd: root }).stderr,
+    /already defines driftseal hooks.*--force/
+  );
+
+  const installed = run(['hook', 'install', '--target', 'codex', '--force'], { cwd: root });
+  assert.match(installed, /Installed DriftSeal hooks for Codex \(project\)/);
+  const updated = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.deepEqual(updated.hooks.PreToolUse, existing.hooks.PreToolUse);
+  // Codex Stop accepts no advisory context, so only the prompt hook is installed.
+  assert.deepEqual(updated.hooks, {
+    PreToolUse: existing.hooks.PreToolUse,
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'driftseal hook prompt' }] }],
+  });
+
+  assert.match(
+    run(['hook', 'install', '--target', 'codex'], { cwd: root }),
+    /already installed for Codex \(project\)/
+  );
+});
+
+test('hook install supports global scope locations', () => {
+  const { dir, run } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-root-')));
+  const userHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-hook-home-')));
+  const kimiHome = path.join(userHome, 'custom-kimi-home');
+  const env = {
+    ...process.env,
+    HOME: userHome,
+    KIMI_CODE_HOME: kimiHome,
+    DRIFTSEAL_HOME: dir,
+    DRIFTSEAL_DECISION_HOME: path.join(dir, 'decisions'),
+  };
+
+  run(['hook', 'install', '--target', 'kimi-code', '--scope', 'global', '--root', root], {
+    cwd: os.tmpdir(),
+    env,
+  });
+  assert.match(
+    fs.readFileSync(path.join(kimiHome, 'config.toml'), 'utf8'),
+    /command = "driftseal hook stop"/
+  );
+  assert.equal(fs.existsSync(path.join(root, '.kimi-code', 'config.toml')), false);
+
+  run(['hook', 'install', '--target', 'claude-code', '--scope', 'global', '--root', root], {
+    cwd: os.tmpdir(),
+    env,
+  });
+  const settings = JSON.parse(
+    fs.readFileSync(path.join(userHome, '.claude', 'settings.json'), 'utf8')
+  );
+  assert.deepEqual(settings.hooks.Stop, [
+    { hooks: [{ type: 'command', command: 'driftseal hook stop --format claude-code' }] },
+  ]);
+
+  run(['hook', 'install', '--target', 'codex', '--scope', 'global', '--root', root], {
+    cwd: os.tmpdir(),
+    env,
+  });
+  const codexHooks = JSON.parse(
+    fs.readFileSync(path.join(userHome, '.codex', 'hooks.json'), 'utf8')
+  );
+  assert.deepEqual(codexHooks.hooks.UserPromptSubmit, [
+    { hooks: [{ type: 'command', command: 'driftseal hook prompt' }] },
+  ]);
+  assert.equal(fs.existsSync(path.join(root, '.codex', 'hooks.json')), false);
+});
+
+test('hook command validates its subcommands, targets, and formats', () => {
+  const { run, runFail } = setup();
+  assert.match(run(['help']), /driftseal hook install --target TARGET/);
+  assert.match(runFail(['hook']).stderr, /usage: driftseal hook install/);
+  assert.match(runFail(['hook', 'remove']).stderr, /usage: driftseal hook install/);
+  assert.match(
+    runFail(['hook', 'install', '--target', 'cursor']).stderr,
+    /unsupported hook target "cursor"/
+  );
+  assert.match(
+    runFail(['hook', 'install', '--target', 'kimi-code', '--scope', 'workspace']).stderr,
+    /invalid hook install scope "workspace"/
+  );
+  assert.match(runFail(['hook', 'prompt', 'extra']).stderr, /usage: driftseal hook/);
+  assert.match(
+    runFail(['hook', 'prompt', '--format', 'json']).stderr,
+    /unsupported hook output format "json"/
+  );
+});
