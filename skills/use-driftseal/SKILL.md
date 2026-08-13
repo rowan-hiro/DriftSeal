@@ -1,66 +1,41 @@
 ---
 name: use-driftseal
-description: Run repository work through the DriftSeal (`driftseal`) intent, verification, and selective decision workflow. Use when the user asks to use DriftSeal, invokes the skill by name, or works in a repository whose instructions require `driftseal`; also use to resume a DriftSeal-managed task after context loss, reconcile scope changes, close work honestly, or preserve decision context that Git and the intent log cannot recover.
+description: Follow DriftSeal-managed repository work when AGENTS.md requires `driftseal`, the user invokes DriftSeal, or an interrupted intent must be resumed. Use this skill to locate the authoritative repository policy, re-anchor state after context loss, and choose the execution surface; prefer the `driftseal` CLI, using MCP only when the repository or user explicitly selects it.
 ---
 
 # Use DriftSeal
 
-This skill is the usage guide for DriftSeal: how to find it and which command
-or tool to reach for. The binding protocol — when an intent is required, how
-to close one honestly, when a decision record is warranted, how reclamation
-works — lives in the target repository's `AGENTS.md` (injected by
-`driftseal init`). Follow that file; do not substitute this guide or memory
-for it.
+Treat the target repository's applicable `AGENTS.md` as the source of truth.
+This skill helps locate and resume that workflow; it does not restate or extend
+the policy.
 
 ## Locate DriftSeal
 
-- Prefer the `driftseal_*` MCP tools when the DriftSeal MCP server is available
-  for the target repository: `driftseal_status`, `driftseal_begin`,
-  `driftseal_end`, `driftseal_log`, `driftseal_reclaim`, `driftseal_unreclaim`,
-  and the `driftseal_decision_*` tools. Their input schemas come from the MCP
-  client, not from `driftseal help`. The server keeps state in its fixed
-  repository root and ignores storage-override environment variables.
-- Otherwise prefer `driftseal` from `PATH`, where `DRIFTSEAL_HOME` and
-  `DRIFTSEAL_DECISION_HOME` overrides apply. In a DriftSeal source checkout,
-  fall back to `node bin/driftseal.js`.
+- Read the applicable `AGENTS.md` before making changes.
+- Prefer `driftseal` from `PATH`. In a DriftSeal source checkout, fall back to
+  `node bin/driftseal.js`.
+- Use an explicitly configured, repository-pinned MCP server only when the user
+  or repository selects it, or when shell execution is unavailable. Its tool
+  schemas, not `driftseal help`, define the MCP interface.
 - Use one interface consistently within a round.
 - If DriftSeal is unavailable, limit activity to read-only discovery and report
   the blocker. Do not mutate the repository without the required log.
 
-## Command Map
+## Re-anchor When Needed
 
-Re-anchor after context loss or uncertainty; when `status` reports an open
-intent, the repository protocol defines whether to resume or replace it:
+After context loss or when intent state is uncertain, run:
 
 ```sh
 driftseal status
-driftseal log --last 3        # add --all to include reclaimed records
+driftseal log --last 3
 ```
 
-Run each work round as the repository's protocol directs (`-v`, `-s`, `-n`,
-and `-r` are the short forms of `--verify`, `--status`, `--note`, and
-`--verify-result`):
+Then resume, replace, verify, or close the intent exactly as `AGENTS.md`
+requires. For command syntax, run:
 
 ```sh
-driftseal begin "<objective>" --verify "<proof>" [--decision <id>]
-# ... do only what the intent covers ...
-driftseal end --status <status> --note "<what happened>" --verify-result "<proof output>"
+driftseal help
 ```
 
-Record and reconcile decisions as the repository's decision protocol directs:
-
-```sh
-driftseal decision add "<title>" --context "..." --outcome "..."
-driftseal decision update <id> [--status <status>] --note "<what changed or was confirmed>"
-driftseal decision list --status deferred
-```
-
-Retire meaningless closed records as the repository's protocol directs:
-
-```sh
-driftseal reclaim [id ...] --reason "<why>" [--dry-run]
-driftseal unreclaim <id> --reason "<why>"
-```
-
-For exact flags, eligibility rules, and recovery behavior, run
-`driftseal help` and read the repository's `AGENTS.md`.
+Do not treat this skill, MCP descriptions, or lifecycle-hook reminders as
+additional policy. If they conflict with `AGENTS.md`, follow `AGENTS.md`.

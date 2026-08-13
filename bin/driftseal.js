@@ -35,7 +35,7 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const EVENT_SCHEMA_VERSION = 3;
-const PROTOCOL_VERSION = 7;
+const PROTOCOL_VERSION = 8;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
@@ -1110,6 +1110,10 @@ function intentProtocolBlock(version = PROTOCOL_VERSION) {
 
 This repo uses DriftSeal (\`driftseal\`) to prevent agent drift. Every work round:
 
+This \`AGENTS.md\` protocol is the source of truth. Use the \`driftseal\` CLI by
+default; the companion skill only helps discover and resume the workflow, while
+MCP and lifecycle hooks are optional adapters.
+
 1. **Write intent first**, before modifying, creating, or deleting files, or
    making any other change that may need a rollback:
    \`driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"\`.
@@ -1147,7 +1151,14 @@ ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version) {
-  const v6 = intentProtocolBlock(version).replace(
+  const v7 = intentProtocolBlock(version).replace(
+    '\nThis `AGENTS.md` protocol is the source of truth. Use the `driftseal` CLI by\n' +
+      'default; the companion skill only helps discover and resume the workflow, while\n' +
+      'MCP and lifecycle hooks are optional adapters.\n',
+    ''
+  );
+  if (version >= 7) return v7;
+  const v6 = v7.replace(
     'doing anything else. The open intent is the source of truth: resume it when its\n' +
       '   objective still matches the current task; otherwise close it (`partial` or\n' +
       '   `abandoned`, with a note) and `begin` a new one.',
@@ -1264,6 +1275,7 @@ Commit \`.decision-log/\` with the code.`;
 }
 
 function previousDecisionProtocolBlock(version) {
+  if (version >= 7) return decisionProtocolBlock(version);
   return decisionProtocolBlock(version).replace(' --driver "<decision driver>"', '');
 }
 
@@ -1531,6 +1543,149 @@ function installJsonMcp(request) {
 
 function installMcp(request) {
   return request.target === 'codex' ? installCodexMcp(request) : installJsonMcp(request);
+}
+
+const SKILL_NAME = 'use-driftseal';
+
+function skillInstallUsage() {
+  return 'usage: driftseal skill install --target <codex|kimi-code|opencode|claude-code|cursor> [--scope project|global] [--root <repository>] [--force]';
+}
+
+function skillInstallLocation(target, scope, root) {
+  const home = os.homedir();
+  const roots = {
+    codex: {
+      project: path.join(root, '.agents', 'skills'),
+      global: path.join(home, '.agents', 'skills'),
+    },
+    'kimi-code': {
+      project: path.join(root, '.kimi', 'skills'),
+      global: path.join(home, '.kimi', 'skills'),
+    },
+    opencode: {
+      project: path.join(root, '.opencode', 'skills'),
+      global: path.join(home, '.config', 'opencode', 'skills'),
+    },
+    'claude-code': {
+      project: path.join(root, '.claude', 'skills'),
+      global: path.join(home, '.claude', 'skills'),
+    },
+    cursor: {
+      project: path.join(root, '.cursor', 'skills'),
+      global: path.join(home, '.cursor', 'skills'),
+    },
+  };
+  const skillsDir = roots[target][scope];
+  return { skillsDir, skillDir: path.join(skillsDir, SKILL_NAME) };
+}
+
+function parseSkillInstallRequest(argv) {
+  const [subcommand, ...rest] = argv;
+  if (subcommand !== 'install') fail(skillInstallUsage());
+  const { positionals, flags } = parseArgs(rest, {
+    target: 'single',
+    scope: 'single',
+    root: 'single',
+    force: 'boolean',
+  });
+  if (positionals.length > 0 || !flags.target) fail(skillInstallUsage());
+
+  const target = flags.target.toLowerCase();
+  if (!MCP_TARGETS.includes(target)) {
+    fail(`unsupported skill target "${flags.target}" (expected: ${MCP_TARGETS.join(', ')})`);
+  }
+  const scope = (flags.scope || 'project').toLowerCase();
+  if (!MCP_SCOPES.includes(scope)) {
+    fail(`invalid skill install scope "${scope}" (expected: ${MCP_SCOPES.join(', ')})`);
+  }
+  const root = repositoryRoot(flags.root || process.cwd());
+  return {
+    target,
+    targetLabel: MCP_TARGET_LABELS[target],
+    scope,
+    root,
+    force: Boolean(flags.force),
+    ...skillInstallLocation(target, scope, root),
+  };
+}
+
+function directoryDigest(directory) {
+  if (!fs.existsSync(directory)) return null;
+  const digest = crypto.createHash('sha256');
+
+  function visit(current, relative) {
+    const stat = fs.lstatSync(current);
+    if (stat.isDirectory()) {
+      digest.update(`directory\0${relative}\0${stat.mode & 0o777}\0`);
+      for (const name of fs.readdirSync(current).sort()) {
+        visit(path.join(current, name), relative ? path.join(relative, name) : name);
+      }
+      return;
+    }
+    if (stat.isFile()) {
+      digest.update(`file\0${relative}\0${stat.mode & 0o777}\0`);
+      digest.update(fs.readFileSync(current));
+      digest.update('\0');
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      digest.update(`symlink\0${relative}\0${fs.readlinkSync(current)}\0`);
+      return;
+    }
+    digest.update(`other\0${relative}\0${stat.mode}\0`);
+  }
+
+  visit(directory, '');
+  return digest.digest('hex');
+}
+
+function installSkill(request) {
+  const { force, root, scope, skillDir, skillsDir, target, targetLabel } = request;
+  const sourceDir = path.join(__dirname, '..', 'skills', SKILL_NAME);
+  if (!fs.existsSync(path.join(sourceDir, 'SKILL.md'))) {
+    fail(`bundled ${SKILL_NAME} skill is missing from this DriftSeal installation: ${sourceDir}`);
+  }
+
+  const sourceDigest = directoryDigest(sourceDir);
+  const existingDigest = directoryDigest(skillDir);
+  if (existingDigest === sourceDigest) {
+    printLine(`${SKILL_NAME} skill is already installed for ${targetLabel} (${scope}): ${skillDir}`);
+    return { changed: false, target, scope, root, skillDir };
+  }
+  if (existingDigest !== null && !force) {
+    fail(
+      `${targetLabel} already has a different ${SKILL_NAME} skill at ${skillDir}; ` +
+        're-run with --force to replace it'
+    );
+  }
+
+  ensureDirectoryDurable(skillsDir);
+  const suffix = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const temporary = path.join(skillsDir, `.${SKILL_NAME}.tmp-${suffix}`);
+  const backup = path.join(skillsDir, `.${SKILL_NAME}.backup-${suffix}`);
+  let movedExisting = false;
+  try {
+    fs.cpSync(sourceDir, temporary, { recursive: true, errorOnExist: true });
+    if (existingDigest !== null) {
+      fs.renameSync(skillDir, backup);
+      movedExisting = true;
+    }
+    fs.renameSync(temporary, skillDir);
+    if (movedExisting) fs.rmSync(backup, { recursive: true, force: true });
+    fsyncDirectory(skillsDir);
+  } catch (err) {
+    try {
+      fs.rmSync(temporary, { recursive: true, force: true });
+      if (movedExisting && !fs.existsSync(skillDir) && fs.existsSync(backup)) {
+        fs.renameSync(backup, skillDir);
+      }
+    } catch {}
+    throw err;
+  }
+
+  printLine(`Installed ${SKILL_NAME} skill for ${targetLabel} (${scope}): ${skillDir}`);
+  if (scope === 'project') printLine(`Repository root: ${root}`);
+  return { changed: true, target, scope, root, skillDir };
 }
 
 const HOOK_TARGETS = ['kimi-code', 'claude-code', 'codex'];
@@ -2254,6 +2409,10 @@ const commands = {
     return installMcp(request);
   },
 
+  skill(argv) {
+    return installSkill(parseSkillInstallRequest(argv));
+  },
+
   hook(argv) {
     const [subcommand, ...rest] = argv;
     if (subcommand === 'install') {
@@ -2287,6 +2446,7 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(4), eol),
         protocolEol(previousIntentProtocolBlock(5), eol),
         protocolEol(previousIntentProtocolBlock(6), eol),
+        protocolEol(previousIntentProtocolBlock(7), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -2303,6 +2463,7 @@ const commands = {
         protocolEol(previousDecisionProtocolBlock(4), eol),
         protocolEol(previousDecisionProtocolBlock(5), eol),
         protocolEol(previousDecisionProtocolBlock(6), eol),
+        protocolEol(previousDecisionProtocolBlock(7), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });
@@ -2351,6 +2512,9 @@ usage:
   driftseal decision list [--status STATUS] [--last N | --count]
                                  list or count filtered MADR decision records
   driftseal decision show <id>         print one MADR decision record
+  driftseal skill install --target TARGET [--scope project|global] [--root <repository>] [--force]
+                                 install the bundled use-driftseal skill (default: project)
+                                 targets: codex, kimi-code, opencode, claude-code, cursor
   driftseal mcp install --target TARGET [--scope project|global] [--root <repository>] [--force]
                                  install the repository-pinned MCP server (default: project)
                                  targets: codex, kimi-code, opencode, claude-code, cursor
@@ -2383,6 +2547,7 @@ function requestedEndStatus(argv) {
 }
 
 function mutationResources(cmd, argv) {
+  if (cmd === 'skill') return [parseSkillInstallRequest(argv).skillsDir];
   if (cmd === 'mcp') return [parseMcpInstallRequest(argv).configDir];
   if (cmd === 'hook') return [parseHookInstallRequest(argv.slice(1)).configDir];
   if (cmd === 'init') return [process.cwd()];
@@ -2404,7 +2569,7 @@ function dispatch(argv) {
   const fn = commands[cmd];
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
   const mutates =
-    ['begin', 'end', 'init', 'mcp', 'reclaim', 'unreclaim'].includes(cmd) ||
+    ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim'].includes(cmd) ||
     (cmd === 'hook' && rest[0] === 'install') ||
     (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
   const readsIntentLog = ['status', 'log'].includes(cmd);

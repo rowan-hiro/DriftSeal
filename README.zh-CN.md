@@ -42,11 +42,35 @@ driftseal init
 npm link
 ```
 
-## 让 coding agent 掌握完整工作流
+## 推荐的 agent 配置
 
-npm package 内含 `skills/use-driftseal`。这是一个不绑定特定 agent runtime 的配套 skill，会按完整 DriftSeal 闭环执行仓库任务，同时克制地使用 decision record。按照所用 agent runtime 的 skill discovery 约定安装或 link，之后通过名称 `use-driftseal` 调用即可。
+默认组合是 `AGENTS.md` + 配套 skill + CLI：
 
-## 通过 MCP 使用 DriftSeal
+- `driftseal init` 写入的 `AGENTS.md` 是唯一的 policy 来源。
+- `skills/use-driftseal` 是不绑定特定 agent runtime 的轻量发现与恢复指南。
+- `driftseal` CLI 是默认执行入口。
+
+为指定平台安装 package 内置的 skill。默认使用项目级 scope：
+
+```sh
+driftseal skill install --target codex
+driftseal skill install --target kimi-code --scope global
+```
+
+| Target | 项目级 scope | 全局 scope |
+| --- | --- | --- |
+| `codex` | `.agents/skills/use-driftseal` | `~/.agents/skills/use-driftseal` |
+| `kimi-code` | `.kimi/skills/use-driftseal` | `~/.kimi/skills/use-driftseal` |
+| `opencode` | `.opencode/skills/use-driftseal` | `~/.config/opencode/skills/use-driftseal` |
+| `claude-code` | `.claude/skills/use-driftseal` | `~/.claude/skills/use-driftseal` |
+| `cursor` | `.cursor/skills/use-driftseal` | `~/.cursor/skills/use-driftseal` |
+
+如果不在目标 repository 中执行，用 `--root <repository>` 明确指定项目。
+重复安装相同内容不会产生改动；目标位置已有不同版本时必须显式传入 `--force`。
+MCP 与 lifecycle hook 都是可选适配层；只有确实存在 host 限制或提醒需求时
+才启用，不要把它们叠成额外的 policy 层。
+
+## 可选：通过 MCP 使用 DriftSeal
 
 同一个 package 还提供本地 stdio MCP server：`driftseal-mcp`。它为完整的
 intent 与 decision 工作流提供结构化 tools，并与 CLI 复用同一套锁、WAL、
@@ -110,10 +134,10 @@ v1 server 提供：
 | `driftseal://intents/recent` | 以 JSON resource 读取最近十条 intent。 |
 | `driftseal://decisions` | 以 JSON resource 读取 decision catalog。 |
 
-配套 skill 仍然不可替代：MCP 提供受控、结构化的操作，skill 则告诉 agent
-何时使用这些操作，以及怎样避免 drift。
+MCP 只替换执行入口，不会在 repository 的 `AGENTS.md` 之外增加 policy；
+配套 skill 也仍只负责发现与恢复工作流。
 
-## 用 hook 持续提醒 agent
+## 可选：用 hook 持续提醒 agent
 
 对于支持 lifecycle hook 的 agent，可以在每轮回答前（`UserPromptSubmit`）
 注入一条简短的 DriftSeal 提醒，并在回答完毕时（`Stop`）显示警告。提醒是
@@ -181,6 +205,7 @@ driftseal end \
 | `driftseal decision update <id> [-s status] -n "..."` | 在当前 intent 中 reconcile 已关联的 decision。 |
 | `driftseal decision list [-s status] [--last N \| --count]` | 列出或统计 decision records，也可按 status 筛选。 |
 | `driftseal decision show <id>` | 查看单条 decision record。 |
+| `driftseal skill install --target TARGET [--scope project\|global] [--root path] [--force]` | 为 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor 安装内置 skill。 |
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |

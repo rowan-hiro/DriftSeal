@@ -7,11 +7,15 @@ and decision records in `.decision-log/` (override with
 `$DRIFTSEAL_DECISION_HOME`); both are meant to be committed.
 
 <!-- driftseal -->
-<!-- driftseal-version: 7 -->
+<!-- driftseal-version: 8 -->
 
 ## Agent protocol: intent write-ahead log
 
 This repo uses DriftSeal (`driftseal`) to prevent agent drift. Every work round:
+
+This `AGENTS.md` protocol is the source of truth. Use the `driftseal` CLI by
+default; the companion skill only helps discover and resume the workflow, while
+MCP and lifecycle hooks are optional adapters.
 
 1. **Write intent first**, before modifying, creating, or deleting files, or
    making any other change that may need a rollback:
@@ -49,7 +53,7 @@ Log: `.intent-log/events.jsonl` (override with `$DRIFTSEAL_HOME`); commit it wit
 <!-- /driftseal -->
 
 <!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 7 -->
+<!-- driftseal-decisions-version: 8 -->
 
 ## Agent protocol: decision log
 

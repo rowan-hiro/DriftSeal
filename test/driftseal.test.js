@@ -68,7 +68,7 @@ test('package metadata identifies the DriftSeal CLI, ownership, and support URLs
   assert.deepEqual(metadata.bugs, {
     url: 'https://github.com/rowan-hiro/DriftSeal/issues',
   });
-  assert.equal(metadata.author, 'Ruan Boyu <boyuruan@gmail.com>');
+  assert.equal(metadata.author, 'Hiro <rowan_hiro@proton.me>');
 });
 
 test('begin creates an in_progress intent and prints its id', () => {
@@ -1043,7 +1043,10 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /never\s+deletes log lines/);
   assert.match(first, /resume it when its\s+objective still matches/);
   assert.match(first, /--driver "<decision driver>"/);
-  assert.match(first, /driftseal-version: 7/);
+  assert.match(first, /AGENTS\.md` protocol is the source of truth/);
+  assert.match(first, /Use the `driftseal` CLI by\s+default/);
+  assert.match(first, /MCP and lifecycle hooks are optional adapters/);
+  assert.match(first, /driftseal-version: 8/);
   assert.match(first, /<!-- \/driftseal -->/);
 
   runIn(['init']); // second run must not duplicate
@@ -1058,7 +1061,16 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
-  const versionSix = first
+  const versionSeven = first
+    .replace('driftseal-version: 8', 'driftseal-version: 7')
+    .replace('driftseal-decisions-version: 8', 'driftseal-decisions-version: 7')
+    .replace(
+      '\nThis `AGENTS.md` protocol is the source of truth. Use the `driftseal` CLI by\n' +
+        'default; the companion skill only helps discover and resume the workflow, while\n' +
+        'MCP and lifecycle hooks are optional adapters.\n',
+      ''
+    );
+  const versionSix = versionSeven
     .replace('driftseal-version: 7', 'driftseal-version: 6')
     .replace('driftseal-decisions-version: 7', 'driftseal-decisions-version: 6')
     .replace(
@@ -1107,16 +1119,25 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 7/);
-  assert.match(upgraded, /driftseal-decisions-version: 7/);
+  assert.match(upgraded, /driftseal-version: 8/);
+  assert.match(upgraded, /driftseal-decisions-version: 8/);
   assert.match(upgraded, /# trailing user instructions/);
+
+  const upgradeSevenCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v7-'));
+  const upgradeSevenFile = path.join(upgradeSevenCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeSevenFile, versionSeven.trimEnd() + '\n');
+  run(['init'], { cwd: upgradeSevenCwd });
+  const upgradedSeven = fs.readFileSync(upgradeSevenFile, 'utf8');
+  assert.match(upgradedSeven, /driftseal-version: 8/);
+  assert.match(upgradedSeven, /source of truth/);
+  assert.match(upgradedSeven, /--driver "<decision driver>"/);
 
   const upgradeSixCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v6-'));
   const upgradeSixFile = path.join(upgradeSixCwd, 'AGENTS.md');
   fs.writeFileSync(upgradeSixFile, versionSix.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSixCwd });
   const upgradedSix = fs.readFileSync(upgradeSixFile, 'utf8');
-  assert.match(upgradedSix, /driftseal-version: 7/);
+  assert.match(upgradedSix, /driftseal-version: 8/);
   assert.match(upgradedSix, /resume it when its\s+objective still matches/);
   assert.match(upgradedSix, /--driver "<decision driver>"/);
 
@@ -1125,7 +1146,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFiveFile, versionFive.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFiveCwd });
   const upgradedFive = fs.readFileSync(upgradeFiveFile, 'utf8');
-  assert.match(upgradedFive, /driftseal-version: 7/);
+  assert.match(upgradedFive, /driftseal-version: 8/);
   assert.match(upgradedFive, /Log access goes only through DriftSeal/);
 
   const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
@@ -1133,8 +1154,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFourCwd });
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
-  assert.match(upgradedFour, /driftseal-version: 7/);
-  assert.match(upgradedFour, /driftseal-decisions-version: 7/);
+  assert.match(upgradedFour, /driftseal-version: 8/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 8/);
   assert.match(upgradedFour, /need no intent/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
@@ -1149,7 +1170,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 7/);
+  assert.match(upgradedCrLf, /driftseal-version: 8/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -1180,7 +1201,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 7', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 8', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -1210,17 +1231,133 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 7 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 8 -->\n', '')
     .replace(' --driver "<decision driver>"', '')
     .replace('\n<!-- /driftseal-decisions -->', '');
   fs.writeFileSync(legacyFile, `# existing instructions\n\n${legacyDecision}\n`);
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 7/);
-  assert.match(migratedLegacy, /driftseal-version: 7/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 8/);
+  assert.match(migratedLegacy, /driftseal-version: 8/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
+});
+
+test('skill install uses each platform project directory and is idempotent', () => {
+  const { run } = setup();
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'skills', 'use-driftseal', 'SKILL.md'),
+    'utf8'
+  );
+  const cases = [
+    { target: 'codex', label: 'Codex', relative: path.join('.agents', 'skills') },
+    { target: 'kimi-code', label: 'Kimi Code', relative: path.join('.kimi', 'skills') },
+    { target: 'opencode', label: 'OpenCode', relative: path.join('.opencode', 'skills') },
+    { target: 'claude-code', label: 'Claude Code', relative: path.join('.claude', 'skills') },
+    { target: 'cursor', label: 'Cursor', relative: path.join('.cursor', 'skills') },
+  ];
+
+  for (const testCase of cases) {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), `driftseal-${testCase.target}-skill-project-`))
+    );
+    const output = run(['skill', 'install', '--target', testCase.target], { cwd: root });
+    assert.match(
+      output,
+      new RegExp(`Installed use-driftseal skill for ${testCase.label} \\(project\\)`)
+    );
+    const skillFile = path.join(root, testCase.relative, 'use-driftseal', 'SKILL.md');
+    assert.equal(fs.readFileSync(skillFile, 'utf8'), source, testCase.target);
+    assert.match(
+      run(['skill', 'install', `--target=${testCase.target}`], { cwd: root }),
+      new RegExp(`already installed for ${testCase.label} \\(project\\)`)
+    );
+  }
+});
+
+test('skill install uses each platform global directory', () => {
+  const { dir, run } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-root-')));
+  const userHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-home-')));
+  const env = {
+    ...process.env,
+    HOME: userHome,
+    DRIFTSEAL_HOME: dir,
+    DRIFTSEAL_DECISION_HOME: path.join(dir, 'decisions'),
+  };
+  const cases = [
+    { target: 'codex', relative: path.join('.agents', 'skills') },
+    { target: 'kimi-code', relative: path.join('.kimi', 'skills') },
+    { target: 'opencode', relative: path.join('.config', 'opencode', 'skills') },
+    { target: 'claude-code', relative: path.join('.claude', 'skills') },
+    { target: 'cursor', relative: path.join('.cursor', 'skills') },
+  ];
+
+  for (const testCase of cases) {
+    run(
+      ['skill', 'install', '--target', testCase.target, '--scope', 'global', '--root', root],
+      { cwd: os.tmpdir(), env }
+    );
+    assert.equal(
+      fs.existsSync(path.join(userHome, testCase.relative, 'use-driftseal', 'SKILL.md')),
+      true,
+      testCase.target
+    );
+  }
+});
+
+test('skill install protects conflicts and --force replaces the complete skill directory', () => {
+  const { run, runFail } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-conflict-')));
+  const skillDir = path.join(root, '.agents', 'skills', 'use-driftseal');
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'custom skill\n');
+  fs.writeFileSync(path.join(skillDir, 'extra.txt'), 'keep until forced\n');
+
+  assert.match(
+    runFail(['skill', 'install', '--target', 'codex'], { cwd: root }).stderr,
+    /already has a different use-driftseal skill.*--force/
+  );
+  assert.equal(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'), 'custom skill\n');
+  assert.equal(fs.existsSync(path.join(skillDir, 'extra.txt')), true);
+
+  assert.match(
+    run(['skill', 'install', '--target', 'codex', '--force'], { cwd: root }),
+    /Installed use-driftseal skill for Codex \(project\)/
+  );
+  assert.equal(
+    fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'skills', 'use-driftseal', 'SKILL.md'), 'utf8')
+  );
+  assert.equal(fs.existsSync(path.join(skillDir, 'extra.txt')), false);
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(skillDir)).filter((name) => name.startsWith('.use-driftseal.')),
+    []
+  );
+});
+
+test('skill install validates its subcommand, target, scope, root, and arguments', () => {
+  const { run, runFail } = setup();
+  assert.match(run(['help']), /driftseal skill install --target TARGET/);
+  assert.match(runFail(['skill']).stderr, /usage: driftseal skill install/);
+  assert.match(runFail(['skill', 'remove', '--target', 'codex']).stderr, /usage: driftseal skill install/);
+  assert.match(
+    runFail(['skill', 'install', '--target', 'claude']).stderr,
+    /unsupported skill target "claude"/
+  );
+  assert.match(
+    runFail(['skill', 'install', '--target', 'codex', '--scope', 'workspace']).stderr,
+    /invalid skill install scope "workspace"/
+  );
+  assert.match(
+    runFail(['skill', 'install', '--target', 'codex', '--root', '/does/not/exist']).stderr,
+    /repository root does not exist/
+  );
+  assert.match(
+    runFail(['skill', 'install', '--target', 'codex', 'extra']).stderr,
+    /usage: driftseal skill install/
+  );
 });
 
 test('mcp install configures Codex for the current project by default and is idempotent', () => {

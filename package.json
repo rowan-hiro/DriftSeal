@@ -1,6 +1,6 @@
 {
   "name": "driftseal",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Seal intent, verification, and decisions into an auditable workflow for agentic coding",
   "keywords": [
     "driftseal",
@@ -21,7 +21,7 @@
     "url": "git+https://github.com/rowan-hiro/DriftSeal.git"
   },
   "license": "MIT",
-  "author": "Ruan Boyu <boyuruan@gmail.com>",
+  "author": "Hiro <rowan_hiro@proton.me>",
   "type": "commonjs",
   "main": "index.js",
   "bin": {

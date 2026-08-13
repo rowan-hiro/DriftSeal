@@ -42,11 +42,36 @@ For local development from this checkout:
 npm link
 ```
 
-## Give your coding agent the complete workflow
+## Recommended agent setup
 
-The package includes `skills/use-driftseal`, an agent-agnostic companion skill that drives repository work through the complete DriftSeal loop while keeping decision records selective. Install or link it using your agent runtime’s skill discovery convention, then invoke `use-driftseal` by name.
+Use `AGENTS.md` + the companion skill + the CLI as the default integration:
 
-## Use DriftSeal through MCP
+- `AGENTS.md`, installed by `driftseal init`, is the authoritative policy.
+- `skills/use-driftseal` is a small, agent-agnostic discovery and recovery guide.
+- `driftseal` is the default execution surface.
+
+Install the bundled skill for one platform. Project scope is the default:
+
+```sh
+driftseal skill install --target codex
+driftseal skill install --target kimi-code --scope global
+```
+
+| Target | Project scope | Global scope |
+| --- | --- | --- |
+| `codex` | `.agents/skills/use-driftseal` | `~/.agents/skills/use-driftseal` |
+| `kimi-code` | `.kimi/skills/use-driftseal` | `~/.kimi/skills/use-driftseal` |
+| `opencode` | `.opencode/skills/use-driftseal` | `~/.config/opencode/skills/use-driftseal` |
+| `claude-code` | `.claude/skills/use-driftseal` | `~/.claude/skills/use-driftseal` |
+| `cursor` | `.cursor/skills/use-driftseal` | `~/.cursor/skills/use-driftseal` |
+
+Use `--root <repository>` to select a project when running the installer
+elsewhere. Repeated installs of identical content are no-ops; a different
+existing skill requires `--force`. MCP and lifecycle hooks are optional
+adapters; enable them only for a concrete host constraint or reminder need, not
+as additional policy layers.
+
+## Optional: use DriftSeal through MCP
 
 The same package includes `driftseal-mcp`, a local stdio MCP server. It exposes
 structured tools for the complete intent and decision workflow while reusing the
@@ -112,10 +137,11 @@ The v1 server provides:
 | `driftseal://intents/recent` | Read the ten most recent intents as a JSON resource. |
 | `driftseal://decisions` | Read the decision catalog as a JSON resource. |
 
-The companion skill remains important: MCP supplies controlled, structured
-operations; the skill teaches the agent when to use them and how to avoid drift.
+MCP changes only the execution surface. It does not add policy beyond the
+repository's `AGENTS.md`, and the companion skill remains limited to discovery
+and recovery guidance.
 
-## Keep the agent reminded through hooks
+## Optional: keep the agent reminded through hooks
 
 Agents that support lifecycle hooks can inject a short DriftSeal reminder before
 the agent starts answering (`UserPromptSubmit`) and surface a warning when it
@@ -185,6 +211,7 @@ Single-step commands that only build, check, or record work already done — com
 | `driftseal decision update <id> [-s status] -n "..."` | Reconcile a linked decision in the open intent. |
 | `driftseal decision list [-s status] [--last N \| --count]` | List or count decision records, optionally filtered by status. |
 | `driftseal decision show <id>` | Read one decision record. |
+| `driftseal skill install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the bundled skill for Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the repository-pinned MCP server into Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | Install advisory lifecycle reminders into Kimi Code, Claude Code, or Codex. |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | Emit the reminder a lifecycle hook injects; never blocks. |
