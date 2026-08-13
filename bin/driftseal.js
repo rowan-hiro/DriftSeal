@@ -1319,6 +1319,221 @@ function upgradeManagedBlock({
   fail(`cannot safely upgrade customized protocol block beginning with ${marker}`);
 }
 
+const MCP_TARGETS = ['codex', 'kimi-code', 'opencode', 'claude-code', 'cursor'];
+const MCP_SCOPES = ['project', 'global'];
+const MCP_TARGET_LABELS = {
+  codex: 'Codex',
+  'kimi-code': 'Kimi Code',
+  opencode: 'OpenCode',
+  'claude-code': 'Claude Code',
+  cursor: 'Cursor',
+};
+
+function mcpInstallUsage() {
+  return 'usage: driftseal mcp install --target <codex|kimi-code|opencode|claude-code|cursor> [--scope project|global] [--root <repository>] [--force]';
+}
+
+function mcpConfigLocation(target, scope, root) {
+  const home = os.homedir();
+  if (target === 'codex') {
+    const configDir = scope === 'project' ? path.join(root, '.codex') : path.join(home, '.codex');
+    return { configDir, configFile: path.join(configDir, 'config.toml') };
+  }
+  if (target === 'kimi-code') {
+    const userDir = process.env.KIMI_CODE_HOME
+      ? path.resolve(process.env.KIMI_CODE_HOME)
+      : path.join(home, '.kimi-code');
+    const configDir = scope === 'project' ? path.join(root, '.kimi-code') : userDir;
+    return { configDir, configFile: path.join(configDir, 'mcp.json') };
+  }
+  if (target === 'opencode') {
+    const configDir =
+      scope === 'project' ? root : path.join(home, '.config', 'opencode');
+    return { configDir, configFile: path.join(configDir, 'opencode.json') };
+  }
+  if (target === 'claude-code') {
+    const configDir = scope === 'project' ? root : home;
+    return {
+      configDir,
+      configFile: path.join(configDir, scope === 'project' ? '.mcp.json' : '.claude.json'),
+    };
+  }
+  if (target === 'cursor') {
+    const configDir = scope === 'project' ? path.join(root, '.cursor') : path.join(home, '.cursor');
+    return { configDir, configFile: path.join(configDir, 'mcp.json') };
+  }
+  fail(`unsupported MCP target "${target}"`);
+}
+
+function parseMcpInstallRequest(argv) {
+  const [subcommand, ...rest] = argv;
+  if (subcommand !== 'install') {
+    fail(mcpInstallUsage());
+  }
+  const { positionals, flags } = parseArgs(rest, {
+    target: 'single',
+    scope: 'single',
+    root: 'single',
+    force: 'boolean',
+  });
+  if (positionals.length > 0 || !flags.target) {
+    fail(mcpInstallUsage());
+  }
+
+  const target = flags.target.toLowerCase();
+  if (!MCP_TARGETS.includes(target)) {
+    fail(`unsupported MCP target "${flags.target}" (expected: ${MCP_TARGETS.join(', ')})`);
+  }
+  const scope = (flags.scope || 'project').toLowerCase();
+  if (!MCP_SCOPES.includes(scope)) {
+    fail(`invalid MCP install scope "${scope}" (expected: ${MCP_SCOPES.join(', ')})`);
+  }
+  const root = repositoryRoot(flags.root || process.cwd());
+  const { configDir, configFile } = mcpConfigLocation(target, scope, root);
+  return {
+    target,
+    targetLabel: MCP_TARGET_LABELS[target],
+    scope,
+    root,
+    force: Boolean(flags.force),
+    configDir,
+    configFile,
+  };
+}
+
+function tomlString(value) {
+  return JSON.stringify(String(value));
+}
+
+function codexMcpSection(root, eol = '\n') {
+  return [
+    '[mcp_servers.driftseal]',
+    'command = "driftseal-mcp"',
+    `args = ["--root", ${tomlString(root)}]`,
+  ].join(eol);
+}
+
+function codexMcpSectionRange(content) {
+  const header = /^[ \t]*\[mcp_servers\.(?:driftseal|"driftseal"|'driftseal')\][ \t]*(?:#.*)?\r?$/gm;
+  const matches = [...content.matchAll(header)];
+  if (matches.length > 1) fail('Codex config contains duplicate mcp_servers.driftseal tables');
+  if (matches.length === 0) return null;
+
+  const start = matches[0].index;
+  const nextTable = /^[ \t]*\[[^\r\n]+\][ \t]*(?:#.*)?\r?$/gm;
+  nextTable.lastIndex = start + matches[0][0].length;
+  const next = nextTable.exec(content);
+  return { start, end: next ? next.index : content.length };
+}
+
+function installCodexMcp(request) {
+  const { configDir, configFile, force, root, scope, target, targetLabel } = request;
+  const existed = fs.existsSync(configFile);
+  const current = existed ? fs.readFileSync(configFile, 'utf8') : '';
+  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  const section = codexMcpSection(root, eol);
+  const range = codexMcpSectionRange(current);
+  let updated;
+
+  if (!range) {
+    const separator =
+      current.length === 0
+        ? ''
+        : current.endsWith(eol + eol)
+          ? ''
+          : current.endsWith(eol)
+            ? eol
+            : eol + eol;
+    updated = current + separator + section + eol;
+  } else {
+    const existingSection = current.slice(range.start, range.end).trim();
+    if (existingSection.replace(/\r\n/g, '\n') === section.replace(/\r\n/g, '\n')) {
+      printLine(`DriftSeal MCP is already installed for ${targetLabel} (${scope}): ${configFile}`);
+      return { changed: false, target, scope, root, configFile };
+    }
+    if (!force) {
+      fail(
+        `Codex config already defines mcp_servers.driftseal in ${configFile}; ` +
+          're-run with --force to replace that table'
+      );
+    }
+    const trailing = range.end < current.length ? eol + eol : eol;
+    updated = current.slice(0, range.start) + section + trailing + current.slice(range.end);
+  }
+
+  ensureDirectoryDurable(configDir);
+  atomicWriteFile(configFile, updated);
+  printLine(`Installed DriftSeal MCP for ${targetLabel} (${scope}): ${configFile}`);
+  printLine(`Repository root: ${root}`);
+  return { changed: true, target, scope, root, configFile };
+}
+
+function jsonObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readJsonConfig(configFile, targetLabel, target) {
+  if (!fs.existsSync(configFile)) {
+    return target === 'opencode' ? { $schema: 'https://opencode.ai/config.json' } : {};
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  } catch {
+    fail(`${targetLabel} config is not valid JSON: ${configFile}`);
+  }
+  if (!jsonObject(parsed)) fail(`${targetLabel} config must contain a JSON object: ${configFile}`);
+  return parsed;
+}
+
+function jsonMcpDefinition(target, root) {
+  if (target === 'opencode') {
+    return {
+      containerKey: 'mcp',
+      server: { type: 'local', command: ['driftseal-mcp', '--root', root] },
+    };
+  }
+  return {
+    containerKey: 'mcpServers',
+    server: { command: 'driftseal-mcp', args: ['--root', root] },
+  };
+}
+
+function installJsonMcp(request) {
+  const { configDir, configFile, force, root, scope, target, targetLabel } = request;
+  const config = readJsonConfig(configFile, targetLabel, target);
+  const { containerKey, server } = jsonMcpDefinition(target, root);
+  if (config[containerKey] === undefined) config[containerKey] = {};
+  if (!jsonObject(config[containerKey])) {
+    fail(`${targetLabel} config field ${containerKey} must be a JSON object: ${configFile}`);
+  }
+
+  const existing = config[containerKey].driftseal;
+  if (existing !== undefined) {
+    if (JSON.stringify(existing) === JSON.stringify(server)) {
+      printLine(`DriftSeal MCP is already installed for ${targetLabel} (${scope}): ${configFile}`);
+      return { changed: false, target, scope, root, configFile };
+    }
+    if (!force) {
+      fail(
+        `${targetLabel} config already defines the driftseal MCP server in ${configFile}; ` +
+          're-run with --force to replace that entry'
+      );
+    }
+  }
+
+  config[containerKey].driftseal = server;
+  ensureDirectoryDurable(configDir);
+  atomicWriteFile(configFile, JSON.stringify(config, null, 2) + '\n');
+  printLine(`Installed DriftSeal MCP for ${targetLabel} (${scope}): ${configFile}`);
+  printLine(`Repository root: ${root}`);
+  return { changed: true, target, scope, root, configFile };
+}
+
+function installMcp(request) {
+  return request.target === 'codex' ? installCodexMcp(request) : installJsonMcp(request);
+}
+
 const commands = {
   begin(argv) {
     const { positionals, flags } = parseArgs(argv, {
@@ -1719,6 +1934,11 @@ const commands = {
     fail('usage: driftseal decision add|update|list|show (run: driftseal help)');
   },
 
+  mcp(argv) {
+    const request = parseMcpInstallRequest(argv);
+    return installMcp(request);
+  },
+
   init(argv) {
     const { positionals } = parseArgs(argv, {});
     if (positionals.length > 0) fail('usage: driftseal init');
@@ -1805,6 +2025,9 @@ usage:
   driftseal decision list [--status STATUS] [--last N | --count]
                                  list or count filtered MADR decision records
   driftseal decision show <id>         print one MADR decision record
+  driftseal mcp install --target TARGET [--scope project|global] [--root <repository>] [--force]
+                                 install the repository-pinned MCP server (default: project)
+                                 targets: codex, kimi-code, opencode, claude-code, cursor
   driftseal init                       inject intent and decision protocols into ./AGENTS.md
   driftseal help
 
@@ -1829,6 +2052,7 @@ function requestedEndStatus(argv) {
 }
 
 function mutationResources(cmd, argv) {
+  if (cmd === 'mcp') return [parseMcpInstallRequest(argv).configDir];
   if (cmd === 'init') return [process.cwd()];
   if (cmd === 'reclaim' || cmd === 'unreclaim') return [logDir()];
   if (cmd === 'begin' && !argv.some((arg) => arg === '--decision' || arg.startsWith('--decision='))) {
@@ -1848,7 +2072,7 @@ function dispatch(argv) {
   const fn = commands[cmd];
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
   const mutates =
-    ['begin', 'end', 'init', 'reclaim', 'unreclaim'].includes(cmd) ||
+    ['begin', 'end', 'init', 'mcp', 'reclaim', 'unreclaim'].includes(cmd) ||
     (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
   const readsIntentLog = ['status', 'log'].includes(cmd);
   if (mutates || readsIntentLog) {

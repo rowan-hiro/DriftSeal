@@ -59,11 +59,41 @@ Fix the server to one repository when starting it:
 driftseal-mcp --root /absolute/path/to/repository
 ```
 
-For Codex, add the installed command as a stdio MCP server:
+Install the server into the current repository's agent config with one of the
+supported targets:
 
 ```sh
-codex mcp add driftseal -- driftseal-mcp --root /absolute/path/to/repository
+cd /path/to/repository
+driftseal mcp install --target codex
+driftseal mcp install --target kimi-code
+driftseal mcp install --target opencode
+driftseal mcp install --target claude-code
+driftseal mcp install --target cursor
 ```
+
+Project scope is the default because each DriftSeal MCP server belongs to one
+repository. Every target pins `--root` to the repository's canonical absolute
+path, and repeated installs are idempotent.
+
+| Target | Project config | Global config |
+| --- | --- | --- |
+| `codex` | `.codex/config.toml` | `~/.codex/config.toml` |
+| `kimi-code` | `.kimi-code/mcp.json` | `~/.kimi-code/mcp.json` or `$KIMI_CODE_HOME/mcp.json` |
+| `opencode` | `opencode.json` | `~/.config/opencode/opencode.json` |
+| `claude-code` | `.mcp.json` | `~/.claude.json` |
+| `cursor` | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
+
+Use `--root <repository>` when running the installer elsewhere, or choose the
+agent's user-level config explicitly:
+
+```sh
+driftseal mcp install --target <target> --scope global --root /absolute/path/to/repository
+```
+
+Global installs remain pinned to the selected repository. If the chosen config
+already contains a different DriftSeal server entry, the installer leaves it
+untouched unless `--force` is supplied. Other agent settings and MCP servers are
+preserved.
 
 The root is startup configuration, not a tool input. In MCP mode DriftSeal also
 ignores inherited `DRIFTSEAL_HOME` and `DRIFTSEAL_DECISION_HOME` overrides, so a
@@ -121,6 +151,7 @@ Single-step commands that only build, check, or record work already done — com
 | `driftseal decision update <id> [-s status] -n "..."` | Reconcile a linked decision in the open intent. |
 | `driftseal decision list [-s status] [--last N \| --count]` | List or count decision records, optionally filtered by status. |
 | `driftseal decision show <id>` | Read one decision record. |
+| `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the repository-pinned MCP server into Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
 | `driftseal init` | Add the adoption protocol to `AGENTS.md`. |
 | `driftseal help` | Print CLI usage. |
 

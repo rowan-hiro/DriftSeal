@@ -59,11 +59,39 @@ atomic write、schema 和 recovery 实现。server 不会启动 `driftseal` 子�
 driftseal-mcp --root /absolute/path/to/repository
 ```
 
-在 Codex 中，可以把安装后的命令添加为 stdio MCP server：
+选择对应 target，即可把 server 安装到当前 repository 的 agent 配置：
 
 ```sh
-codex mcp add driftseal -- driftseal-mcp --root /absolute/path/to/repository
+cd /path/to/repository
+driftseal mcp install --target codex
+driftseal mcp install --target kimi-code
+driftseal mcp install --target opencode
+driftseal mcp install --target claude-code
+driftseal mcp install --target cursor
 ```
+
+默认使用项目级配置，因为每个 DriftSeal MCP server 都只属于一个 repository。
+所有 target 都会把 `--root` 固定为 repository 的规范化绝对路径，并且可以安全地
+重复执行。
+
+| Target | 项目级配置 | 全局配置 |
+| --- | --- | --- |
+| `codex` | `.codex/config.toml` | `~/.codex/config.toml` |
+| `kimi-code` | `.kimi-code/mcp.json` | `~/.kimi-code/mcp.json` 或 `$KIMI_CODE_HOME/mcp.json` |
+| `opencode` | `opencode.json` | `~/.config/opencode/opencode.json` |
+| `claude-code` | `.mcp.json` | `~/.claude.json` |
+| `cursor` | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
+
+在其他目录执行时可以显式传入 `--root <repository>`；也可以明确选择对应 agent
+的用户级配置：
+
+```sh
+driftseal mcp install --target <target> --scope global --root /absolute/path/to/repository
+```
+
+全局安装仍会固定到所选 repository。如果目标配置中已经存在不同的 DriftSeal
+server entry，安装器不会修改它；只有显式传入 `--force` 才会替换。其他 agent
+设置与 MCP servers 会被保留。
 
 root 只能在启动时配置，不是 tool input。MCP 模式也会忽略继承到进程中的
 `DRIFTSEAL_HOME` 和 `DRIFTSEAL_DECISION_HOME` override，因此 tool call 不能把
@@ -121,6 +149,7 @@ driftseal end \
 | `driftseal decision update <id> [-s status] -n "..."` | 在当前 intent 中 reconcile 已关联的 decision。 |
 | `driftseal decision list [-s status] [--last N \| --count]` | 列出或统计 decision records，也可按 status 筛选。 |
 | `driftseal decision show <id>` | 查看单条 decision record。 |
+| `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
 | `driftseal init` | 把接入协议写入 `AGENTS.md`。 |
 | `driftseal help` | 查看 CLI 用法。 |
 

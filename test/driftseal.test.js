@@ -1223,6 +1223,231 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
 });
 
+test('mcp install configures Codex for the current project by default and is idempotent', () => {
+  const { run } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal mcp project-')));
+  const configFile = path.join(root, '.codex', 'config.toml');
+
+  const installed = run(['mcp', 'install', '--target', 'codex'], { cwd: root });
+  assert.match(installed, /Installed DriftSeal MCP for Codex \(project\)/);
+  assert.match(installed, new RegExp(`Repository root: ${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  const first = fs.readFileSync(configFile, 'utf8');
+  assert.equal(
+    first,
+    `[mcp_servers.driftseal]\ncommand = "driftseal-mcp"\nargs = ["--root", ${JSON.stringify(root)}]\n`
+  );
+
+  assert.match(
+    run(['mcp', 'install', '--target=codex'], { cwd: root }),
+    /already installed for Codex \(project\)/
+  );
+  assert.equal(fs.readFileSync(configFile, 'utf8'), first);
+});
+
+test('mcp install supports global Codex config with an explicit repository root', () => {
+  const { dir, run } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-root-')));
+  const userHome = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-home-'));
+  const env = {
+    ...process.env,
+    HOME: userHome,
+    DRIFTSEAL_HOME: dir,
+    DRIFTSEAL_DECISION_HOME: path.join(dir, 'decisions'),
+  };
+
+  const output = run(
+    ['mcp', 'install', '--target', 'codex', '--scope', 'global', '--root', root],
+    { cwd: os.tmpdir(), env }
+  );
+  assert.match(output, /Installed DriftSeal MCP for Codex \(global\)/);
+  const configFile = path.join(userHome, '.codex', 'config.toml');
+  assert.match(fs.readFileSync(configFile, 'utf8'), new RegExp(JSON.stringify(root).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(fs.existsSync(path.join(root, '.codex', 'config.toml')), false);
+});
+
+test('mcp install supports Kimi Code, OpenCode, Claude Code, and Cursor project config', () => {
+  const { run } = setup();
+  const cases = [
+    {
+      target: 'kimi-code',
+      label: 'Kimi Code',
+      relative: path.join('.kimi-code', 'mcp.json'),
+      container: 'mcpServers',
+    },
+    {
+      target: 'opencode',
+      label: 'OpenCode',
+      relative: 'opencode.json',
+      container: 'mcp',
+    },
+    {
+      target: 'claude-code',
+      label: 'Claude Code',
+      relative: '.mcp.json',
+      container: 'mcpServers',
+    },
+    {
+      target: 'cursor',
+      label: 'Cursor',
+      relative: path.join('.cursor', 'mcp.json'),
+      container: 'mcpServers',
+    },
+  ];
+
+  for (const testCase of cases) {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), `driftseal-${testCase.target}-project-`))
+    );
+    const output = run(['mcp', 'install', '--target', testCase.target], { cwd: root });
+    assert.match(output, new RegExp(`Installed DriftSeal MCP for ${testCase.label}`));
+    const configFile = path.join(root, testCase.relative);
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const expected =
+      testCase.target === 'opencode'
+        ? { type: 'local', command: ['driftseal-mcp', '--root', root] }
+        : { command: 'driftseal-mcp', args: ['--root', root] };
+    assert.deepEqual(config[testCase.container].driftseal, expected, testCase.target);
+    if (testCase.target === 'opencode') {
+      assert.equal(config.$schema, 'https://opencode.ai/config.json');
+    }
+    assert.match(
+      run(['mcp', 'install', '--target', testCase.target], { cwd: root }),
+      new RegExp(`already installed for ${testCase.label}`)
+    );
+  }
+});
+
+test('mcp install uses each agent global config location', () => {
+  const { dir, run } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-agents-root-')));
+  const userHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-agents-home-')));
+  const kimiHome = path.join(userHome, 'custom-kimi-home');
+  const env = {
+    ...process.env,
+    HOME: userHome,
+    KIMI_CODE_HOME: kimiHome,
+    DRIFTSEAL_HOME: dir,
+    DRIFTSEAL_DECISION_HOME: path.join(dir, 'decisions'),
+  };
+  const cases = [
+    { target: 'kimi-code', file: path.join(kimiHome, 'mcp.json'), container: 'mcpServers' },
+    {
+      target: 'opencode',
+      file: path.join(userHome, '.config', 'opencode', 'opencode.json'),
+      container: 'mcp',
+    },
+    { target: 'claude-code', file: path.join(userHome, '.claude.json'), container: 'mcpServers' },
+    { target: 'cursor', file: path.join(userHome, '.cursor', 'mcp.json'), container: 'mcpServers' },
+  ];
+
+  fs.writeFileSync(path.join(userHome, '.claude.json'), JSON.stringify({ theme: 'dark' }));
+  for (const testCase of cases) {
+    run(
+      ['mcp', 'install', '--target', testCase.target, '--scope', 'global', '--root', root],
+      { cwd: os.tmpdir(), env }
+    );
+    const config = JSON.parse(fs.readFileSync(testCase.file, 'utf8'));
+    assert.ok(config[testCase.container].driftseal, testCase.target);
+    if (testCase.target === 'claude-code') assert.equal(config.theme, 'dark');
+  }
+});
+
+test('JSON MCP targets preserve sibling config and require --force for conflicts', () => {
+  const { run, runFail } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-cursor-conflict-')));
+  const configDir = path.join(root, '.cursor');
+  const configFile = path.join(configDir, 'mcp.json');
+  fs.mkdirSync(configDir);
+  const existing = {
+    editorSetting: true,
+    mcpServers: {
+      other: { url: 'https://example.test/mcp' },
+      driftseal: { command: 'custom-driftseal', args: [] },
+    },
+  };
+  fs.writeFileSync(configFile, JSON.stringify(existing, null, 2) + '\n');
+
+  assert.match(
+    runFail(['mcp', 'install', '--target', 'cursor'], { cwd: root }).stderr,
+    /already defines the driftseal MCP server.*--force/
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), existing);
+
+  run(['mcp', 'install', '--target', 'cursor', '--force'], { cwd: root });
+  const updated = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.equal(updated.editorSetting, true);
+  assert.deepEqual(updated.mcpServers.other, existing.mcpServers.other);
+  assert.deepEqual(updated.mcpServers.driftseal, {
+    command: 'driftseal-mcp',
+    args: ['--root', root],
+  });
+});
+
+test('JSON MCP targets reject malformed config without replacing it', () => {
+  const { runFail } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-kimi-invalid-')));
+  const configDir = path.join(root, '.kimi-code');
+  const configFile = path.join(configDir, 'mcp.json');
+  fs.mkdirSync(configDir);
+  fs.writeFileSync(configFile, '{ invalid json\n');
+
+  assert.match(
+    runFail(['mcp', 'install', '--target', 'kimi-code', '--force'], { cwd: root }).stderr,
+    /Kimi Code config is not valid JSON/
+  );
+  assert.equal(fs.readFileSync(configFile, 'utf8'), '{ invalid json\n');
+});
+
+test('mcp install preserves Codex config and requires --force for a conflicting server', () => {
+  const { run, runFail } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-conflict-')));
+  const configDir = path.join(root, '.codex');
+  const configFile = path.join(configDir, 'config.toml');
+  fs.mkdirSync(configDir);
+  const existing =
+    'model = "gpt-test"\n\n' +
+    '[mcp_servers.driftseal]\n' +
+    'command = "custom-driftseal"\n' +
+    'args = []\n\n' +
+    '[mcp_servers.other]\n' +
+    'url = "https://example.test/mcp"\n';
+  fs.writeFileSync(configFile, existing);
+
+  assert.match(
+    runFail(['mcp', 'install', '--target', 'codex'], { cwd: root }).stderr,
+    /already defines mcp_servers\.driftseal.*--force/
+  );
+  assert.equal(fs.readFileSync(configFile, 'utf8'), existing);
+
+  run(['mcp', 'install', '--target', 'codex', '--force'], { cwd: root });
+  const updated = fs.readFileSync(configFile, 'utf8');
+  assert.match(updated, /^model = "gpt-test"/);
+  assert.match(updated, /command = "driftseal-mcp"/);
+  assert.match(updated, new RegExp(JSON.stringify(root).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(updated, /\[mcp_servers\.other\]\nurl = "https:\/\/example\.test\/mcp"/);
+  assert.doesNotMatch(updated, /custom-driftseal/);
+});
+
+test('mcp install validates its target, scope, root, and arguments', () => {
+  const { run, runFail } = setup();
+  assert.match(run(['help']), /targets: codex, kimi-code, opencode, claude-code, cursor/);
+  assert.match(runFail(['mcp', 'install']).stderr, /usage: driftseal mcp install/);
+  assert.match(
+    runFail(['mcp', 'install', '--target', 'claude']).stderr,
+    /unsupported MCP target "claude"/
+  );
+  assert.match(
+    runFail(['mcp', 'install', '--target', 'codex', '--scope', 'workspace']).stderr,
+    /invalid MCP install scope "workspace"/
+  );
+  assert.match(
+    runFail(['mcp', 'install', '--target', 'codex', '--root', '/does/not/exist']).stderr,
+    /repository root does not exist/
+  );
+  assert.match(runFail(['mcp', 'remove', '--target', 'codex']).stderr, /usage: driftseal mcp install/);
+  assert.match(runFail(['mcp', 'install', '--target', 'codex', 'extra']).stderr, /usage: driftseal mcp install/);
+});
+
 test('decision add writes a numbered MADR document', () => {
   const { dir, run } = setup();
   const output = run([
