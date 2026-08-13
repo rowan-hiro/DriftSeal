@@ -172,7 +172,7 @@ Kimi Code 只在全局 `config.toml` 中记录 hook，因此该 target 必须指
 
 ## 一轮标准工作流
 
-修改文件前，先声明这轮工作的目标：
+进行非 Git 改动前，先声明这轮工作的目标：
 
 ```sh
 driftseal begin "add rate limiting to /api/login" \
@@ -190,7 +190,10 @@ driftseal end \
 
 如果范围发生变化，先把当前 intent 以 `partial` 或 `abandoned` 关闭，再开启新的 intent。发生 context loss 后，用 `driftseal status` 和 `driftseal log --last 3` 重新锚定当前目标。
 
-只负责构建、检查或记录已完成工作的单步命令（编译、跑测试、`git add`/`git commit`）不需要单独开启 intent。如果用户已经授权创建 Git commit，只把已验证的改动和刚关闭的 intent log 进行 stage 和 commit，就属于这一轮的持久化收尾。准备 commit 时一旦需要修改内容，就必须开启新一轮。
+Git 操作完全不计入 intent log，因为 Git 会自行维护历史。查看状态、管理 branch
+或 worktree、stage、commit、merge、rebase、cherry-pick、tag 和 push 都不需要
+单独开启 intent，但仍须遵守正常的授权与安全要求。编译、跑测试等单步构建或检查
+也不需要 intent；只要要做非 Git 内容改动，就开启新一轮。
 
 ## 命令速览
 
@@ -270,8 +273,10 @@ driftseal absorb ../other-worktree/.intent-log/events.jsonl \
 不带 path 时，`absorb` 修复当前日志里的冲突标记或已经拼在一起的重复 id。两边都还有未关闭 intent 时，必须加上 `--abandon-theirs` 或 `--abandon-ours`。共享 base 里已经存在、又被两边同时改过的 decision，不会自动合并。
 
 `driftseal init` 会把这条 absorb 规则写入 `AGENTS.md`，同时写入 `.gitattributes`
-并配置 local git merge driver，让 `events.jsonl` 走 `absorb --git`。clone 之后
-需要再跑一次 `init`，因为 driver 只存在于 local git config。
+并配置 local git merge driver，让 `events.jsonl` 走 `absorb --git`。decision id
+撞号时，driver 会先中止 merge，避免 Git 提交语义不明确的 decision catalog；运行
+`driftseal absorb`、stage 修复后的 intent / decision logs，再继续 merge。clone
+之后需要再跑一次 `init`，因为 driver 只存在于 local git config。
 
 ## 数据保存在哪里
 

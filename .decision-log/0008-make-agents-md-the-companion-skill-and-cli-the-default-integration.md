@@ -31,3 +31,12 @@ Treat the repository's AGENTS.md as the authoritative policy, keep use-driftseal
 * Most users need only driftseal init, the companion skill, and the CLI
 * MCP remains useful for shell-restricted or structured integrations
 * Lifecycle hooks remain advisory and opt-in
+
+## Decision History
+
+<!-- driftseal-reconciliation: 6007c67e-a420-44f3-ab1c-a3d8fb40c582 -->
+### 2026-08-13T14:21:46.950Z — Intent `2026-08-13-016`
+
+Status: Accepted → Accepted
+
+Confirmed AGENTS.md remains the authoritative policy while protocol v10 excludes all Git operations from intent logging; Git retains its own history, and normal authorization and safety requirements remain separate.

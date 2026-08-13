@@ -179,7 +179,7 @@ Cursor have no supported hook surface for this yet.
 
 ## A work round
 
-Declare the round before changing files:
+Declare the round before making non-Git changes:
 
 ```sh
 driftseal begin "add rate limiting to /api/login" \
@@ -197,7 +197,12 @@ driftseal end \
 
 If the scope changes, close the current intent as `partial` or `abandoned`, then start a new one. After context loss, use `driftseal status` and `driftseal log --last 3` to re-anchor.
 
-Single-step commands that only build, check, or record work already done — compiling, running tests, `git add`/`git commit` — need no intent of their own. When a commit is authorized, staging and committing only the verified changes and the just-closed intent log finalizes that round. Any content change made while preparing the commit starts a new round.
+Git operations are entirely outside the intent log because Git maintains their
+history. Inspection, branch and worktree management, staging, commits, merges,
+rebases, cherry-picks, tags, and pushes never need an intent of their own. They
+still require normal authorization and safety checks. Single-step builds and
+checks, such as compiling or running tests, also need no intent. Any non-Git
+content change starts a new work round.
 
 ## Commands
 
@@ -293,7 +298,10 @@ already existed in the shared base are not auto-merged.
 
 `driftseal init` writes that absorb rule into `AGENTS.md`, plus `.gitattributes`
 and the local git merge driver so `events.jsonl` merges through `absorb --git`.
-Clones need `init` again because the driver lives in local git config.
+When decision ids collide, the driver stops the merge before Git can commit an
+ambiguous decision catalog. Run `driftseal absorb`, stage the repaired intent
+and decision logs, then continue the merge. Clones need `init` again because
+the driver lives in local git config.
 
 ## Storage
 

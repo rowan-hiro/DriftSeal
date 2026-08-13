@@ -32,3 +32,12 @@ Add driftseal absorb (and a git merge driver) that builds a new merged WAL by re
 * events.jsonl may be atomically replaced during absorb; the output remains valid schema v3
 * Incoming colliding ids are rewritten and printed as a mapping; callers must not assume those original ids survive the merge
 * Two open intents still require an explicit abandon flag
+
+## Decision History
+
+<!-- driftseal-reconciliation: ecb271f6-e7c0-4b91-87e7-946460cedb4c -->
+### 2026-08-13T14:13:36.309Z — Intent `2026-08-13-015`
+
+Status: Accepted → Accepted
+
+Confirmed the accepted absorb design while making decision handling three-way and fail-safe: Git stops before ambiguous decision ids are committed, and no-arg absorb reconstructs exact side ownership from merge metadata.
