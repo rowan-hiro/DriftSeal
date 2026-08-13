@@ -210,6 +210,7 @@ driftseal end \
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |
 | `driftseal init` | 把接入协议写入 `AGENTS.md`。 |
+| `driftseal --version` 或 `driftseal -V` | 输出当前安装的 DriftSeal 版本。 |
 | `driftseal help` | 查看 CLI 用法。 |
 
 如果 `begin` 通过一个或多个 `--decision <id>` 声明了关联，那么 intent

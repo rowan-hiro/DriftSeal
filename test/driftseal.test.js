@@ -71,6 +71,15 @@ test('package metadata identifies the DriftSeal CLI, ownership, and support URLs
   assert.equal(metadata.author, 'Hiro <rowan_hiro@proton.me>');
 });
 
+test('--version and -V print the package version', () => {
+  const { run, runFail } = setup();
+  const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(run(['--version']), `${metadata.version}\n`);
+  assert.equal(run(['-V']), `${metadata.version}\n`);
+  assert.match(run(['help']), /driftseal --version \| -V/);
+  assert.match(runFail(['--version', 'extra']).stderr, /usage: driftseal --version \| -V/);
+});
+
 test('begin creates an in_progress intent and prints its id', () => {
   const { run, events } = setup();
   const id = run(['begin', 'add login form', '--verify', 'npm test']).trim();

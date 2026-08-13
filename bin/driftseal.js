@@ -24,6 +24,7 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const { version: PACKAGE_VERSION } = require('../package.json');
 
 const END_STATUSES = ['completed', 'partial', 'failed', 'abandoned'];
 const DECISION_STATUSES = [
@@ -2524,6 +2525,7 @@ usage:
   driftseal hook prompt|stop [--format plain|claude-code]
                                  emit the reminder a lifecycle hook injects; never blocks
   driftseal init                       inject intent and decision protocols into ./AGENTS.md
+  driftseal --version | -V             print the installed DriftSeal version
   driftseal help
 
 decision add options:
@@ -2535,6 +2537,11 @@ decision add options:
 intent log: $DRIFTSEAL_HOME/events.jsonl, or .intent-log/events.jsonl
 decision log: $DRIFTSEAL_DECISION_HOME, or .decision-log/ in the current directory`);
     return null;
+  },
+
+  version() {
+    printLine(PACKAGE_VERSION);
+    return PACKAGE_VERSION;
   },
 };
 
@@ -2563,6 +2570,10 @@ function mutationResources(cmd, argv) {
 
 function dispatch(argv) {
   const [cmd, ...rest] = argv;
+  if (cmd === '--version' || cmd === '-V') {
+    if (rest.length > 0) fail('usage: driftseal --version | -V');
+    return { data: commands.version(), exitCode: 0 };
+  }
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     return { data: commands.help(), exitCode: cmd ? 0 : 1 };
   }

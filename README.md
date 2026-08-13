@@ -216,6 +216,7 @@ Single-step commands that only build, check, or record work already done — com
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | Install advisory lifecycle reminders into Kimi Code, Claude Code, or Codex. |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | Emit the reminder a lifecycle hook injects; never blocks. |
 | `driftseal init` | Add the adoption protocol to `AGENTS.md`. |
+| `driftseal --version` or `driftseal -V` | Print the installed DriftSeal version. |
 | `driftseal help` | Print CLI usage. |
 
 When `begin` declares one or more `--decision <id>` links, every linked
