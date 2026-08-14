@@ -1627,7 +1627,7 @@ test('skill install protects conflicts and --force replaces the complete skill d
 
   assert.match(
     runFail(['skill', 'install', '--target', 'codex'], { cwd: root }).stderr,
-    /already has a different use-driftseal skill.*--force/
+    /already has a use-driftseal skill DriftSeal did not install.*--force/
   );
   assert.equal(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'), 'custom skill\n');
   assert.equal(fs.existsSync(path.join(skillDir, 'extra.txt')), true);
@@ -1645,6 +1645,85 @@ test('skill install protects conflicts and --force replaces the complete skill d
     fs.readdirSync(path.dirname(skillDir)).filter((name) => name.startsWith('.use-driftseal.')),
     []
   );
+});
+
+/*
+ * Stages a DriftSeal tree whose bundled skill differs from this checkout, so the
+ * test can install with today's release and upgrade with tomorrow's. It passes
+ * only while the bundled skill digest is listed in SKILL_RELEASE_DIGESTS, which
+ * is what keeps an installed skill upgradable by the next release.
+ */
+function stageNextSkillRelease() {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-next-')));
+  const cli = path.join(home, 'bin', 'driftseal.js');
+  const skillFile = path.join(home, 'skills', 'use-driftseal', 'SKILL.md');
+  fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+  fs.copyFileSync(DRIFTSEAL, cli);
+  fs.copyFileSync(path.join(__dirname, '..', 'package.json'), path.join(home, 'package.json'));
+  const content =
+    fs.readFileSync(path.join(__dirname, '..', 'skills', 'use-driftseal', 'SKILL.md'), 'utf8') +
+    '\n<!-- next release -->\n';
+  fs.writeFileSync(skillFile, content);
+  return { cli, content };
+}
+
+test('skill install upgrades a skill shipped by an earlier DriftSeal without --force', () => {
+  const { dir, run } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-upgrade-')));
+  const userHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-home-')));
+  const env = {
+    ...process.env,
+    HOME: userHome,
+    DRIFTSEAL_HOME: dir,
+    DRIFTSEAL_DECISION_HOME: path.join(dir, 'decisions'),
+  };
+  const install = ['skill', 'install', '--target', 'claude-code', '--scope', 'global', '--root', root];
+  const skillFile = path.join(userHome, '.claude', 'skills', 'use-driftseal', 'SKILL.md');
+  run(install, { cwd: os.tmpdir(), env });
+
+  const next = stageNextSkillRelease();
+  const upgrade = execFileSync(process.execPath, [next.cli, ...install], {
+    cwd: os.tmpdir(),
+    env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  assert.match(upgrade, /Upgraded use-driftseal skill for Claude Code \(global\)/);
+  assert.equal(fs.readFileSync(skillFile, 'utf8'), next.content);
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(path.dirname(skillFile))).filter((name) => name.startsWith('.use-driftseal.')),
+    []
+  );
+});
+
+test('skill install still protects a locally edited skill from a newer release', () => {
+  const { dir } = setup();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-edited-')));
+  const skillDir = path.join(root, '.agents', 'skills', 'use-driftseal');
+  fs.mkdirSync(skillDir, { recursive: true });
+  const edited =
+    fs.readFileSync(path.join(__dirname, '..', 'skills', 'use-driftseal', 'SKILL.md'), 'utf8') +
+    '\n<!-- local note -->\n';
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), edited);
+
+  const next = stageNextSkillRelease();
+  let failure;
+  try {
+    execFileSync(process.execPath, [next.cli, 'skill', 'install', '--target', 'codex'], {
+      cwd: root,
+      env: { ...process.env, DRIFTSEAL_HOME: dir, DRIFTSEAL_DECISION_HOME: path.join(dir, 'decisions') },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    failure = err;
+  }
+
+  assert.ok(failure, 'expected the newer release to refuse a locally edited skill');
+  assert.match(failure.stderr, /already has a use-driftseal skill DriftSeal did not install.*--force/);
+  assert.equal(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'), edited);
 });
 
 test('skill install validates its subcommand, target, scope, root, and arguments', () => {

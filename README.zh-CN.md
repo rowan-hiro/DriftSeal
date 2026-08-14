@@ -71,7 +71,8 @@ driftseal skill install --target kimi-code --scope global
 | `cursor` | `.cursor/skills/use-driftseal` | `~/.cursor/skills/use-driftseal` |
 
 如果不在目标 repository 中执行，用 `--root <repository>` 明确指定项目。
-重复安装相同内容不会产生改动；目标位置已有不同版本时必须显式传入 `--force`。
+重复安装相同内容不会产生改动；旧版本 DriftSeal 装下的 skill 会被直接原地升级，
+只有安装器从未写过的 skill 才需要显式传入 `--force`。
 MCP 与 lifecycle hook 都是可选适配层；只有确实存在 host 限制或提醒需求时
 才启用，不要把它们叠成额外的 policy 层。
 

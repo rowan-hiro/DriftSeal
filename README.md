@@ -73,8 +73,9 @@ driftseal skill install --target kimi-code --scope global
 | `cursor` | `.cursor/skills/use-driftseal` | `~/.cursor/skills/use-driftseal` |
 
 Use `--root <repository>` to select a project when running the installer
-elsewhere. Repeated installs of identical content are no-ops; a different
-existing skill requires `--force`. MCP and lifecycle hooks are optional
+elsewhere. Repeated installs of identical content are no-ops, and a skill left
+by an earlier DriftSeal release is upgraded in place; only a skill this
+installer never wrote requires `--force`. MCP and lifecycle hooks are optional
 adapters; enable them only for a concrete host constraint or reminder need, not
 as additional policy layers.
 

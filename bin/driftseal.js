@@ -1984,6 +1984,27 @@ function installMcp(request) {
 
 const SKILL_NAME = 'use-driftseal';
 
+/*
+ * Every skill tree DriftSeal has ever bundled, oldest first, as skillTreeDigest
+ * hashes. `skill install` treats a directory matching one of these as its own
+ * earlier output and upgrades it in place; anything else is someone's local
+ * skill that only --force may replace. Append the new digest whenever the
+ * bundled skill changes, otherwise the next release cannot upgrade this one;
+ * the "bundled use-driftseal skill is a known release" test fails until you do.
+ */
+const SKILL_RELEASE_DIGESTS = new Set([
+  'e996627c96edc7c09599bc454c4225a416aa89e50aef14d4dd569dd21454e882', // 1b76215 initial commit
+  '5f702545b18e117bafcea669b48cdb3b31c98079f97eaa084fd3b4ceff9500e8', // 5c2ec74 intents only for rollback-worthy changes
+  '77f6365590ff181ee6be003930dd1696c363e213368de0f4e89962555af3fabe', // 56380a8 local MCP server
+  'b7e2310eaf20b50b5ec28531471965607e7e070a4f58263e29408b2cd5cdfb11', // 1cc77f6 reclaim markers
+  '08bc63b8dcf0f4f078252179a3fc2ca4ef2632ecb5b9dfe3782a452c3202c2c4', // de4a8a1 skill slimmed into a usage guide
+  '8523459ff81cf0b97a36b30d216956a58d8a3b3b9760f455d7ea334604da335a', // 3a1d6e0 protocol v7 resume semantics
+  'cc98b9348ec222320bfcd285ba3f1f499a42d15b31e9b1d83c35f0206b2d5ba9', // ca16785 CLI-first skill integration
+  '0fd870f8c1b81f8386d986d64742679d56cd1d317c02890830c81876eb9227d6', // da8afd2 1.1.0 absorb
+  '72ddea79940bdf2bce66d491888f11423ae1bd383e1b511028fda617e6f6fb27', // f395778 1.1.6 parked intents
+  'df8bc7035de1a19faf307c92f9bb0f4052e683d1a94881c2c5d5cbef48b67568', // dc9899d 1.1.7 parked intents in absorb (current)
+]);
+
 function skillInstallUsage() {
   return 'usage: driftseal skill install --target <codex|kimi-code|opencode|claude-code|cursor> [--scope project|global] [--root <repository>] [--force]';
 }
@@ -2046,7 +2067,13 @@ function parseSkillInstallRequest(argv) {
   };
 }
 
-function directoryDigest(directory) {
+/*
+ * Identifies a skill tree by its contents alone: relative paths joined with "/"
+ * and file bytes, never file modes or timestamps. The digest therefore stays
+ * stable across platforms, checkouts, and npm tarballs, which is what lets
+ * SKILL_RELEASE_DIGESTS recognize a skill DriftSeal installed earlier.
+ */
+function skillTreeDigest(directory) {
   if (!fs.existsSync(directory)) return null;
   const digest = crypto.createHash('sha256');
 
@@ -2055,12 +2082,12 @@ function directoryDigest(directory) {
     if (stat.isDirectory()) {
       digest.update(`directory\0${relative}\0`);
       for (const name of fs.readdirSync(current).sort()) {
-        visit(path.join(current, name), relative ? path.join(relative, name) : name);
+        visit(path.join(current, name), relative ? `${relative}/${name}` : name);
       }
       return;
     }
     if (stat.isFile()) {
-      digest.update(`file\0${relative}\0${stat.mode & 0o777}\0`);
+      digest.update(`file\0${relative}\0`);
       digest.update(fs.readFileSync(current));
       digest.update('\0');
       return;
@@ -2069,7 +2096,7 @@ function directoryDigest(directory) {
       digest.update(`symlink\0${relative}\0${fs.readlinkSync(current)}\0`);
       return;
     }
-    digest.update(`other\0${relative}\0${stat.mode}\0`);
+    digest.update(`other\0${relative}\0`);
   }
 
   visit(directory, '');
@@ -2096,15 +2123,18 @@ function installSkill(request) {
     fail(`bundled ${SKILL_NAME} skill is missing from this DriftSeal installation: ${sourceDir}`);
   }
 
-  const sourceDigest = directoryDigest(sourceDir);
-  const existingDigest = directoryDigest(skillDir);
+  const sourceDigest = skillTreeDigest(sourceDir);
+  const existingDigest = skillTreeDigest(skillDir);
   if (existingDigest === sourceDigest) {
     printLine(`${SKILL_NAME} skill is already installed for ${targetLabel} (${scope}): ${skillDir}`);
     return { changed: false, target, scope, root, skillDir };
   }
-  if (existingDigest !== null && !force) {
+  // An untouched skill from an earlier DriftSeal upgrades on its own; only a
+  // skill this installer never wrote needs the operator to confirm with --force.
+  const upgraded = existingDigest !== null && SKILL_RELEASE_DIGESTS.has(existingDigest);
+  if (existingDigest !== null && !upgraded && !force) {
     fail(
-      `${targetLabel} already has a different ${SKILL_NAME} skill at ${skillDir}; ` +
+      `${targetLabel} already has a ${SKILL_NAME} skill DriftSeal did not install at ${skillDir}; ` +
         're-run with --force to replace it'
     );
   }
@@ -2134,9 +2164,12 @@ function installSkill(request) {
     throw err;
   }
 
-  printLine(`Installed ${SKILL_NAME} skill for ${targetLabel} (${scope}): ${skillDir}`);
+  printLine(
+    `${upgraded ? 'Upgraded' : 'Installed'} ${SKILL_NAME} skill for ` +
+      `${targetLabel} (${scope}): ${skillDir}`
+  );
   if (scope === 'project') printLine(`Repository root: ${root}`);
-  return { changed: true, target, scope, root, skillDir };
+  return { changed: true, upgraded, target, scope, root, skillDir };
 }
 
 const HOOK_TARGETS = ['kimi-code', 'claude-code', 'codex'];
