@@ -45,5 +45,9 @@ When both sides still have an open intent, add `--abandon-theirs` or
 `--abandon-ours`. `driftseal init` also configures the local git merge driver;
 clones need `init` again for that driver.
 
+In a Git worktree, `begin` does not dirty the tracked intent log, so `git merge`
+can run with an intent still in progress. `end` writes the closed record to
+`.intent-log/events.jsonl`.
+
 Do not treat this skill, MCP descriptions, or lifecycle-hook reminders as
 additional policy. If they conflict with `AGENTS.md`, follow `AGENTS.md`.

@@ -288,6 +288,12 @@ driftseal absorb ../other-worktree/.intent-log/events.jsonl \
 `driftseal absorb`、stage 修复后的 intent / decision logs，再继续 merge。clone
 之后需要再跑一次 `init`，因为 driver 只存在于 local git config。
 
+在 Git worktree 里，`begin` 会把未关闭的 intent 停在 Git 元数据中，而不是追加到
+已跟踪的 `events.jsonl`。因此工作树保持干净，`git merge` 可以在 intent 仍进行中
+时执行，不必为了清工作树而多做一个只含日志的提交。`end` 才会把已关闭的记录写入
+跟踪日志。如果停放中的 intent id 与合并进来的事件撞号，DriftSeal 会按 `absorb`
+同样的规则重编号。
+
 ## 数据保存在哪里
 
 - `.intent-log/events.jsonl`：append-only intent log。所有读写都必须经过 `driftseal`（CLI 或 MCP）——不要直接读取、修改、移动或删除该文件；需要让无意义的记录退场时使用 `driftseal reclaim`，而不是删除日志行。合并撞号时用 `driftseal absorb`，不要手改这个文件。

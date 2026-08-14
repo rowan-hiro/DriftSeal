@@ -16,6 +16,7 @@
  *   { "type": "end",   "id", "ts", "status", "note", "verifyResult" }
  *
  * Intent log: $DRIFTSEAL_HOME/events.jsonl, or .intent-log/events.jsonl in cwd.
+ * In a Git worktree, an open intent is parked in Git metadata until end.
  * Decision log: $DRIFTSEAL_DECISION_HOME, or .decision-log/ in cwd.
  */
 
@@ -38,6 +39,7 @@ const DECISION_STATUSES = [
 const EVENT_SCHEMA_VERSION = 3;
 const PROTOCOL_VERSION = 11;
 const DEFAULT_LOG_LANGUAGE = 'en';
+const IN_PROGRESS_GIT_PATH = 'driftseal-in-progress.jsonl';
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const MAX_DECISION_SLUG_LENGTH = 180;
@@ -193,7 +195,47 @@ function normalizeEvent(event, line) {
   fail(`unknown event type "${event.type}" on log line ${line}`);
 }
 
-function readEvents({ repairTail = false, file = logFile() } = {}) {
+function gitWorktreeRoot(cwd = process.cwd()) {
+  if (!isGitWorkTree(cwd)) return null;
+  return gitCapture(['rev-parse', '--show-toplevel'], cwd);
+}
+
+function worktreeInProgressFile(cwd = process.cwd()) {
+  if (!isGitWorkTree(cwd)) return null;
+  const gitPath = gitCapture(['rev-parse', '--git-path', IN_PROGRESS_GIT_PATH], cwd);
+  if (!gitPath) return null;
+  return path.resolve(cwd, gitPath);
+}
+
+function isParkableIntentLog() {
+  if (process.env.DRIFTSEAL_HOME) return false;
+  const root = gitWorktreeRoot();
+  if (!root) return false;
+  return path.resolve(logFile()) === path.resolve(root, '.intent-log', 'events.jsonl');
+}
+
+function inProgressFile() {
+  if (!isParkableIntentLog()) return null;
+  return worktreeInProgressFile();
+}
+
+function liveWorktreeIntentLog() {
+  const root = gitWorktreeRoot();
+  if (!root) return null;
+  return path.resolve(root, '.intent-log', 'events.jsonl');
+}
+
+function sameResolvedPath(left, right) {
+  return path.resolve(left) === path.resolve(right);
+}
+
+function shouldAttachInProgress(file) {
+  if (process.env.DRIFTSEAL_HOME) return false;
+  const live = liveWorktreeIntentLog();
+  return live !== null && sameResolvedPath(file, live);
+}
+
+function readJsonlRecordsFromFile(file, { repairTail = false } = {}) {
   if (!fs.existsSync(file)) return [];
   let content = fs.readFileSync(file, 'utf8');
   const rawLines = content.split('\n');
@@ -214,7 +256,41 @@ function readEvents({ repairTail = false, file = logFile() } = {}) {
       content = content.slice(0, validLength);
     }
   }
-  return parseJsonlRecords(content, file).map((record) => record.event);
+  return parseJsonlRecords(content, file);
+}
+
+function overlayIsCommittedSuffix(committedEvents, overlayEvents) {
+  if (overlayEvents.length === 0 || committedEvents.length < overlayEvents.length) return false;
+  const suffix = committedEvents.slice(-overlayEvents.length);
+  return suffix.every(
+    (event, index) => event.id === overlayEvents[index].id && event.type === overlayEvents[index].type
+  );
+}
+
+function reconcileInProgressRecords(committedEvents, { repairTail = false, park = inProgressFile() } = {}) {
+  if (!park || !fs.existsSync(park)) return [];
+  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail });
+  const overlayEvents = overlayRecords.map((record) => record.event);
+  if (overlayIsCommittedSuffix(committedEvents, overlayEvents)) {
+    fs.unlinkSync(park);
+    fsyncDirectory(path.dirname(park));
+    return [];
+  }
+  const remapped = remapTheirsRecords(overlayRecords, committedEvents, new Map(), new Map());
+  if (remapped.mappings.length > 0) writeJsonl(park, remapped.records);
+  return remapped.records;
+}
+
+function readEvents({ repairTail = false, file = logFile() } = {}) {
+  const records = readJsonlRecordsFromFile(file, { repairTail });
+  const events = records.map((record) => record.event);
+  if (!shouldAttachInProgress(file)) return events;
+  return events.concat(
+    reconcileInProgressRecords(events, {
+      repairTail,
+      park: worktreeInProgressFile(),
+    }).map((record) => record.event)
+  );
 }
 
 function parseJsonlRecords(content, source = 'log') {
@@ -257,15 +333,11 @@ function ensureDirectoryDurable(directory) {
   for (const created of missing.reverse()) fsyncDirectory(path.dirname(created));
 }
 
-function appendEvent(event) {
-  ensureDirectoryDurable(logDir());
-  const file = logFile();
+function appendEventTo(file, event) {
+  ensureDirectoryDurable(path.dirname(file));
   const existed = fs.existsSync(file);
   const storedEvent = { schemaVersion: EVENT_SCHEMA_VERSION, ...event };
-  const line = Buffer.from(
-    JSON.stringify(storedEvent) + '\n',
-    'utf8'
-  );
+  const line = Buffer.from(`${JSON.stringify(storedEvent)}\n`, 'utf8');
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
   try {
     const stat = fs.fstatSync(fd);
@@ -285,8 +357,37 @@ function appendEvent(event) {
   } finally {
     fs.closeSync(fd);
   }
-  if (!existed) fsyncDirectory(logDir());
+  if (!existed) fsyncDirectory(path.dirname(file));
   return storedEvent;
+}
+
+function flushInProgressLog() {
+  const park = inProgressFile();
+  if (!park || !fs.existsSync(park)) return;
+  const committedRecords = readJsonlRecordsFromFile(logFile());
+  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail: true });
+  const overlayEvents = overlayRecords.map((record) => record.event);
+  const committedEvents = committedRecords.map((record) => record.event);
+  if (overlayIsCommittedSuffix(committedEvents, overlayEvents)) {
+    fs.unlinkSync(park);
+    fsyncDirectory(path.dirname(park));
+    return;
+  }
+  const remapped = remapTheirsRecords(overlayRecords, committedEvents, new Map(), new Map());
+  writeJsonl(logFile(), [...committedRecords, ...remapped.records]);
+  fs.unlinkSync(park);
+  fsyncDirectory(path.dirname(park));
+}
+
+function appendEvent(event) {
+  const park = inProgressFile();
+  const parking = Boolean(park && (event.type === 'begin' || fs.existsSync(park)));
+  if (parking) {
+    const storedEvent = appendEventTo(park, event);
+    if (event.type === 'end') flushInProgressLog();
+    return storedEvent;
+  }
+  return appendEventTo(logFile(), event);
 }
 
 function contentHash(content) {
@@ -2234,9 +2335,14 @@ function hookLogFile() {
     return fs.existsSync(configured) ? configured : null;
   }
   let current = path.resolve(process.cwd());
+  const root = gitWorktreeRoot(current);
   while (true) {
     const candidate = path.join(current, '.intent-log', 'events.jsonl');
     if (fs.existsSync(candidate)) return candidate;
+    if (root && path.resolve(root) === current) {
+      const park = worktreeInProgressFile(current);
+      if (park && fs.existsSync(park)) return candidate;
+    }
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
@@ -3674,7 +3780,8 @@ decision add options:
   --consequence "..."           repeat for each consequence
 
 intent log: $DRIFTSEAL_HOME/events.jsonl, or .intent-log/events.jsonl
-decision log: $DRIFTSEAL_DECISION_HOME, or .decision-log/ in the current directory`);
+decision log: $DRIFTSEAL_DECISION_HOME, or .decision-log/ in the current directory
+In a Git worktree, begin parks an open intent in Git metadata until end, so merge does not need a log-only commit.`);
     return null;
   },
 
@@ -3723,7 +3830,8 @@ function dispatch(argv) {
     ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
     (cmd === 'hook' && rest[0] === 'install') ||
     (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
-  const readsIntentLog = ['status', 'log'].includes(cmd);
+  const readsIntentLog =
+    ['status', 'log'].includes(cmd) || (cmd === 'hook' && ['prompt', 'stop'].includes(rest[0]));
   if (mutates || readsIntentLog) {
     const resources = readsIntentLog ? [logDir()] : mutationResources(cmd, rest);
     const data = withMutationLocks(resources, () => fn(rest));

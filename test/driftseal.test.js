@@ -126,6 +126,7 @@ test('--version and -V print the package version', () => {
   assert.equal(run(['-V']), `${metadata.version}\n`);
   assert.match(run(['help']), /driftseal --version \| -V/);
   assert.match(run(['help']), /driftseal init \[--lang <tag>\]/);
+  assert.match(run(['help']), /parks an open intent in Git metadata until end/);
   assert.match(runFail(['--version', 'extra']).stderr, /usage: driftseal --version \| -V/);
 });
 
@@ -2673,6 +2674,59 @@ test('absorb --git performs a 3-way merge and init installs the driver', () => {
   assert.equal(begins[2].intent, 'feature work');
   assert.match(begins[2].id, /-003$/);
   assert.equal(runIn(['log', '--last', '1']).includes('feature work'), true);
+});
+
+test('begin parks an open intent so git merge does not need a log-only commit', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-git-park-begin-');
+  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['commit', '-m', 'base protocol']);
+
+  run(['begin', 'shared']);
+  run(['end', '--status', 'completed', '--note', 'shared', '--verify-result', 'ok']);
+  git(['add', '.intent-log/events.jsonl']);
+  git(['commit', '-m', 'shared']);
+
+  git(['checkout', '-b', 'feature']);
+  run(['begin', 'feature work']);
+  run(['end', '--status', 'completed', '--note', 'feature', '--verify-result', 'ok']);
+  git(['add', '.intent-log/events.jsonl']);
+  git(['commit', '-m', 'feature']);
+
+  git(['checkout', 'main']);
+  const before = fs.readFileSync(path.join(cwd, '.intent-log', 'events.jsonl'), 'utf8');
+  const opened = run(['begin', 'merge the feature']).trim();
+  assert.match(opened, /-002$/);
+  assert.equal(fs.readFileSync(path.join(cwd, '.intent-log', 'events.jsonl'), 'utf8'), before);
+  assert.equal(git(['status', '--porcelain']), '');
+  assert.match(run(['status']), /merge the feature/);
+  assert.match(run(['status']), /in_progress/);
+
+  git(['merge', 'feature', '--no-edit']);
+  const mergedLog = fs
+    .readFileSync(path.join(cwd, '.intent-log', 'events.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  assert.equal(
+    mergedLog.some((event) => event.type === 'begin' && event.intent === 'merge the feature'),
+    false
+  );
+  const status = run(['status']);
+  assert.match(status, /merge the feature/);
+  assert.match(status, /in_progress/);
+  assert.match(status, /-003/);
+  assert.equal(git(['status', '--porcelain']), '');
+
+  run(['end', '--status', 'completed', '--note', 'merged', '--verify-result', 'ok']);
+  const closed = fs
+    .readFileSync(path.join(cwd, '.intent-log', 'events.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  const begins = closed.filter((event) => event.type === 'begin');
+  assert.equal(begins.map((event) => event.intent).join(','), 'shared,feature work,merge the feature');
+  assert.match(begins[2].id, /-003$/);
+  assert.match(git(['status', '--porcelain']), /\.intent-log\/events\.jsonl/);
 });
 
 test('git merge stops on colliding decision ids and absorb preserves each side ownership', () => {

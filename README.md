@@ -317,6 +317,13 @@ ambiguous decision catalog. Run `driftseal absorb`, stage the repaired intent
 and decision logs, then continue the merge. Clones need `init` again because
 the driver lives in local git config.
 
+In a Git worktree, `begin` parks the open intent in Git metadata instead of
+appending to the tracked `events.jsonl`. Git can merge while that intent is
+still in progress, so you do not need a log-only commit just to get a clean
+tree. `end` writes the closed record to the tracked log. If the parked intent's
+id collides with incoming merged events, DriftSeal remaps it the same way
+`absorb` remaps colliding worktree ids.
+
 ## Storage
 
 - `.intent-log/events.jsonl` is the append-only intent log. All access goes through `driftseal` (CLI or MCP) — never read, edit, move, or delete it directly; use `driftseal reclaim` to retire meaningless records instead of deleting log lines. After a merge collision, use `driftseal absorb` instead of editing the file.
