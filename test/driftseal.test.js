@@ -1414,6 +1414,10 @@ test('skill install remains idempotent when directory permissions differ', {
   const skillDir = path.join(root, '.agents', 'skills', 'use-driftseal');
   run(['skill', 'install', '--target', 'codex'], { cwd: root });
 
+  const sourceFileMode = fs.statSync(path.join(sourceDir, 'SKILL.md')).mode & 0o777;
+  const installedFileMode = fs.statSync(path.join(skillDir, 'SKILL.md')).mode & 0o777;
+  assert.equal(installedFileMode, sourceFileMode);
+
   const sourceMode = fs.statSync(sourceDir).mode & 0o777;
   fs.chmodSync(skillDir, sourceMode === 0o700 ? 0o755 : 0o700);
   assert.notEqual(fs.statSync(skillDir).mode & 0o777, sourceMode);

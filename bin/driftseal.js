@@ -1709,6 +1709,19 @@ function directoryDigest(directory) {
   return digest.digest('hex');
 }
 
+function preserveRegularFileModes(source, destination) {
+  for (const name of fs.readdirSync(source)) {
+    const sourcePath = path.join(source, name);
+    const destinationPath = path.join(destination, name);
+    const stat = fs.lstatSync(sourcePath);
+    if (stat.isDirectory()) {
+      preserveRegularFileModes(sourcePath, destinationPath);
+    } else if (stat.isFile()) {
+      fs.chmodSync(destinationPath, stat.mode & 0o777);
+    }
+  }
+}
+
 function installSkill(request) {
   const { force, root, scope, skillDir, skillsDir, target, targetLabel } = request;
   const sourceDir = path.join(__dirname, '..', 'skills', SKILL_NAME);
@@ -1736,6 +1749,7 @@ function installSkill(request) {
   let movedExisting = false;
   try {
     fs.cpSync(sourceDir, temporary, { recursive: true, errorOnExist: true });
+    preserveRegularFileModes(sourceDir, temporary);
     if (existingDigest !== null) {
       fs.renameSync(skillDir, backup);
       movedExisting = true;
