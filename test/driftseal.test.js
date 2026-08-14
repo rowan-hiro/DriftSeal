@@ -2729,6 +2729,41 @@ test('begin parks an open intent so git merge does not need a log-only commit', 
   assert.match(git(['status', '--porcelain']), /\.intent-log\/events\.jsonl/);
 });
 
+test('a different committed open intent with the same id does not discard the parked intent', () => {
+  const { cwd, env, git, run } = setupGitRepository('driftseal-git-park-same-id-');
+  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['commit', '-m', 'base protocol']);
+
+  git(['checkout', '-b', 'incoming']);
+  run(['begin', 'incoming open intent'], {
+    env: { ...env, DRIFTSEAL_HOME: path.join(cwd, '.intent-log') },
+  });
+  git(['add', '.intent-log/events.jsonl']);
+  git(['commit', '-m', 'legacy incoming open intent']);
+
+  git(['checkout', 'main']);
+  assert.match(run(['begin', 'local parked intent']).trim(), /-001$/);
+  git(['merge', 'incoming', '--no-ff', '--no-edit']);
+
+  assert.throws(() => run(['status']), (err) => {
+    assert.match(String(err.stderr), /multiple intents in progress/);
+    return true;
+  });
+
+  const park = path.resolve(
+    cwd,
+    git(['rev-parse', '--git-path', 'driftseal-in-progress.jsonl']).trim()
+  );
+  const parked = fs
+    .readFileSync(park, 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  assert.equal(parked.length, 1);
+  assert.equal(parked[0].intent, 'local parked intent');
+  assert.match(parked[0].id, /-002$/);
+});
+
 test('git merge stops on colliding decision ids and absorb preserves each side ownership', () => {
   const { cwd, git, gitFail, run } = setupGitRepository('driftseal-git-decision-collision-');
   git(['add', '.gitattributes', 'AGENTS.md']);

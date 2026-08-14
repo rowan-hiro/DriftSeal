@@ -24,6 +24,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const { isDeepStrictEqual } = require('util');
 const { execFileSync } = require('child_process');
 const { version: PACKAGE_VERSION } = require('../package.json');
 
@@ -262,9 +263,7 @@ function readJsonlRecordsFromFile(file, { repairTail = false } = {}) {
 function overlayIsCommittedSuffix(committedEvents, overlayEvents) {
   if (overlayEvents.length === 0 || committedEvents.length < overlayEvents.length) return false;
   const suffix = committedEvents.slice(-overlayEvents.length);
-  return suffix.every(
-    (event, index) => event.id === overlayEvents[index].id && event.type === overlayEvents[index].type
-  );
+  return suffix.every((event, index) => isDeepStrictEqual(event, overlayEvents[index]));
 }
 
 function reconcileInProgressRecords(committedEvents, { repairTail = false, park = inProgressFile() } = {}) {
