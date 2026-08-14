@@ -128,12 +128,17 @@ v1 server 提供：
 | --- | --- |
 | `driftseal_status`, `driftseal_log` | 读取当前 intent 和 intent 历史。 |
 | `driftseal_begin`, `driftseal_end` | 开启并诚实关闭一轮工作。 |
+| `driftseal_absorb` | 修复 merge 撞号，或吸收另一条 worktree 日志并重编号冲突 ID。 |
 | `driftseal_reclaim`, `driftseal_unreclaim` | 用 append-only 标记隐藏已无意义的已关闭记录，或将其恢复。 |
 | `driftseal_decision_list`, `driftseal_decision_show` | 查找并读取 MADR record。 |
 | `driftseal_decision_add`, `driftseal_decision_update` | 克制地增加 decision，并 reconcile 已关联的 decision。 |
 | `driftseal://intent/current` | 以 JSON resource 读取当前 intent。 |
 | `driftseal://intents/recent` | 以 JSON resource 读取最近十条 intent。 |
 | `driftseal://decisions` | 以 JSON resource 读取 decision catalog。 |
+
+`driftseal_absorb` 可以接收另一份 intent log、decision 目录、`ours` 或 `theirs`
+放弃策略，以及 dry-run 模式。传入的路径只作为只读来源；修复后的内容仍只会写入
+server 启动时固定的 repository。Git merge driver 形式仍是 CLI 专用的底层命令。
 
 MCP 只替换执行入口，不会在 repository 的 `AGENTS.md` 之外增加 policy；
 配套 skill 也仍只负责发现与恢复工作流。

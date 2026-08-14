@@ -60,6 +60,29 @@ test('MCP startup arguments fix one repository root', () => {
 test('stdio MCP exposes the complete v1 workflow, resources, and repository boundary', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-test-'));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-outside-'));
+  const incomingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-incoming-'));
+  const incomingApi = createApi({ root: incomingRoot, isolateStorage: true });
+  const incomingDecision = incomingApi.decisionAdd({
+    title: 'Keep incoming lineage context',
+    context: 'The incoming worktree made an independent decision.',
+    outcome: 'Preserve it while remapping its colliding numeric ID.',
+    status: 'proposed',
+  });
+  incomingApi.begin({
+    intent: 'incoming MCP absorb round',
+    verify: 'true',
+    decisions: [incomingDecision.id],
+  });
+  incomingApi.decisionUpdate({
+    id: incomingDecision.id,
+    status: 'accepted',
+    note: 'The incoming lineage completed its verification.',
+  });
+  incomingApi.end({
+    status: 'completed',
+    note: 'Prepared an independent lineage for MCP absorb coverage.',
+    verifyResult: 'passed',
+  });
   const env = {
     ...process.env,
     DRIFTSEAL_HOME: outside,
@@ -76,6 +99,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
         'driftseal_begin',
         'driftseal_end',
         'driftseal_log',
+        'driftseal_absorb',
         'driftseal_reclaim',
         'driftseal_unreclaim',
         'driftseal_decision_list',
@@ -86,6 +110,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     );
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_status').annotations.readOnlyHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_end').annotations.destructiveHint, true);
+    assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_absorb').annotations.destructiveHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_reclaim').annotations.destructiveHint, true);
 
     const resources = await client.listResources();
@@ -181,6 +206,32 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     assert.equal(restored.structuredContent.intent.reclaimed, false);
     const restoredHistory = await call(client, 'driftseal_log', { last: 10 });
     assert.equal(restoredHistory.structuredContent.intents.length, 2);
+
+    const absorbInput = {
+      otherLog: path.join(incomingRoot, '.intent-log', 'events.jsonl'),
+      otherDecisions: path.join(incomingRoot, '.decision-log'),
+    };
+    const absorbDryRun = await call(client, 'driftseal_absorb', {
+      ...absorbInput,
+      dryRun: true,
+    });
+    assert.equal(absorbDryRun.isError, undefined);
+    assert.equal(absorbDryRun.structuredContent.result.mappings.length, 2);
+    assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.intents.length, 2);
+
+    const absorbed = await call(client, 'driftseal_absorb', absorbInput);
+    assert.equal(absorbed.isError, undefined);
+    assert.equal(absorbed.structuredContent.root, fs.realpathSync(root));
+    assert.deepEqual(
+      absorbed.structuredContent.result.mappings.map((mapping) => mapping.kind).sort(),
+      ['decision', 'intent']
+    );
+    assert.equal(absorbed.structuredContent.result.exitCode, 0);
+    assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.intents.length, 3);
+    assert.equal(
+      fs.readdirSync(path.join(root, '.decision-log')).some((file) => /^0002-/.test(file)),
+      true
+    );
 
     const currentResource = await client.readResource({ uri: 'driftseal://intent/current' });
     assert.equal(JSON.parse(currentResource.contents[0].text).intent, null);

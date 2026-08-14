@@ -88,6 +88,19 @@ function registerTools(server, api, z) {
     file: z.string(),
   });
   const decisionWithContent = decisionRecord.extend({ content: z.string() });
+  const absorbResult = z.object({
+    mappings: z.array(
+      z.object({
+        kind: z.enum(['intent', 'decision']),
+        from: z.string(),
+        to: z.string(),
+      })
+    ),
+    abandoned: z.string().nullable(),
+    copies: z.array(z.string()),
+    outputFile: z.string(),
+    exitCode: z.number().int(),
+  });
   const closedStatus = z.enum(END_STATUSES);
   const decisionStatus = z.enum(DECISION_STATUSES);
   const decisionId = z.string().regex(/^\d+$/, 'decision id must contain only digits');
@@ -178,6 +191,41 @@ function registerTools(server, api, z) {
       guarded(() => {
         const intents = api.log({ last: input.last, all: input.includeReclaimed });
         return success({ root: api.root, intents }, `Found ${intents.length} DriftSeal intent records.`);
+      })
+  );
+
+  server.registerTool(
+    'driftseal_absorb',
+    {
+      title: 'Absorb another DriftSeal lineage',
+      description:
+        'Repair the fixed repository after a merge collision or absorb another worktree\'s intent and decision logs, remapping colliding IDs. Omit otherLog to repair the current repository. This rewrites only the fixed repository; incoming paths are read-only sources.',
+      inputSchema: {
+        otherLog: z
+          .string()
+          .optional()
+          .describe('Incoming events.jsonl path. Relative paths resolve from the fixed repository.'),
+        otherDecisions: z
+          .string()
+          .optional()
+          .describe('Incoming decision directory. Relative paths resolve from the fixed repository.'),
+        abandon: z
+          .enum(['ours', 'theirs'])
+          .optional()
+          .describe('Side whose open intent to abandon when both lineages have one in progress.'),
+        dryRun: z.boolean().default(false),
+      },
+      outputSchema: { root: z.string(), result: absorbResult },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (input) =>
+      guarded(() => {
+        const result = api.absorb(input);
+        const action = input.dryRun ? 'Absorb dry run' : 'Absorb';
+        return success(
+          { root: api.root, result },
+          `${action} completed with ${result.mappings.length} ID remapping(s).`
+        );
       })
   );
 
