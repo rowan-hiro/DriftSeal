@@ -35,7 +35,11 @@ driftseal init
 ```
 
 `driftseal init` 会把协议写入 `AGENTS.md`（包括 worktree 撞号后如何 `absorb`），
-并配置 local git merge driver。重复运行不会产生副本。DriftSeal 需要 Node.js 18+。
+并配置 local git merge driver。重复运行不会产生副本。用 `--lang zh-CN`（或其他
+[BCP 47](https://www.rfc-editor.org/rfc/rfc5646.html) 标签）声明 agent 写入
+intent / decision 正文时应使用的语言，默认是 `en`。命令名、flag、status token、
+id 以及 MADR 小节标题仍保持英文。再次运行不带 `--lang` 的 `init` 会保留已声明
+的语言并升级协议。DriftSeal 需要 Node.js 18+。
 
 从当前 checkout 本地开发时：
 
@@ -220,7 +224,7 @@ Git 操作完全不计入 intent log，因为 Git 会自行维护历史。查看
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |
-| `driftseal init` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。 |
+| `driftseal init [--lang <tag>]` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。`--lang` 设置 intent / decision log 的语言（BCP 47，默认 `en`）。 |
 | `driftseal --version` 或 `driftseal -V` | 输出当前安装的 DriftSeal 版本。 |
 | `driftseal help` | 查看 CLI 用法。 |
 
@@ -257,8 +261,9 @@ recovery 只处理当前 intent，因此历史冲突不会阻塞之后的 decisi
 新 event 带有 schema version。遇到更高且不支持的版本时，DriftSeal 会拒绝继续；如果
 旧 client 未经 reconciliation 就关闭 linked intent，新 client 也会 fail closed。
 `driftseal init` 会写入带版本的 managed blocks，并且只升级内容完全匹配的已知旧版本。
-遇到更新的协议版本、无法识别的 block 或自定义内容时，它会保持 `AGENTS.md`
-不变并拒绝继续。
+当前版本的 block 如果只是 log language 不同，也会被识别，因此可以用 `--lang`
+改语言而不必手改协议。遇到更新的协议版本、无法识别的 block 或自定义内容时，
+它会保持 `AGENTS.md` 不变并拒绝继续。
 
 `--count` 只输出 status 筛选后的记录总数。它不能与 `--last` 一起使用，以免
 “先限制再计数”造成歧义。Decision 文件名会构成一个轻量的内存索引：`show` 只
