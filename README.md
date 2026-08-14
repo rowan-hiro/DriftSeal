@@ -132,12 +132,19 @@ The v1 server provides:
 | --- | --- |
 | `driftseal_status`, `driftseal_log` | Read the current intent and intent history. |
 | `driftseal_begin`, `driftseal_end` | Open and honestly close a work round. |
+| `driftseal_absorb` | Repair merge collisions or absorb another worktree's logs while remapping colliding IDs. |
 | `driftseal_reclaim`, `driftseal_unreclaim` | Hide meaningless closed records behind append-only markers, or restore them. |
 | `driftseal_decision_list`, `driftseal_decision_show` | Find and read MADR records. |
 | `driftseal_decision_add`, `driftseal_decision_update` | Add selective decisions and reconcile linked ones. |
 | `driftseal://intent/current` | Read the current intent as a JSON resource. |
 | `driftseal://intents/recent` | Read the ten most recent intents as a JSON resource. |
 | `driftseal://decisions` | Read the decision catalog as a JSON resource. |
+
+`driftseal_absorb` accepts optional incoming intent-log and decision-directory
+paths, an `ours` or `theirs` abandon strategy, and a dry-run mode. Incoming
+paths are read-only sources; all repaired output stays under the repository
+fixed at server startup. The Git merge-driver form remains a CLI-only plumbing
+command.
 
 MCP changes only the execution surface. It does not add policy beyond the
 repository's `AGENTS.md`, and the companion skill remains limited to discovery

@@ -3588,6 +3588,17 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
       if (all) argv.push('--all');
       return call(argv);
     },
+    absorb({ otherLog, otherDecisions, abandon, dryRun = false } = {}) {
+      if (abandon && !['ours', 'theirs'].includes(abandon)) {
+        fail('absorb abandon must be "ours" or "theirs"');
+      }
+      const argv = ['absorb'];
+      if (otherLog) argv.push(String(otherLog));
+      appendFlag(argv, '--decisions', otherDecisions);
+      if (abandon) argv.push(`--abandon-${abandon}`);
+      if (dryRun) argv.push('--dry-run');
+      return call(argv);
+    },
     reclaim({ ids = [], reason, olderThan, force = false, dryRun = false }) {
       const argv = ['reclaim', ...ids.map(String), '--reason', reason];
       appendFlag(argv, '--older-than', olderThan);
