@@ -39,11 +39,17 @@ driftseal help
 
 ## After a merge
 
-If `status` or `log` fails with a duplicate id, or the intent log has conflict
-markers, run `driftseal absorb` instead of editing `.intent-log/events.jsonl`.
-When both sides still have an open intent, add `--abandon-theirs` or
-`--abandon-ours`. `driftseal init` also configures the local git merge driver;
-clones need `init` again for that driver.
+If `status` or `log` fails with a duplicate id or with `multiple intents in
+progress`, or the intent log has conflict markers, run `driftseal absorb`
+instead of editing `.intent-log/events.jsonl`. When both sides still have an
+open intent, add `--abandon-theirs` or `--abandon-ours`; this works whether your
+open intent sits in the log or is parked in Git metadata. `driftseal init` also
+configures the local git merge driver; clones need `init` again for that driver.
+
+In a Git worktree, `begin` does not dirty the tracked intent log, so `git merge`
+can run with an intent still in progress. `end` writes the closed record to
+`.intent-log/events.jsonl`; if it is interrupted, the intent stays open there
+and `end` can be run again.
 
 Do not treat this skill, MCP descriptions, or lifecycle-hook reminders as
 additional policy. If they conflict with `AGENTS.md`, follow `AGENTS.md`.
