@@ -1420,6 +1420,8 @@ test('init --lang sets, preserves, and canonicalizes the log language', () => {
     /invalid log language/
   );
   assert.match(runFail(['init', '--lang', 'zh CN'], { cwd }).stderr, /invalid log language/);
+  assert.match(runFail(['init', '--lang', 'en-12'], { cwd }).stderr, /invalid log language/);
+  assert.match(runFail(['init', '--lang', 'en-US-var'], { cwd }).stderr, /invalid log language/);
   assert.equal(fs.existsSync(agentsFile), false);
 
   run(['init', '--lang', 'zh-cn'], { cwd });
@@ -1442,15 +1444,42 @@ test('init --lang sets, preserves, and canonicalizes the log language', () => {
   assert.match(english, /driftseal-log-language: en/);
   assert.doesNotMatch(english, /driftseal-log-language: ja/);
 
-  const mismatched = english
+  run(['init', '--lang', 'x-private'], { cwd });
+  const privateUse = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(privateUse, /driftseal-log-language: x-private/);
+  assert.match(privateUse, /\*\*Log language:\*\* `x-private`/);
+
+  run(['init', '--lang', 'en-US-u-ca-gregory'], { cwd });
+  const extension = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(extension, /driftseal-log-language: en-US-u-ca-gregory/);
+  assert.doesNotMatch(extension, /u-CA-gregory/);
+
+  const longTag = 'zh-Hans-CN-x-private-example-long-tag';
+  assert.ok(longTag.length > 32);
+  run(['init', '--lang', longTag], { cwd });
+  const longLanguage = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(longLanguage, new RegExp(`driftseal-log-language: ${longTag}`));
+  assert.match(longLanguage, new RegExp(`\\*\\*Log language:\\*\\* \`${longTag}\``));
+
+  run(['init', '--lang=en'], { cwd });
+  const restored = fs.readFileSync(agentsFile, 'utf8');
+  const mismatchedBlocks = restored
     .replace('<!-- driftseal-log-language: en -->', '<!-- driftseal-log-language: fr -->')
     .replace('**Log language:** `en`', '**Log language:** `fr`');
-  fs.writeFileSync(agentsFile, mismatched);
+  fs.writeFileSync(agentsFile, mismatchedBlocks);
   assert.match(
     runFail(['init'], { cwd }).stderr,
     /intent and decision protocols declare different log languages/
   );
-  assert.equal(fs.readFileSync(agentsFile, 'utf8'), mismatched);
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), mismatchedBlocks);
+
+  const intraBlock = restored.replace('**Log language:** `en`', '**Log language:** `zh-CN`');
+  fs.writeFileSync(agentsFile, intraBlock);
+  assert.match(
+    runFail(['init'], { cwd }).stderr,
+    /intent protocol declares different log languages in the comment \(en\) and prose \(zh-CN\)/
+  );
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), intraBlock);
 
   run(['init', '--lang', 'pt-BR'], { cwd });
   const portuguese = fs.readFileSync(agentsFile, 'utf8');

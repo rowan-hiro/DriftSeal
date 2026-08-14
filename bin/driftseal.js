@@ -1125,26 +1125,133 @@ const DECISION_PROTOCOL_MARKER = '<!-- driftseal-decisions -->';
 const DECISION_PROTOCOL_END = '<!-- /driftseal-decisions -->';
 const LOG_LANGUAGE_COMMENT_RE = /^<!-- driftseal-log-language: ([^>\r\n]+) -->\r?$/m;
 const LOG_LANGUAGE_PROSE_RE = /\*\*Log language:\*\* `([^`]+)`/;
+const IRREGULAR_GRANDFATHERED_TAGS = new Map([
+  ['en-gb-oed', 'en-GB-oed'],
+  ['i-ami', 'i-ami'],
+  ['i-bnn', 'i-bnn'],
+  ['i-default', 'i-default'],
+  ['i-enochian', 'i-enochian'],
+  ['i-hak', 'i-hak'],
+  ['i-klingon', 'i-klingon'],
+  ['i-lux', 'i-lux'],
+  ['i-mingo', 'i-mingo'],
+  ['i-navajo', 'i-navajo'],
+  ['i-pwn', 'i-pwn'],
+  ['i-tao', 'i-tao'],
+  ['i-tay', 'i-tay'],
+  ['i-tsu', 'i-tsu'],
+  ['sgn-be-fr', 'sgn-BE-FR'],
+  ['sgn-be-nl', 'sgn-BE-NL'],
+  ['sgn-ch-de', 'sgn-CH-DE'],
+]);
+
+function titleCaseSubtag(value) {
+  return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+}
+
+function isBcp47Variant(subtag) {
+  return /^[A-Za-z0-9]{5,8}$/.test(subtag) || /^[0-9][A-Za-z0-9]{3}$/.test(subtag);
+}
+
+function isBcp47Singleton(subtag) {
+  return /^[0-9A-WY-Za-wy-z]$/.test(subtag);
+}
+
+function parsePrivateUseSubtags(subtags, start, parts) {
+  if (start >= subtags.length || !/^x$/i.test(subtags[start])) return null;
+  parts.push('x');
+  let index = start + 1;
+  let count = 0;
+  while (index < subtags.length && /^[A-Za-z0-9]{1,8}$/.test(subtags[index])) {
+    parts.push(subtags[index].toLowerCase());
+    index += 1;
+    count += 1;
+  }
+  if (count === 0 || index !== subtags.length) return null;
+  return parts.join('-');
+}
+
+function wellFormedBcp47(tag) {
+  if (typeof tag !== 'string' || tag.length === 0 || tag.startsWith('-') || tag.endsWith('-')) {
+    return null;
+  }
+  const irregular = IRREGULAR_GRANDFATHERED_TAGS.get(tag.toLowerCase());
+  if (irregular) return irregular;
+
+  const subtags = tag.split('-');
+  if (subtags.some((subtag) => subtag.length === 0)) return null;
+
+  const parts = [];
+  if (/^x$/i.test(subtags[0])) return parsePrivateUseSubtags(subtags, 0, parts);
+
+  let index = 0;
+  const language = subtags[index];
+  if (!/^[A-Za-z]{2,8}$/.test(language)) return null;
+  parts.push(language.toLowerCase());
+  index += 1;
+  if (language.length <= 3) {
+    let extlang = 0;
+    while (index < subtags.length && /^[A-Za-z]{3}$/.test(subtags[index]) && extlang < 3) {
+      parts.push(subtags[index].toLowerCase());
+      index += 1;
+      extlang += 1;
+    }
+  }
+
+  if (index < subtags.length && /^[A-Za-z]{4}$/.test(subtags[index])) {
+    parts.push(titleCaseSubtag(subtags[index]));
+    index += 1;
+  }
+
+  if (index < subtags.length && /^[A-Za-z]{2}$/.test(subtags[index])) {
+    parts.push(subtags[index].toUpperCase());
+    index += 1;
+  } else if (index < subtags.length && /^[0-9]{3}$/.test(subtags[index])) {
+    parts.push(subtags[index]);
+    index += 1;
+  }
+
+  const variants = new Set();
+  while (index < subtags.length && isBcp47Variant(subtags[index])) {
+    const variant = subtags[index].toLowerCase();
+    if (variants.has(variant)) return null;
+    variants.add(variant);
+    parts.push(variant);
+    index += 1;
+  }
+
+  const singletons = new Set();
+  while (index < subtags.length && isBcp47Singleton(subtags[index])) {
+    const singleton = subtags[index].toLowerCase();
+    if (singletons.has(singleton)) return null;
+    singletons.add(singleton);
+    parts.push(singleton);
+    index += 1;
+    let following = 0;
+    while (index < subtags.length && /^[A-Za-z0-9]{2,8}$/.test(subtags[index])) {
+      parts.push(subtags[index].toLowerCase());
+      index += 1;
+      following += 1;
+    }
+    if (following === 0) return null;
+  }
+
+  if (index < subtags.length && /^x$/i.test(subtags[index])) {
+    return parsePrivateUseSubtags(subtags, index, parts);
+  }
+  if (index !== subtags.length) return null;
+  return parts.join('-');
+}
 
 function canonicalizeLogLanguage(value) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     fail('invalid log language: use a BCP 47 tag such as en or zh-CN');
   }
-  const language = value.trim();
-  if (!/^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/.test(language) || language.length > 32) {
+  const canonical = wellFormedBcp47(value.trim());
+  if (!canonical) {
     fail(`invalid log language "${value}": use a BCP 47 tag such as en or zh-CN`);
   }
-  return language
-    .split('-')
-    .map((subtag, index) => {
-      if (index === 0) return subtag.toLowerCase();
-      if (/^[A-Za-z]{2}$/.test(subtag)) return subtag.toUpperCase();
-      if (/^[A-Za-z]{4}$/.test(subtag)) {
-        return subtag.charAt(0).toUpperCase() + subtag.slice(1).toLowerCase();
-      }
-      return subtag.toLowerCase();
-    })
-    .join('-');
+  return canonical;
 }
 
 function intentLogLanguageParagraph(language) {
@@ -1159,12 +1266,17 @@ outcome, drivers, options, consequences, and update notes) in that language.
 Keep MADR section headings, status tokens, and ids in English.`;
 }
 
-function parseLogLanguageFromBlock(block) {
-  const comment = block.match(LOG_LANGUAGE_COMMENT_RE);
-  if (comment) return canonicalizeLogLanguage(comment[1]);
-  const prose = block.match(LOG_LANGUAGE_PROSE_RE);
-  if (prose) return canonicalizeLogLanguage(prose[1]);
-  return null;
+function parseLogLanguageFromBlock(block, label) {
+  const commentMatch = block.match(LOG_LANGUAGE_COMMENT_RE);
+  const proseMatch = block.match(LOG_LANGUAGE_PROSE_RE);
+  const comment = commentMatch ? canonicalizeLogLanguage(commentMatch[1]) : null;
+  const prose = proseMatch ? canonicalizeLogLanguage(proseMatch[1]) : null;
+  if (comment && prose && comment !== prose) {
+    fail(
+      `${label} declares different log languages in the comment (${comment}) and prose (${prose}); pass --lang to set one`
+    );
+  }
+  return comment || prose || null;
 }
 
 function extractManagedBlock(content, marker, endMarker) {
@@ -1181,11 +1293,11 @@ function resolveInitLogLanguage(requested, content) {
   const intent = extractManagedBlock(content, INTENT_PROTOCOL_MARKER, INTENT_PROTOCOL_END);
   const decision = extractManagedBlock(content, DECISION_PROTOCOL_MARKER, DECISION_PROTOCOL_END);
   if (intent) {
-    const language = parseLogLanguageFromBlock(intent);
+    const language = parseLogLanguageFromBlock(intent, 'intent protocol');
     if (language) languages.add(language);
   }
   if (decision) {
-    const language = parseLogLanguageFromBlock(decision);
+    const language = parseLogLanguageFromBlock(decision, 'decision protocol');
     if (language) languages.add(language);
   }
   if (languages.size > 1) {

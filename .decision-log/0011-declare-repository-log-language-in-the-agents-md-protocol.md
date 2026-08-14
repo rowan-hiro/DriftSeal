@@ -33,3 +33,12 @@ Declare a BCP 47 log language inside the managed protocol. Agents write intent a
 * Protocol text stays English and comparable across language choices
 * Existing v10 blocks upgrade to v11 with default en unless --lang is passed
 * A later language change does not require hand-editing AGENTS.md
+
+## Decision History
+
+<!-- driftseal-reconciliation: 4e7b5407-aa67-485b-8014-cc97ed0cd1ec -->
+### 2026-08-14T04:14:02.852Z — Intent `2026-08-14-008`
+
+Status: Accepted → Accepted
+
+Log-language tags are checked against RFC 5646 well-formedness, including private-use, extension, region, and variant subtags. Comment and prose declarations in the same protocol block must agree; a mismatch requires --lang to resolve.
