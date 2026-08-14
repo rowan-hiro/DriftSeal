@@ -32,3 +32,13 @@ In a Git worktree using the default .intent-log, begin and later events for the 
 * git merge can run while an intent is in progress without a log-only commit
 * Switching branches with an open intent carries that intent with the worktree
 * end is the first time the tracked log becomes dirty for that round
+* A parked intent lives only in local Git metadata: removing the worktree (git worktree remove/prune) or deleting the clone discards the still-open record, and it is never shared by push or clone. Only end makes the round durable in the tracked log, so an in-progress intent should not be left parked indefinitely.
+
+## Decision History
+
+<!-- driftseal-reconciliation: 5b725aff-6a06-418d-b994-4dcdc0e0576c -->
+### 2026-08-14T08:03:42.071Z — Intent `2026-08-14-013`
+
+Status: Accepted → Accepted
+
+Confirmed accepted; added the consequence that a parked intent lives only in local Git metadata and is discarded by worktree removal or clone deletion until end makes it durable.

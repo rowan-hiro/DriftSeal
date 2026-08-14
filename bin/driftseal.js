@@ -387,9 +387,10 @@ function appendEventTo(file, event) {
 }
 
 /**
- * Move the parked records into the tracked log. Safe to retry: the log is written before the
- * park file is dropped, so an interruption leaves the records committed and the overlay
- * recognizable as already committed. Returns the intent ids it had to remap.
+ * Move the parked records into the tracked log. Safe to retry: a remap is persisted to the
+ * park first, the log is written before the park file is dropped, so an interruption either
+ * leaves nothing committed or leaves the overlay recognizable as already committed.
+ * Returns the intent ids it had to remap.
  */
 function flushInProgressLog() {
   const park = inProgressFile();
@@ -405,6 +406,9 @@ function flushInProgressLog() {
     discardInProgressLog(park);
     return new Map();
   }
+  // Persist a remap before touching the log: after any crash the park then matches what the
+  // log received (or will receive), so recovery never re-remaps it into a duplicate.
+  if (plan.mappings.length > 0) writeJsonl(park, plan.records);
   writeJsonl(logFile(), [...committedRecords, ...plan.records]);
   discardInProgressLog(park);
   return new Map(
