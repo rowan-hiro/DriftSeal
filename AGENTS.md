@@ -7,7 +7,8 @@ and decision records in `.decision-log/` (override with
 `$DRIFTSEAL_DECISION_HOME`); both are meant to be committed.
 
 <!-- driftseal -->
-<!-- driftseal-version: 10 -->
+<!-- driftseal-version: 11 -->
+<!-- driftseal-log-language: en -->
 
 ## Agent protocol: intent write-ahead log
 
@@ -16,6 +17,10 @@ This repo uses DriftSeal (`driftseal`) to prevent agent drift. Every work round:
 This `AGENTS.md` protocol is the source of truth. Use the `driftseal` CLI by
 default; the companion skill only helps discover and resume the workflow, while
 MCP and lifecycle hooks are optional adapters.
+
+**Log language:** `en`. Write intent-log prose (intent, note,
+verify-result, and reclaim/unreclaim reason) in that language. Keep command
+names, flags, status tokens, and ids in English.
 
 1. **Write intent first**, before modifying, creating, or deleting files, or
    making any other non-Git change that may need a rollback:
@@ -59,7 +64,8 @@ Log: `.intent-log/events.jsonl` (override with `$DRIFTSEAL_HOME`); commit it wit
 <!-- /driftseal -->
 
 <!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 10 -->
+<!-- driftseal-decisions-version: 11 -->
+<!-- driftseal-log-language: en -->
 
 ## Agent protocol: decision log
 
@@ -68,6 +74,10 @@ recovered from the intent log and Git history: a rejected or deferred path worth
 revisiting, non-obvious rationale behind a long-lived or costly-to-reverse accepted
 choice, or a deprecated or superseded decision. Do not record routine, local,
 readily reversible choices.
+
+**Log language:** `en`. Write decision-log prose (title, context,
+outcome, drivers, options, consequences, and update notes) in that language.
+Keep MADR section headings, status tokens, and ids in English.
 
 `driftseal decision add "<title>" --context "<problem and constraints>" --outcome "<decision and rationale>" --driver "<decision driver>" --option "<considered option>" --consequence "<result>"`
 

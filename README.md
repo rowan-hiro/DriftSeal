@@ -36,7 +36,12 @@ driftseal init
 
 `driftseal init` writes the protocol to `AGENTS.md`, including how to `absorb`
 colliding worktree logs, and configures the local git merge driver. It can be
-run again without duplicating either. DriftSeal requires Node.js 18+.
+run again without duplicating either. Pass `--lang zh-CN` (or another
+[BCP 47](https://www.rfc-editor.org/rfc/rfc5646.html) tag) to declare the
+language agents should use for intent and decision prose; the default is `en`.
+Command names, flags, status tokens, ids, and MADR section headings stay in
+English. Re-running `init` without `--lang` preserves the declared language
+while upgrading the protocol. DriftSeal requires Node.js 18+.
 
 For local development from this checkout:
 
@@ -231,7 +236,7 @@ content change starts a new work round.
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the repository-pinned MCP server into Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | Install advisory lifecycle reminders into Kimi Code, Claude Code, or Codex. |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | Emit the reminder a lifecycle hook injects; never blocks. |
-| `driftseal init` | Add the adoption protocol to `AGENTS.md` and configure the git merge driver. |
+| `driftseal init [--lang <tag>]` | Add the adoption protocol to `AGENTS.md` and configure the git merge driver. `--lang` sets the intent/decision log language (BCP 47, default `en`). |
 | `driftseal --version` or `driftseal -V` | Print the installed DriftSeal version. |
 | `driftseal help` | Print CLI usage. |
 
@@ -274,8 +279,10 @@ conflicts cannot block later decision work.
 New events carry a schema version. DriftSeal rejects newer unsupported schemas and
 fails closed if a legacy client closes a linked intent without reconciliation.
 `driftseal init` writes versioned managed blocks and upgrades only exact, recognized
-older blocks. It refuses newer protocol versions and any unrecognized or
-customized block without changing `AGENTS.md`.
+older blocks. Current-version blocks that differ only by log language are also
+recognized, so `--lang` can change the language without rewriting policy by hand.
+It refuses newer protocol versions and any unrecognized or customized block
+without changing `AGENTS.md`.
 
 `--count` prints only the number of records remaining after status filtering.
 It cannot be combined with `--last`, whose limiting semantics would make the

@@ -125,6 +125,7 @@ test('--version and -V print the package version', () => {
   assert.equal(run(['--version']), `${metadata.version}\n`);
   assert.equal(run(['-V']), `${metadata.version}\n`);
   assert.match(run(['help']), /driftseal --version \| -V/);
+  assert.match(run(['help']), /driftseal init \[--lang <tag>\]/);
   assert.match(runFail(['--version', 'extra']).stderr, /usage: driftseal --version \| -V/);
 });
 
@@ -881,7 +882,7 @@ test('commands reject stray positionals, duplicate flags, and boolean values', (
   run(['end', '--status', 'abandoned']);
 
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-init-args-'));
-  assert.match(runFail(['init', 'extra'], { cwd }).stderr, /usage: driftseal init/);
+  assert.match(runFail(['init', 'extra'], { cwd }).stderr, /usage: driftseal init \[--lang <tag>\]/);
   assert.equal(fs.existsSync(path.join(cwd, 'AGENTS.md')), false);
 });
 
@@ -1105,7 +1106,11 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /AGENTS\.md` protocol is the source of truth/);
   assert.match(first, /Use the `driftseal` CLI by\s+default/);
   assert.match(first, /MCP and lifecycle hooks are optional adapters/);
-  assert.match(first, /driftseal-version: 10/);
+  assert.match(first, /driftseal-version: 11/);
+  assert.match(first, /driftseal-log-language: en/);
+  assert.match(first, /\*\*Log language:\*\* `en`/);
+  assert.match(first, /Write intent-log prose/);
+  assert.match(first, /Write decision-log prose/);
   assert.match(first, /driftseal absorb/);
   assert.match(first, /--abandon-theirs/);
   assert.match(first, /colliding decision ids are remapped/);
@@ -1123,7 +1128,23 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
-  const versionNine = first
+  const versionTen = first
+    .replace('driftseal-version: 11', 'driftseal-version: 10')
+    .replace('driftseal-decisions-version: 11', 'driftseal-decisions-version: 10')
+    .replace(/<!-- driftseal-log-language: en -->\n/g, '')
+    .replace(
+      '\n**Log language:** `en`. Write intent-log prose (intent, note,\n' +
+        'verify-result, and reclaim/unreclaim reason) in that language. Keep command\n' +
+        'names, flags, status tokens, and ids in English.\n',
+      ''
+    )
+    .replace(
+      '\n**Log language:** `en`. Write decision-log prose (title, context,\n' +
+        'outcome, drivers, options, consequences, and update notes) in that language.\n' +
+        'Keep MADR section headings, status tokens, and ids in English.\n',
+      ''
+    );
+  const versionNine = versionTen
     .replace('driftseal-version: 10', 'driftseal-version: 9')
     .replace('driftseal-decisions-version: 10', 'driftseal-decisions-version: 9')
     .replace(
@@ -1223,8 +1244,9 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 10/);
-  assert.match(upgraded, /driftseal-decisions-version: 10/);
+  assert.match(upgraded, /driftseal-version: 11/);
+  assert.match(upgraded, /driftseal-decisions-version: 11/);
+  assert.match(upgraded, /driftseal-log-language: en/);
   assert.match(upgraded, /# trailing user instructions/);
 
   const upgradeNineCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v9-'));
@@ -1232,16 +1254,25 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeNineFile, versionNine.trimEnd() + '\n');
   run(['init'], { cwd: upgradeNineCwd });
   const upgradedNine = fs.readFileSync(upgradeNineFile, 'utf8');
-  assert.match(upgradedNine, /driftseal-version: 10/);
+  assert.match(upgradedNine, /driftseal-version: 11/);
   assert.match(upgradedNine, /Git operations never need an intent/);
   assert.match(upgradedNine, /merges, rebases, cherry-picks, tags, and pushes/);
+
+  const upgradeTenCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v10-'));
+  const upgradeTenFile = path.join(upgradeTenCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeTenFile, versionTen.trimEnd() + '\n');
+  run(['init'], { cwd: upgradeTenCwd });
+  const upgradedTen = fs.readFileSync(upgradeTenFile, 'utf8');
+  assert.match(upgradedTen, /driftseal-version: 11/);
+  assert.match(upgradedTen, /driftseal-log-language: en/);
+  assert.match(upgradedTen, /Write intent-log prose/);
 
   const upgradeEightCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v8-'));
   const upgradeEightFile = path.join(upgradeEightCwd, 'AGENTS.md');
   fs.writeFileSync(upgradeEightFile, versionEight.trimEnd() + '\n');
   run(['init'], { cwd: upgradeEightCwd });
   const upgradedEight = fs.readFileSync(upgradeEightFile, 'utf8');
-  assert.match(upgradedEight, /driftseal-version: 10/);
+  assert.match(upgradedEight, /driftseal-version: 11/);
   assert.match(upgradedEight, /driftseal absorb/);
   assert.match(upgradedEight, /colliding decision ids are remapped/);
 
@@ -1250,7 +1281,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSevenFile, versionSeven.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSevenCwd });
   const upgradedSeven = fs.readFileSync(upgradeSevenFile, 'utf8');
-  assert.match(upgradedSeven, /driftseal-version: 10/);
+  assert.match(upgradedSeven, /driftseal-version: 11/);
   assert.match(upgradedSeven, /source of truth/);
   assert.match(upgradedSeven, /--driver "<decision driver>"/);
 
@@ -1259,7 +1290,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSixFile, versionSix.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSixCwd });
   const upgradedSix = fs.readFileSync(upgradeSixFile, 'utf8');
-  assert.match(upgradedSix, /driftseal-version: 10/);
+  assert.match(upgradedSix, /driftseal-version: 11/);
   assert.match(upgradedSix, /resume it when its\s+objective still matches/);
   assert.match(upgradedSix, /--driver "<decision driver>"/);
 
@@ -1268,7 +1299,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFiveFile, versionFive.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFiveCwd });
   const upgradedFive = fs.readFileSync(upgradeFiveFile, 'utf8');
-  assert.match(upgradedFive, /driftseal-version: 10/);
+  assert.match(upgradedFive, /driftseal-version: 11/);
   assert.match(upgradedFive, /Log access goes only through DriftSeal/);
 
   const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
@@ -1276,8 +1307,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFourCwd });
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
-  assert.match(upgradedFour, /driftseal-version: 10/);
-  assert.match(upgradedFour, /driftseal-decisions-version: 10/);
+  assert.match(upgradedFour, /driftseal-version: 11/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 11/);
   assert.match(upgradedFour, /need no intent/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
@@ -1292,7 +1323,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 10/);
+  assert.match(upgradedCrLf, /driftseal-version: 11/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -1323,7 +1354,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 10', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 11', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -1353,7 +1384,14 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 10 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 11 -->\n', '')
+    .replace('<!-- driftseal-log-language: en -->\n', '')
+    .replace(
+      '\n**Log language:** `en`. Write decision-log prose (title, context,\n' +
+        'outcome, drivers, options, consequences, and update notes) in that language.\n' +
+        'Keep MADR section headings, status tokens, and ids in English.\n',
+      ''
+    )
     .replace(' --driver "<decision driver>"', '')
     .replace(
       '\nAfter a merge, colliding decision ids are remapped with `driftseal absorb`;\n' +
@@ -1365,10 +1403,88 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 10/);
-  assert.match(migratedLegacy, /driftseal-version: 10/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 11/);
+  assert.match(migratedLegacy, /driftseal-version: 11/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
+});
+
+test('init --lang sets, preserves, and canonicalizes the log language', () => {
+  const { run, runFail } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-lang-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+
+  assert.match(runFail(['init', '--lang'], { cwd }).stderr, /flag --lang requires a value/);
+  assert.match(
+    runFail(['init', '--lang', 'en_US'], { cwd }).stderr,
+    /invalid log language/
+  );
+  assert.match(runFail(['init', '--lang', 'zh CN'], { cwd }).stderr, /invalid log language/);
+  assert.match(runFail(['init', '--lang', 'en-12'], { cwd }).stderr, /invalid log language/);
+  assert.match(runFail(['init', '--lang', 'en-US-var'], { cwd }).stderr, /invalid log language/);
+  assert.equal(fs.existsSync(agentsFile), false);
+
+  run(['init', '--lang', 'zh-cn'], { cwd });
+  const chinese = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(chinese, /driftseal-log-language: zh-CN/);
+  assert.match(chinese, /\*\*Log language:\*\* `zh-CN`/);
+  assert.equal((chinese.match(/driftseal-log-language: zh-CN/g) || []).length, 2);
+
+  run(['init'], { cwd });
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), chinese);
+
+  run(['init', '--lang', 'ja'], { cwd });
+  const japanese = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(japanese, /driftseal-log-language: ja/);
+  assert.match(japanese, /\*\*Log language:\*\* `ja`/);
+  assert.doesNotMatch(japanese, /zh-CN/);
+
+  run(['init', '--lang=en'], { cwd });
+  const english = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(english, /driftseal-log-language: en/);
+  assert.doesNotMatch(english, /driftseal-log-language: ja/);
+
+  run(['init', '--lang', 'x-private'], { cwd });
+  const privateUse = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(privateUse, /driftseal-log-language: x-private/);
+  assert.match(privateUse, /\*\*Log language:\*\* `x-private`/);
+
+  run(['init', '--lang', 'en-US-u-ca-gregory'], { cwd });
+  const extension = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(extension, /driftseal-log-language: en-US-u-ca-gregory/);
+  assert.doesNotMatch(extension, /u-CA-gregory/);
+
+  const longTag = 'zh-Hans-CN-x-private-example-long-tag';
+  assert.ok(longTag.length > 32);
+  run(['init', '--lang', longTag], { cwd });
+  const longLanguage = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(longLanguage, new RegExp(`driftseal-log-language: ${longTag}`));
+  assert.match(longLanguage, new RegExp(`\\*\\*Log language:\\*\\* \`${longTag}\``));
+
+  run(['init', '--lang=en'], { cwd });
+  const restored = fs.readFileSync(agentsFile, 'utf8');
+  const mismatchedBlocks = restored
+    .replace('<!-- driftseal-log-language: en -->', '<!-- driftseal-log-language: fr -->')
+    .replace('**Log language:** `en`', '**Log language:** `fr`');
+  fs.writeFileSync(agentsFile, mismatchedBlocks);
+  assert.match(
+    runFail(['init'], { cwd }).stderr,
+    /intent and decision protocols declare different log languages/
+  );
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), mismatchedBlocks);
+
+  const intraBlock = restored.replace('**Log language:** `en`', '**Log language:** `zh-CN`');
+  fs.writeFileSync(agentsFile, intraBlock);
+  assert.match(
+    runFail(['init'], { cwd }).stderr,
+    /intent protocol declares different log languages in the comment \(en\) and prose \(zh-CN\)/
+  );
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), intraBlock);
+
+  run(['init', '--lang', 'pt-BR'], { cwd });
+  const portuguese = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(portuguese, /driftseal-log-language: pt-BR/);
+  assert.equal((portuguese.match(/driftseal-log-language: pt-BR/g) || []).length, 2);
 });
 
 test('skill install uses each platform project directory and is idempotent', () => {
