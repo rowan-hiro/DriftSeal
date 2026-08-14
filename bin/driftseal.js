@@ -260,24 +260,50 @@ function readJsonlRecordsFromFile(file, { repairTail = false } = {}) {
   return parseJsonlRecords(content, file);
 }
 
-function overlayIsCommittedSuffix(committedEvents, overlayEvents) {
+/**
+ * True when the parked records already sit in the committed log. A flush appends them, so
+ * they land as a suffix; a merge that appends afterwards leaves them as an interior run.
+ */
+function overlayIsCommitted(committedEvents, overlayEvents) {
   if (overlayEvents.length === 0 || committedEvents.length < overlayEvents.length) return false;
-  const suffix = committedEvents.slice(-overlayEvents.length);
-  return suffix.every((event, index) => isDeepStrictEqual(event, overlayEvents[index]));
+  const head = overlayEvents[0];
+  for (let start = committedEvents.length - overlayEvents.length; start >= 0; start--) {
+    const candidate = committedEvents[start];
+    if (candidate.type !== head.type || candidate.id !== head.id || candidate.ts !== head.ts) continue;
+    const matches = overlayEvents.every((event, index) =>
+      isDeepStrictEqual(committedEvents[start + index], event)
+    );
+    if (matches) return true;
+  }
+  return false;
+}
+
+/** How a parked overlay lines up with the committed log; touches neither file. */
+function planInProgressOverlay(committedEvents, park, { repairTail = false } = {}) {
+  if (!park || !fs.existsSync(park)) return null;
+  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail });
+  const overlayEvents = overlayRecords.map((record) => record.event);
+  if (overlayEvents.length === 0 || overlayIsCommitted(committedEvents, overlayEvents)) {
+    return { park, records: [], mappings: [], alreadyCommitted: true };
+  }
+  const remapped = remapTheirsRecords(overlayRecords, committedEvents, new Map(), new Map());
+  return { park, records: remapped.records, mappings: remapped.mappings, alreadyCommitted: false };
+}
+
+function discardInProgressLog(park) {
+  fs.unlinkSync(park);
+  fsyncDirectory(path.dirname(park));
 }
 
 function reconcileInProgressRecords(committedEvents, { repairTail = false, park = inProgressFile() } = {}) {
-  if (!park || !fs.existsSync(park)) return [];
-  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail });
-  const overlayEvents = overlayRecords.map((record) => record.event);
-  if (overlayIsCommittedSuffix(committedEvents, overlayEvents)) {
-    fs.unlinkSync(park);
-    fsyncDirectory(path.dirname(park));
+  const plan = planInProgressOverlay(committedEvents, park, { repairTail });
+  if (!plan) return [];
+  if (plan.alreadyCommitted) {
+    discardInProgressLog(park);
     return [];
   }
-  const remapped = remapTheirsRecords(overlayRecords, committedEvents, new Map(), new Map());
-  if (remapped.mappings.length > 0) writeJsonl(park, remapped.records);
-  return remapped.records;
+  if (plan.mappings.length > 0) writeJsonl(park, plan.records);
+  return plan.records;
 }
 
 function readEvents({ repairTail = false, file = logFile() } = {}) {
@@ -360,33 +386,56 @@ function appendEventTo(file, event) {
   return storedEvent;
 }
 
+/**
+ * Move the parked records into the tracked log. Safe to retry: the log is written before the
+ * park file is dropped, so an interruption leaves the records committed and the overlay
+ * recognizable as already committed. Returns the intent ids it had to remap.
+ */
 function flushInProgressLog() {
   const park = inProgressFile();
-  if (!park || !fs.existsSync(park)) return;
+  if (!park || !fs.existsSync(park)) return new Map();
   const committedRecords = readJsonlRecordsFromFile(logFile());
-  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail: true });
-  const overlayEvents = overlayRecords.map((record) => record.event);
-  const committedEvents = committedRecords.map((record) => record.event);
-  if (overlayIsCommittedSuffix(committedEvents, overlayEvents)) {
-    fs.unlinkSync(park);
-    fsyncDirectory(path.dirname(park));
-    return;
+  const plan = planInProgressOverlay(
+    committedRecords.map((record) => record.event),
+    park,
+    { repairTail: true }
+  );
+  if (!plan) return new Map();
+  if (plan.alreadyCommitted) {
+    discardInProgressLog(park);
+    return new Map();
   }
-  const remapped = remapTheirsRecords(overlayRecords, committedEvents, new Map(), new Map());
-  writeJsonl(logFile(), [...committedRecords, ...remapped.records]);
-  fs.unlinkSync(park);
-  fsyncDirectory(path.dirname(park));
+  writeJsonl(logFile(), [...committedRecords, ...plan.records]);
+  discardInProgressLog(park);
+  return new Map(
+    plan.mappings.filter((mapping) => mapping.kind === 'intent').map((mapping) => [mapping.from, mapping.to])
+  );
+}
+
+function parkedOpenIntent(park) {
+  if (!fs.existsSync(park)) return null;
+  const records = readJsonlRecordsFromFile(park, { repairTail: true });
+  return openIntent(fold(records.map((record) => record.event)));
 }
 
 function appendEvent(event) {
   const park = inProgressFile();
-  const parking = Boolean(park && (event.type === 'begin' || fs.existsSync(park)));
-  if (parking) {
-    const storedEvent = appendEventTo(park, event);
-    if (event.type === 'end') flushInProgressLog();
-    return storedEvent;
+  if (!park) return appendEventTo(logFile(), event);
+
+  const open = parkedOpenIntent(park);
+  // A park with nothing open left in it belongs in the log; an interrupted end retries here.
+  if (!open) flushInProgressLog();
+
+  if (event.type === 'begin') return appendEventTo(park, event);
+  if (!open || open.id !== event.id) return appendEventTo(logFile(), event);
+  if (event.type !== 'end') return appendEventTo(park, event);
+  // Close in the tracked log, never in Git metadata: the parked records move first, so the
+  // closing record cannot end up somewhere a clone or a removed worktree would drop it.
+  const remapped = flushInProgressLog();
+  if (process.env._DRIFTSEAL_TEST_CRASH_AFTER_IN_PROGRESS_FLUSH === '1') {
+    fail('simulated interruption after the in-progress flush');
   }
-  return appendEventTo(logFile(), event);
+  return appendEventTo(logFile(), remapEvent(event, remapped, new Map()));
 }
 
 function contentHash(content) {
@@ -2832,8 +2881,9 @@ function printAbsorbReport({ mappings, abandoned, intentCount }) {
     `absorbed ${intentCount} intent(s), remapped ${remappedIntents} intent id(s), ${remappedDecisions} decision id(s)`
   );
   for (const mapping of mappings) {
-    if (mapping.kind === 'intent') printLine(`${mapping.from} (theirs) -> ${mapping.to}`);
-    else printLine(`decision ${mapping.from} (theirs) -> ${mapping.to}`);
+    const side = mapping.side || 'theirs';
+    if (mapping.kind === 'intent') printLine(`${mapping.from} (${side}) -> ${mapping.to}`);
+    else printLine(`decision ${mapping.from} (${side}) -> ${mapping.to}`);
   }
   if (abandoned) printLine(`abandoned ${abandoned} during absorb`);
 }
@@ -2853,23 +2903,45 @@ function abandonOpenIntent(records, targetId, side) {
   return targetId;
 }
 
-function resolveOpenIntents(result, oursRecords, theirsRecords, abandon, { allowConflict = false } = {}) {
+function resolveOpenIntents(
+  result,
+  oursRecords,
+  theirsRecords,
+  abandon,
+  { allowConflict = false, overlay = [], parkedOpen = null } = {}
+) {
   const oursOpen = openIntent(fold(oursRecords.map((record) => record.event)));
   const theirsOpen = openIntent(fold(theirsRecords.map((record) => record.event)));
   try {
-    openIntent(fold(result.map((record) => record.event)));
-    return { abandoned: null, conflict: false };
+    openIntent(fold([...result, ...overlay].map((record) => record.event)));
+    return { abandoned: null, conflict: false, parkedClosed: false };
   } catch (err) {
     if (!(err instanceof DriftSealError) || !/multiple intents in progress/.test(err.message)) {
       throw err;
     }
     if (abandon === 'theirs' && theirsOpen) {
-      return { abandoned: abandonOpenIntent(result, theirsOpen.id, 'theirs'), conflict: false };
+      return {
+        abandoned: abandonOpenIntent(result, theirsOpen.id, 'theirs'),
+        conflict: false,
+        parkedClosed: false,
+      };
+    }
+    // A parked intent is local by construction, so --abandon-ours targets it before the log.
+    if (abandon === 'ours' && parkedOpen) {
+      return {
+        abandoned: abandonOpenIntent(overlay, parkedOpen.id, 'ours'),
+        conflict: false,
+        parkedClosed: true,
+      };
     }
     if (abandon === 'ours' && oursOpen) {
-      return { abandoned: abandonOpenIntent(result, oursOpen.id, 'ours'), conflict: false };
+      return {
+        abandoned: abandonOpenIntent(result, oursOpen.id, 'ours'),
+        conflict: false,
+        parkedClosed: false,
+      };
     }
-    if (allowConflict) return { abandoned: null, conflict: true };
+    if (allowConflict) return { abandoned: null, conflict: true, parkedClosed: false };
     fail(`${err.message}; re-run with --abandon-theirs or --abandon-ours`);
   }
 }
@@ -2964,20 +3036,51 @@ function finishAbsorb({
   allowConflict = false,
   followupMessage = null,
 }) {
-  const { abandoned, conflict } = resolveOpenIntents(result, oursRecords, theirsRecords, abandon, {
-    allowConflict,
+  // An intent parked in Git metadata is part of our side even though the log never saw it.
+  const park = shouldAttachInProgress(outputFile) ? inProgressFile() : null;
+  const plan = planInProgressOverlay(result.map((record) => record.event), park, {
+    repairTail: true,
   });
-  fold(result.map((record) => record.event));
-  if (!conflict) openIntent(fold(result.map((record) => record.event)));
+  const overlay = plan && !plan.alreadyCommitted ? plan.records : [];
+  const parkedOpen =
+    overlay.length > 0 ? openIntent(fold(overlay.map((record) => record.event))) : null;
+  const parkMappings = plan
+    ? plan.mappings.map((mapping) => ({ ...mapping, side: 'parked' }))
+    : [];
+  const allMappings = [...mappings, ...parkMappings];
+  const { abandoned, conflict, parkedClosed } = resolveOpenIntents(
+    result,
+    oursRecords,
+    theirsRecords,
+    abandon,
+    { allowConflict, overlay, parkedOpen }
+  );
+  // A parked overlay with nothing left open in it belongs in the tracked log, whether the
+  // abandon flag just closed it or an interrupted end left it closed.
+  const flushOverlay = parkedClosed || (overlay.length > 0 && !parkedOpen);
+  const merged = flushOverlay ? [...result, ...overlay] : result;
+  const effective = [...result, ...overlay].map((record) => record.event);
+  fold(effective);
+  if (!conflict) openIntent(fold(effective));
   if (!dryRun) {
-    writeJsonl(outputFile, result);
+    writeJsonl(outputFile, merged);
     applyDecisionCopies(copies, dryRun);
+    if (plan) {
+      if (plan.alreadyCommitted || flushOverlay) discardInProgressLog(park);
+      else if (plan.mappings.length > 0) writeJsonl(park, overlay);
+    }
   }
-  if (intentCount === 0 && mappings.length === 0 && copies.length === 0 && !abandoned) {
+  if (
+    intentCount === 0 &&
+    allMappings.length === 0 &&
+    copies.length === 0 &&
+    !abandoned &&
+    !flushOverlay
+  ) {
     printLine('nothing to absorb');
   } else {
     printAbsorbReport({
-      mappings,
+      mappings: allMappings,
       abandoned,
       intentCount,
     });
@@ -2987,7 +3090,7 @@ function finishAbsorb({
   }
   if (followupMessage) printLine(followupMessage);
   return {
-    mappings,
+    mappings: allMappings,
     abandoned,
     copies: copies.map((item) => item.toFile),
     outputFile,
@@ -3216,22 +3319,30 @@ const commands = {
 
     const events = readEvents({ repairTail: true });
     const records = fold(events);
-    const open = openIntent(records);
-    if (open) {
-      if (!flags.force) {
-        fail(
-          `intent ${open.id} is still in_progress: "${open.intent}"\n` +
-            `end it first (driftseal end) or re-run with --force to abandon it`
-        );
-      }
+    // A parked intent and a merged-in one can both be open; --force clears every one of them.
+    const open = records.filter((record) => record.status === 'in_progress');
+    if (open.length > 1 && !flags.force) {
+      fail(
+        `multiple intents in progress: ${open.map((record) => record.id).join(', ')}\n` +
+          'resolve them with driftseal absorb --abandon-ours or --abandon-theirs, ' +
+          'or re-run with --force to abandon all of them'
+      );
+    }
+    if (open.length === 1 && !flags.force) {
+      fail(
+        `intent ${open[0].id} is still in_progress: "${open[0].intent}"\n` +
+          `end it first (driftseal end) or re-run with --force to abandon it`
+      );
+    }
+    for (const record of open) {
       const status = closeIntentAsEscape(
         events,
-        open,
+        record,
         'abandoned',
         'superseded by --force',
         null
       );
-      printError(`driftseal: ${status} ${open.id}`);
+      printError(`driftseal: ${status} ${record.id}`);
     }
 
     const id = nextId(events);

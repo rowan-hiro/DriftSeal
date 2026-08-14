@@ -290,9 +290,15 @@ driftseal absorb ../other-worktree/.intent-log/events.jsonl \
 
 在 Git worktree 里，`begin` 会把未关闭的 intent 停在 Git 元数据中，而不是追加到
 已跟踪的 `events.jsonl`。因此工作树保持干净，`git merge` 可以在 intent 仍进行中
-时执行，不必为了清工作树而多做一个只含日志的提交。`end` 才会把已关闭的记录写入
-跟踪日志。如果停放中的 intent id 与合并进来的事件撞号，DriftSeal 会按 `absorb`
-同样的规则重编号。
+时执行，不必为了清工作树而多做一个只含日志的提交。`end` 会先把停放的记录移入跟踪
+日志，再把关闭记录写在那里，而不会写进 Git 元数据；因此 `end` 中途失败时，intent
+只是以未关闭状态留在日志里，重跑一次即可。如果停放中的 intent id 与合并进来的事件
+撞号，DriftSeal 会按 `absorb` 同样的规则重编号。
+
+合并带进来第二个未关闭的 intent 时，`absorb --abandon-ours` 会关闭停放的那一个并
+写入跟踪日志，`absorb --abandon-theirs` 则关闭合并进来的那一个、保留自己的停放
+状态。也可以用 `end <id>` 直接关闭合并进来的 intent，或用 `begin --force` 一次性
+放弃所有未关闭的 intent。
 
 ## 数据保存在哪里
 

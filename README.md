@@ -320,9 +320,16 @@ the driver lives in local git config.
 In a Git worktree, `begin` parks the open intent in Git metadata instead of
 appending to the tracked `events.jsonl`. Git can merge while that intent is
 still in progress, so you do not need a log-only commit just to get a clean
-tree. `end` writes the closed record to the tracked log. If the parked intent's
-id collides with incoming merged events, DriftSeal remaps it the same way
-`absorb` remaps colliding worktree ids.
+tree. `end` moves the parked records into the tracked log and writes the closing
+record there — never into Git metadata — so an interrupted `end` leaves the
+intent open in the log and can simply be run again. If the parked intent's id
+collides with incoming merged events, DriftSeal remaps it the same way `absorb`
+remaps colliding worktree ids.
+
+When a merge brings in a second open intent, `absorb --abandon-ours` closes the
+parked one into the tracked log and `absorb --abandon-theirs` closes the
+incoming one and leaves yours parked. `end <id>` also works on the incoming
+intent directly, and `begin --force` abandons every open intent at once.
 
 ## Storage
 

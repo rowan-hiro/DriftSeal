@@ -101,6 +101,48 @@ function setupGitRepository(prefix = 'driftseal-git-test-') {
   return { cwd, env, git, gitFail, run };
 }
 
+function readJsonl(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, 'utf8')
+    .trim()
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map(JSON.parse);
+}
+
+/** A committed repository whose open intents are parked in Git metadata. */
+function setupParkedRepository(prefix) {
+  const repo = setupGitRepository(prefix);
+  repo.git(['add', '.gitattributes', 'AGENTS.md']);
+  repo.git(['commit', '-m', 'base protocol']);
+  const park = path.resolve(
+    repo.cwd,
+    repo.git(['rev-parse', '--git-path', 'driftseal-in-progress.jsonl']).trim()
+  );
+  return {
+    ...repo,
+    park,
+    log: () => readJsonl(path.join(repo.cwd, '.intent-log', 'events.jsonl')),
+    parkedRecords: () => readJsonl(park),
+  };
+}
+
+/** A parked open intent plus an incoming open intent merged in from another branch. */
+function setupParkedMergeConflict(prefix) {
+  const repo = setupParkedRepository(prefix);
+  repo.git(['checkout', '-b', 'incoming']);
+  repo.run(['begin', 'incoming open intent'], {
+    env: { ...repo.env, DRIFTSEAL_HOME: path.join(repo.cwd, '.intent-log') },
+  });
+  repo.git(['add', '.intent-log/events.jsonl']);
+  repo.git(['commit', '-m', 'incoming open intent']);
+  repo.git(['checkout', 'main']);
+  repo.run(['begin', 'local parked intent']);
+  repo.git(['merge', 'incoming', '--no-ff', '--no-edit']);
+  return repo;
+}
+
 test('package metadata identifies the DriftSeal CLI, ownership, and support URLs', () => {
   const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.equal(metadata.name, 'driftseal');
@@ -2762,6 +2804,229 @@ test('a different committed open intent with the same id does not discard the pa
   assert.equal(parked.length, 1);
   assert.equal(parked[0].intent, 'local parked intent');
   assert.match(parked[0].id, /-002$/);
+});
+
+test('an interrupted end leaves the intent open in the tracked log and can be retried', () => {
+  const { cwd, env, git, run, park, log } = setupParkedRepository('driftseal-git-park-end-crash-');
+  const id = run(['begin', 'parked work']).trim();
+  assert.equal(fs.existsSync(park), true);
+
+  assert.throws(
+    () =>
+      run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok'], {
+        env: { ...env, _DRIFTSEAL_TEST_CRASH_AFTER_IN_PROGRESS_FLUSH: '1' },
+      }),
+    (err) => {
+      assert.match(String(err.stderr), /simulated interruption after the in-progress flush/);
+      return true;
+    }
+  );
+
+  // The close never lands in Git metadata, so the retry still has an open intent to close.
+  assert.equal(fs.existsSync(park), false);
+  assert.deepEqual(log().map((event) => event.type), ['begin']);
+  assert.match(run(['status']), /in_progress/);
+
+  run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']);
+  const closed = log();
+  assert.deepEqual(closed.map((event) => event.type), ['begin', 'end']);
+  assert.equal(closed[1].id, id);
+  assert.equal(closed[1].status, 'completed');
+  assert.match(run(['status']), /no intent in progress/);
+  assert.equal(fs.existsSync(park), false);
+});
+
+test('a park left holding a closed intent is flushed by the next write', () => {
+  const { cwd, git, run, park, log, parkedRecords } = setupParkedRepository('driftseal-git-park-stale-close-');
+  const id = run(['begin', 'interrupted work']).trim();
+  fs.appendFileSync(
+    park,
+    JSON.stringify({
+      schemaVersion: 3,
+      type: 'end',
+      id,
+      ts: new Date().toISOString(),
+      status: 'completed',
+      note: 'done',
+      verifyResult: 'ok',
+    }) + '\n'
+  );
+  assert.match(run(['status']), /no intent in progress/);
+  assert.equal(fs.existsSync(path.join(cwd, '.intent-log', 'events.jsonl')), false);
+
+  const next = run(['begin', 'next work']).trim();
+  const flushed = log();
+  assert.deepEqual(flushed.map((event) => event.type), ['begin', 'end']);
+  assert.equal(flushed[0].intent, 'interrupted work');
+  assert.equal(flushed[1].id, id);
+  assert.deepEqual(parkedRecords().map((event) => event.intent), ['next work']);
+  assert.notEqual(next, id);
+});
+
+test('absorb flushes a park that no longer holds an open intent', () => {
+  const { run, park, log } = setupParkedRepository('driftseal-git-park-absorb-stale-');
+  const id = run(['begin', 'interrupted work']).trim();
+  fs.appendFileSync(
+    park,
+    JSON.stringify({
+      schemaVersion: 3,
+      type: 'end',
+      id,
+      ts: new Date().toISOString(),
+      status: 'completed',
+      note: 'done',
+      verifyResult: 'ok',
+    }) + '\n'
+  );
+
+  run(['absorb']);
+  assert.equal(fs.existsSync(park), false);
+  const flushed = log();
+  assert.deepEqual(flushed.map((event) => event.type), ['begin', 'end']);
+  assert.equal(flushed[0].intent, 'interrupted work');
+  assert.equal(flushed[1].id, id);
+});
+
+test('a parked overlay already merged into the log is dropped instead of re-added', () => {
+  const { cwd, git, run, park, log } = setupParkedRepository('driftseal-git-park-flushed-overlay-');
+  const id = run(['begin', 'parked work']).trim();
+  const parkedLine = fs.readFileSync(park, 'utf8');
+  const other = `${id.slice(0, -3)}009`;
+  const ts = new Date().toISOString();
+  // A flush that wrote the log but could not unlink the park, then a merge appending after it.
+  fs.mkdirSync(path.join(cwd, '.intent-log'), { recursive: true });
+  fs.writeFileSync(
+    path.join(cwd, '.intent-log', 'events.jsonl'),
+    parkedLine +
+      JSON.stringify({ schemaVersion: 3, type: 'begin', id: other, ts, intent: 'merged in' }) + '\n' +
+      JSON.stringify({ schemaVersion: 3, type: 'end', id: other, ts, status: 'completed' }) + '\n'
+  );
+
+  const status = run(['status']);
+  assert.match(status, /parked work/);
+  assert.match(status, new RegExp(id));
+  assert.equal(fs.existsSync(park), false);
+  assert.deepEqual(
+    log().filter((event) => event.type === 'begin').map((event) => event.intent),
+    ['parked work', 'merged in']
+  );
+});
+
+test('a linked decision reconciliation stays parked until end', () => {
+  const { cwd, git, run, park, log, parkedRecords } = setupParkedRepository('driftseal-git-park-decision-');
+  run(['decision', 'add', 'Parked choice', '-c', 'context', '-o', 'outcome']);
+  git(['add', '.decision-log']);
+  git(['commit', '-m', 'decision']);
+
+  run(['begin', 'linked work', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'Confirm parked choice.']);
+  assert.deepEqual(parkedRecords().map((event) => event.type), [
+    'begin',
+    'decision_reconcile_prepare',
+    'decision_reconcile_commit',
+  ]);
+  assert.equal(fs.existsSync(path.join(cwd, '.intent-log', 'events.jsonl')), false);
+  assert.equal(git(['status', '--porcelain']).includes('.intent-log/'), false);
+
+  run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']);
+  assert.equal(fs.existsSync(park), false);
+  assert.deepEqual(log().map((event) => event.type), [
+    'begin',
+    'decision_reconcile_prepare',
+    'decision_reconcile_commit',
+    'end',
+  ]);
+});
+
+test('hook reminders see an intent that only exists in Git metadata', () => {
+  const { cwd, run } = setupParkedRepository('driftseal-git-park-hook-');
+  const id = run(['begin', 'parked work']).trim();
+  assert.equal(fs.existsSync(path.join(cwd, '.intent-log', 'events.jsonl')), false);
+  assert.match(run(['hook', 'stop']), new RegExp(`intent ${id} is still in_progress`));
+  assert.match(run(['hook', 'prompt']), /begin an intent first/);
+});
+
+test('absorb --abandon-theirs closes the merged-in intent and leaves ours parked', () => {
+  const { run, park, log, parkedRecords } = setupParkedMergeConflict('driftseal-git-park-absorb-theirs-');
+  assert.throws(() => run(['status']), (err) => {
+    assert.match(String(err.stderr), /multiple intents in progress/);
+    return true;
+  });
+  assert.throws(() => run(['absorb']), (err) => {
+    assert.match(String(err.stderr), /re-run with --abandon-theirs or --abandon-ours/);
+    return true;
+  });
+  assert.deepEqual(log().map((event) => event.type), ['begin']);
+
+  assert.match(run(['absorb', '--abandon-theirs']), /abandoned .+ during absorb/);
+  const absorbed = log();
+  assert.deepEqual(absorbed.map((event) => event.type), ['begin', 'end']);
+  assert.equal(absorbed[0].intent, 'incoming open intent');
+  assert.equal(absorbed[1].status, 'abandoned');
+  assert.deepEqual(parkedRecords().map((event) => event.intent), ['local parked intent']);
+
+  const status = run(['status']);
+  assert.match(status, /local parked intent/);
+  assert.match(status, /in_progress/);
+
+  run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']);
+  assert.equal(fs.existsSync(park), false);
+  const closed = log();
+  assert.deepEqual(closed.map((event) => event.type), ['begin', 'end', 'begin', 'end']);
+  assert.equal(closed[2].intent, 'local parked intent');
+  assert.equal(closed[3].status, 'completed');
+});
+
+test('absorb --abandon-ours closes the parked intent into the tracked log', () => {
+  const { run, park, log } = setupParkedMergeConflict('driftseal-git-park-absorb-ours-');
+  assert.match(run(['absorb', '--abandon-ours']), /abandoned .+ during absorb/);
+  assert.equal(fs.existsSync(park), false);
+  const absorbed = log();
+  assert.deepEqual(absorbed.map((event) => event.type), ['begin', 'begin', 'end']);
+  assert.equal(absorbed[1].intent, 'local parked intent');
+  assert.equal(absorbed[2].id, absorbed[1].id);
+  assert.equal(absorbed[2].status, 'abandoned');
+
+  const status = run(['status']);
+  assert.match(status, /incoming open intent/);
+  assert.match(status, /in_progress/);
+});
+
+test('end by id closes a merged-in intent without disturbing the parked one', () => {
+  const { run, park, log, parkedRecords } = setupParkedMergeConflict('driftseal-git-park-end-by-id-');
+  const incoming = log()[0].id;
+  assert.throws(() => run(['end', '--status', 'completed', '--note', 'x', '--verify-result', 'ok']), (err) => {
+    assert.match(String(err.stderr), /multiple intents in progress/);
+    return true;
+  });
+
+  run(['end', incoming, '--status', 'partial', '--note', 'closing incoming', '--verify-result', 'ok']);
+  const closed = log();
+  assert.deepEqual(closed.map((event) => event.type), ['begin', 'end']);
+  assert.equal(closed[1].id, incoming);
+  assert.deepEqual(parkedRecords().map((event) => event.intent), ['local parked intent']);
+  assert.match(run(['status']), /local parked intent/);
+
+  run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']);
+  assert.equal(fs.existsSync(park), false);
+  assert.deepEqual(log().map((event) => event.type), ['begin', 'end', 'begin', 'end']);
+});
+
+test('begin --force abandons a parked intent and a merged-in one together', () => {
+  const { run, park, log, parkedRecords } = setupParkedMergeConflict('driftseal-git-park-force-');
+  assert.throws(() => run(['begin', 'next work']), (err) => {
+    assert.match(String(err.stderr), /multiple intents in progress/);
+    assert.match(String(err.stderr), /--force to abandon all of them/);
+    return true;
+  });
+
+  const next = run(['begin', 'next work', '--force']).trim();
+  const forced = log();
+  assert.deepEqual(forced.map((event) => event.type), ['begin', 'end', 'begin', 'end']);
+  assert.equal(forced.filter((event) => event.type === 'end').every((event) => event.status === 'abandoned'), true);
+  assert.deepEqual(parkedRecords().map((event) => event.intent), ['next work']);
+  assert.match(run(['status']), /next work/);
+  assert.equal(next, parkedRecords()[0].id);
 });
 
 test('git merge stops on colliding decision ids and absorb preserves each side ownership', () => {
