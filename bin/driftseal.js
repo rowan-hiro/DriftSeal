@@ -1576,6 +1576,29 @@ function resolveInitLocalLog(requested, content) {
   return Boolean(decision && LOCAL_LOG_COMMENT_RE.test(decision));
 }
 
+/**
+ * Log languages persisted in the current managed blocks, collected leniently
+ * (no failure on malformed or conflicting declarations: init --lang may be
+ * fixing exactly that). Lets init recognize default blocks written in the
+ * existing language when --lang switches to a new one.
+ */
+function persistedLogLanguages(content) {
+  const languages = new Set();
+  const blocks = [
+    extractManagedBlock(content, INTENT_PROTOCOL_MARKER, INTENT_PROTOCOL_END),
+    extractManagedBlock(content, DECISION_PROTOCOL_MARKER, DECISION_PROTOCOL_END),
+  ];
+  for (const block of blocks) {
+    if (!block) continue;
+    const comment = block.match(LOG_LANGUAGE_COMMENT_RE);
+    const prose = block.match(LOG_LANGUAGE_PROSE_RE);
+    const value = comment ? comment[1] : prose ? prose[1] : null;
+    const canonical = value ? wellFormedBcp47(value.trim()) : null;
+    if (canonical) languages.add(canonical);
+  }
+  return languages;
+}
+
 function protocolBlockKey(block) {
   return block
     .replace(/^<!-- driftseal-log-language: [^>\r\n]+ -->\r?$/m, '<!-- driftseal-log-language: -->')
@@ -2672,23 +2695,29 @@ function isGitWorkTree(cwd = process.cwd()) {
 
 /**
  * Warn (without mutating the index or .gitignore) when local log mode is on
- * but the default log paths are still tracked by git.
+ * but the default log paths are still tracked by git. The log directories are
+ * resolved relative to the init cwd (init writes ./AGENTS.md there), so a
+ * nested init checks its own logs rather than the repository root's.
  */
 function warnIfDefaultLogsTracked(cwd = process.cwd()) {
   if (!isGitWorkTree(cwd)) return;
   const root = gitCapture(['rev-parse', '--show-toplevel'], cwd);
   if (!root) return;
-  const listing = gitCapture(['ls-files', '--', '.intent-log', '.decision-log'], root);
+  const prefix = gitCapture(['rev-parse', '--show-prefix'], cwd);
+  if (prefix === null) return;
+  const logDirs = ['.intent-log', '.decision-log'].map((name) => `${prefix}${name}`);
+  const listing = gitCapture(['ls-files', '--', ...logDirs], root);
   if (!listing) return;
   const files = listing.split('\n');
-  const tracked = ['.intent-log', '.decision-log'].filter((name) =>
+  const tracked = logDirs.filter((name) =>
     files.some((file) => file === name || file.startsWith(`${name}/`))
   );
   if (tracked.length === 0) return;
   printLine(
     `warning: local log mode is on, but ${tracked.join(' and ')} ` +
       `${tracked.length === 1 ? 'is' : 'are'} still tracked by git; run ` +
-      '`git rm -r --cached .intent-log .decision-log` and add them to .gitignore to keep the logs local'
+      `\`git rm -r --cached ${tracked.join(' ')}\` from the repository root ` +
+      'and add them to .gitignore to keep the logs local'
   );
 }
 
@@ -3978,6 +4007,14 @@ const commands = {
     const eol = current.includes('\r\n') ? '\r\n' : '\n';
     const language = resolveInitLogLanguage(flags.lang, current);
     const localLog = resolveInitLocalLog(flags['local-log'] === true, current);
+    // Accept default blocks in the persisted language too, so a single run can
+    // switch language and enable local mode on a default or v11 protocol.
+    const sourceLanguages = [language];
+    if (flags.lang !== undefined) {
+      for (const persisted of persistedLogLanguages(current)) {
+        if (!sourceLanguages.includes(persisted)) sourceLanguages.push(persisted);
+      }
+    }
     const intentBlock = protocolEol(intentProtocolBlock(PROTOCOL_VERSION, language, localLog), eol);
     const decisionBlock = protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, language, localLog), eol);
     let updated = current;
@@ -3988,7 +4025,10 @@ const commands = {
       versionPattern: /^<!-- driftseal-version: (\d+) -->\r?$/m,
       replacement: intentBlock,
       knownManagedBlocks: [
-        protocolEol(intentProtocolBlock(PROTOCOL_VERSION, language), eol),
+        ...sourceLanguages.flatMap((source) => [
+          protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(previousIntentProtocolBlock(11, source), eol),
+        ]),
         protocolEol(previousIntentProtocolBlock(2), eol),
         protocolEol(previousIntentProtocolBlock(3), eol),
         protocolEol(previousIntentProtocolBlock(4), eol),
@@ -3998,7 +4038,6 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(8), eol),
         protocolEol(previousIntentProtocolBlock(9), eol),
         protocolEol(previousIntentProtocolBlock(10), eol),
-        protocolEol(previousIntentProtocolBlock(11, language), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -4010,7 +4049,10 @@ const commands = {
       versionPattern: /^<!-- driftseal-decisions-version: (\d+) -->\r?$/m,
       replacement: decisionBlock,
       knownManagedBlocks: [
-        protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, language), eol),
+        ...sourceLanguages.flatMap((source) => [
+          protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(previousDecisionProtocolBlock(11, source), eol),
+        ]),
         protocolEol(previousDecisionProtocolBlock(2), eol),
         protocolEol(previousDecisionProtocolBlock(3), eol),
         protocolEol(previousDecisionProtocolBlock(4), eol),
@@ -4020,7 +4062,6 @@ const commands = {
         protocolEol(previousDecisionProtocolBlock(8), eol),
         protocolEol(previousDecisionProtocolBlock(9), eol),
         protocolEol(previousDecisionProtocolBlock(10), eol),
-        protocolEol(previousDecisionProtocolBlock(11, language), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });

@@ -2089,6 +2089,92 @@ test('init --local-log enables local mode on an already-current repository', () 
   assert.equal(fs.readFileSync(agentsFile, 'utf8'), disabled);
 });
 
+test('init --local-log --lang switches language and enables local mode in one run', () => {
+  const { run } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-local-lang-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+
+  run(['init'], { cwd }); // default v12 protocol in English
+  assert.match(fs.readFileSync(agentsFile, 'utf8'), /driftseal-log-language: en/);
+
+  run(['init', '--local-log', '--lang', 'zh-CN'], { cwd });
+  const switched = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(switched, /driftseal-log-language: zh-CN/);
+  assert.match(switched, /\*\*Log language:\*\* `zh-CN`/);
+  assert.equal((switched.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
+  assert.match(switched, /local and untracked/);
+
+  run(['init'], { cwd }); // plain re-run preserves both persisted choices
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), switched);
+});
+
+test('init --local-log --lang upgrades a v11 English protocol to local mode in one run', () => {
+  const { run } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v11-local-lang-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+
+  run(['init'], { cwd });
+  const current = fs.readFileSync(agentsFile, 'utf8');
+  const versionEleven = current
+    .replace('driftseal-version: 12', 'driftseal-version: 11')
+    .replace('driftseal-decisions-version: 12', 'driftseal-decisions-version: 11')
+    .replace(
+      '-r "<what the verification showed, written for the next agent>"',
+      '-r "<verify output>"'
+    )
+    .replace(
+      '\n   A command whose result can be reconstructed from Git state (for example a\n' +
+        '   patch file regenerated from a commit range, or a scratch harness that\n' +
+        '   re-runs) needs no intent; content that will be committed and cannot be\n' +
+        '   reconstructed (for example a .gitignore edit) does.',
+      ''
+    )
+    .replace(
+      '\n   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
+        '   and can be verified on its own.',
+      ''
+    )
+    .replace(
+      '   To revise a decision\'s prose, edit the file, then run `decision update` to\n' +
+        '   record the new content hash. Do not edit a decision after reconciling it;\n' +
+        '   run `decision update` again so the final content hash is recorded.\n' +
+        '   Interrupted reconciliation is recovered',
+      '   Do not edit a decision after reconciling it; run `decision update` again so\n' +
+        '   the final content hash is recorded. Interrupted reconciliation is recovered'
+    )
+    .replace(
+      'preparing a Git operation does require a new intent, per the step 1 test.',
+      'preparing a Git operation does require a new intent.'
+    );
+  fs.writeFileSync(agentsFile, versionEleven);
+
+  run(['init', '--local-log', '--lang', 'zh-CN'], { cwd });
+  const upgraded = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(upgraded, /driftseal-version: 12/);
+  assert.match(upgraded, /driftseal-decisions-version: 12/);
+  assert.match(upgraded, /driftseal-log-language: zh-CN/);
+  assert.equal((upgraded.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
+  assert.match(upgraded, /local and untracked/);
+});
+
+test('init --local-log --lang still rejects a customized protocol block', () => {
+  const { run, runFail } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-custom-local-lang-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+
+  run(['init'], { cwd });
+  const customized = fs
+    .readFileSync(agentsFile, 'utf8')
+    .replace('to prevent agent drift.', 'to prevent agent drift, most of the time.');
+  fs.writeFileSync(agentsFile, customized);
+
+  assert.match(
+    runFail(['init', '--local-log', '--lang', 'zh-CN'], { cwd }).stderr,
+    /cannot safely upgrade customized protocol block/
+  );
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), customized);
+});
+
 test('init --local-log warns when the logs are still tracked by git', () => {
   const trackedRepo = setupGitRepository('driftseal-local-tracked-');
   fs.mkdirSync(path.join(trackedRepo.cwd, '.intent-log'), { recursive: true });
@@ -2097,11 +2183,24 @@ test('init --local-log warns when the logs are still tracked by git', () => {
 
   const warned = trackedRepo.run(['init', '--local-log']);
   assert.match(warned, /warning: local log mode is on, but \.intent-log is still tracked by git/);
-  assert.match(warned, /git rm -r --cached \.intent-log \.decision-log/);
-  assert.match(
-    trackedRepo.git(['ls-files', '--', '.intent-log']),
-    /\.intent-log\/events\.jsonl/
-  ); // warning only: the index is untouched
+  assert.match(warned, /`git rm -r --cached \.intent-log`/); // only the actually-tracked path
+  assert.doesNotMatch(warned, /rm -r --cached [^`]*\.decision-log/);
+  const remediation = warned.match(/`git (rm -r --cached [^`]+)`/)[1].split(' ');
+  trackedRepo.git(remediation); // the suggested command must work as printed
+  assert.equal(trackedRepo.git(['ls-files', '--', '.intent-log']), '');
+
+  const bothRepo = setupGitRepository('driftseal-local-both-tracked-');
+  fs.mkdirSync(path.join(bothRepo.cwd, '.intent-log'), { recursive: true });
+  fs.writeFileSync(path.join(bothRepo.cwd, '.intent-log', 'events.jsonl'), '');
+  fs.mkdirSync(path.join(bothRepo.cwd, '.decision-log'), { recursive: true });
+  fs.writeFileSync(path.join(bothRepo.cwd, '.decision-log', '0001-choice.md'), '');
+  bothRepo.git(['add', '.intent-log', '.decision-log']);
+
+  const bothWarned = bothRepo.run(['init', '--local-log']);
+  assert.match(bothWarned, /\.intent-log and \.decision-log are still tracked by git/);
+  assert.match(bothWarned, /`git rm -r --cached \.intent-log \.decision-log`/);
+  bothRepo.git(bothWarned.match(/`git (rm -r --cached [^`]+)`/)[1].split(' '));
+  assert.equal(bothRepo.git(['ls-files', '--', '.intent-log', '.decision-log']), '');
 
   const untrackedRepo = setupGitRepository('driftseal-local-untracked-');
   fs.mkdirSync(path.join(untrackedRepo.cwd, '.intent-log'), { recursive: true });
@@ -2109,6 +2208,30 @@ test('init --local-log warns when the logs are still tracked by git', () => {
 
   const quiet = untrackedRepo.run(['init', '--local-log']);
   assert.doesNotMatch(quiet, /warning: local log mode/);
+});
+
+test('init --local-log detects tracked logs nested at the init cwd', () => {
+  const nestedRepo = setupGitRepository('driftseal-local-nested-');
+  const nested = path.join(nestedRepo.cwd, 'packages', 'app');
+  fs.mkdirSync(path.join(nested, '.intent-log'), { recursive: true });
+  fs.writeFileSync(path.join(nested, '.intent-log', 'events.jsonl'), '');
+  nestedRepo.git(['add', 'packages/app/.intent-log']);
+
+  const warned = nestedRepo.run(['init', '--local-log'], { cwd: nested });
+  assert.match(warned, /packages\/app\/\.intent-log is still tracked by git/);
+  assert.match(warned, /`git rm -r --cached packages\/app\/\.intent-log`/);
+  nestedRepo.git(warned.match(/`git (rm -r --cached [^`]+)`/)[1].split(' '));
+  assert.equal(nestedRepo.git(['ls-files', '--', 'packages/app/.intent-log']), '');
+
+  const rootRepo = setupGitRepository('driftseal-local-root-only-');
+  fs.mkdirSync(path.join(rootRepo.cwd, '.intent-log'), { recursive: true });
+  fs.writeFileSync(path.join(rootRepo.cwd, '.intent-log', 'events.jsonl'), '');
+  rootRepo.git(['add', '.intent-log']);
+  const subdir = path.join(rootRepo.cwd, 'packages', 'app');
+  fs.mkdirSync(subdir, { recursive: true });
+
+  const quiet = rootRepo.run(['init', '--local-log'], { cwd: subdir });
+  assert.doesNotMatch(quiet, /warning: local log mode/); // no false positive from the root log
 });
 
 test('skill install uses each platform project directory and is idempotent', () => {
