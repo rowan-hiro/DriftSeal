@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync, spawn } = require('node:child_process');
+const { execFileSync, execSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -108,10 +108,13 @@ function remediationCommand(output) {
   return match[1];
 }
 
-/** Run a printed remediation exactly as a user would paste it into a shell. */
-function runInShell(repo, command) {
-  return execFileSync('sh', ['-c', command], {
-    cwd: repo.cwd,
+/**
+ * Run a printed remediation through the platform default shell, as a user
+ * would paste it. Optional `cwd` is the init directory the warning names.
+ */
+function runInShell(repo, command, cwd = repo.cwd) {
+  return execSync(command, {
+    cwd,
     encoding: 'utf8',
     env: repo.env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -2261,6 +2264,7 @@ test('init --local-log warns when the logs are still tracked by git', () => {
   const warned = trackedRepo.run(['init', '--local-log']);
   assert.match(warned, /warning: local log mode is on, but \.intent-log is still tracked by git/);
   assert.match(warned, /`git rm -r --cached -- \.intent-log`/); // only the actually-tracked path
+  assert.match(warned, /from this directory/);
   assert.doesNotMatch(warned, /rm -r --cached [^`]*\.decision-log/);
   runInShell(trackedRepo, remediationCommand(warned)); // must work as printed
   assert.equal(trackedRepo.git(['ls-files', '--', '.intent-log']), '');
@@ -2295,8 +2299,9 @@ test('init --local-log detects tracked logs nested at the init cwd', () => {
 
   const warned = nestedRepo.run(['init', '--local-log'], { cwd: nested });
   assert.match(warned, /packages\/app\/\.intent-log is still tracked by git/);
-  assert.match(warned, /`git rm -r --cached -- packages\/app\/\.intent-log`/);
-  runInShell(nestedRepo, remediationCommand(warned));
+  assert.match(warned, /`git rm -r --cached -- \.intent-log`/);
+  assert.match(warned, /from this directory/);
+  runInShell(nestedRepo, remediationCommand(warned), nested);
   assert.equal(nestedRepo.git(['ls-files', '--', 'packages/app/.intent-log']), '');
 
   const rootRepo = setupGitRepository('driftseal-local-root-only-');
@@ -2311,16 +2316,18 @@ test('init --local-log detects tracked logs nested at the init cwd', () => {
 });
 
 test('init --local-log warns with a runnable command for awkward nested paths', () => {
-  // git's human-readable ls-files C-quotes non-ASCII names, and an unquoted
-  // suggestion breaks on spaces, wildcards, and leading dashes.
+  // git's human-readable ls-files C-quotes non-ASCII names, and a repo-relative
+  // suggestion is not paste-safe in cmd.exe (spaces, percent, no sh). The
+  // warning still reports the tracked path losslessly; the command uses the
+  // fixed names and is run from the init cwd, where git resolves them.
   const cases = [
-    { label: 'non-ascii', dir: '应用', quoted: "'packages/应用/.intent-log'" },
-    { label: 'whitespace', dir: 'my app', quoted: "'packages/my app/.intent-log'" },
-    { label: 'wildcard', dir: 'app[1]', quoted: "':(literal)packages/app[1]/.intent-log'" },
-    { label: 'option-looking', dir: '--force', quoted: 'packages/--force/.intent-log' },
+    { label: 'non-ascii', dir: '应用' },
+    { label: 'whitespace', dir: 'my app' },
+    { label: 'wildcard', dir: 'app[1]' },
+    { label: 'option-looking', dir: '--force' },
   ];
 
-  for (const { label, dir, quoted } of cases) {
+  for (const { label, dir } of cases) {
     const repo = setupGitRepository(`driftseal-local-awkward-${label}-`);
     const nested = path.join(repo.cwd, 'packages', dir);
     fs.mkdirSync(path.join(nested, '.intent-log'), { recursive: true });
@@ -2336,11 +2343,11 @@ test('init --local-log warns with a runnable command for awkward nested paths', 
     );
     assert.equal(
       remediationCommand(warned),
-      `git rm -r --cached -- ${quoted}`,
-      `${label}: the remediation must be shell-safe`
+      'git rm -r --cached -- .intent-log',
+      `${label}: the remediation must be a paste-safe cwd-relative command`
     );
 
-    runInShell(repo, remediationCommand(warned)); // exactly as printed, from the repository root
+    runInShell(repo, remediationCommand(warned), nested);
     assert.equal(repo.git(['ls-files', '--', pathspec]), '', `${label}: log must become untracked`);
     assert.doesNotMatch(
       repo.run(['init', '--local-log'], { cwd: nested }),
@@ -2365,7 +2372,7 @@ test('init --local-log does not confuse a wildcard path with its literal sibling
 
   repo.git(['add', '--', ':(literal)packages/app[1]/.intent-log']);
   const warned = repo.run(['init', '--local-log'], { cwd: wildcard });
-  runInShell(repo, remediationCommand(warned));
+  runInShell(repo, remediationCommand(warned), wildcard);
   assert.equal(repo.git(['ls-files', '--', ':(literal)packages/app[1]/.intent-log']), '');
   assert.notEqual(
     repo.git(['ls-files', '--', ':(literal)packages/app1/.intent-log']),

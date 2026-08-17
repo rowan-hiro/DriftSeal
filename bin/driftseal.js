@@ -2711,35 +2711,19 @@ function isGitWorkTree(cwd = process.cwd()) {
   return gitCapture(['rev-parse', '--is-inside-work-tree'], cwd) === 'true';
 }
 
-const SHELL_SAFE_RE = /^[A-Za-z0-9@%+=:,./_-]+$/;
-
-/** Quote a value so a POSIX shell passes it to git byte for byte. */
-function shellQuote(value) {
-  if (value.length > 0 && SHELL_SAFE_RE.test(value)) return value;
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-const PATHSPEC_MAGIC_RE = /[*?[\\]/;
-
-/**
- * Render a path as a pathspec that matches only itself. Git reads `*?[\` as
- * wildcards and a leading `:` as pathspec magic, so such paths get explicit
- * `:(literal)` magic; ordinary paths stay readable.
- */
-function gitLiteralPathspec(value) {
-  return PATHSPEC_MAGIC_RE.test(value) || value.startsWith(':') ? `:(literal)${value}` : value;
-}
-
 /**
  * Warn (without mutating the index or .gitignore) when local log mode is on
  * but the default log paths are still tracked by git. The log directories are
  * resolved relative to the init cwd (init writes ./AGENTS.md there), so a
  * nested init checks its own logs rather than the repository root's.
  *
- * Paths are read from `ls-files -z` because git's human-readable listing
- * C-quotes non-ASCII names, and the printed remediation is shell-quoted with
- * literal pathspecs after `--` so it runs as printed for names containing
- * spaces, wildcards, or a leading dash.
+ * Paths are read from `ls-files -z` with `:(literal)` pathspecs because git's
+ * human-readable listing C-quotes non-ASCII names and treats `*?[\` as
+ * wildcards. The printed remediation uses the fixed names `.intent-log` and
+ * `.decision-log` and is meant to be run from this directory: git resolves
+ * those pathspecs against the init cwd, so the command stays paste-safe in
+ * POSIX shells, cmd.exe, and PowerShell without embedding the repo-relative
+ * prefix or any shell quoting.
  */
 function warnIfDefaultLogsTracked(cwd = process.cwd()) {
   if (!isGitWorkTree(cwd)) return;
@@ -2747,22 +2731,24 @@ function warnIfDefaultLogsTracked(cwd = process.cwd()) {
   if (!root) return;
   const prefix = gitCaptureLine(['rev-parse', '--show-prefix'], cwd);
   if (prefix === null) return;
-  const logDirs = ['.intent-log', '.decision-log'].map((name) => `${prefix}${name}`);
+  const logNames = ['.intent-log', '.decision-log'];
+  const logDirs = logNames.map((name) => `${prefix}${name}`);
   const listing = gitCaptureRaw(
     ['ls-files', '-z', '--', ...logDirs.map((name) => `:(literal)${name}`)],
     root
   );
   if (!listing) return;
   const files = listing.split('\0').filter((file) => file.length > 0);
-  const tracked = logDirs.filter((name) =>
-    files.some((file) => file === name || file.startsWith(`${name}/`))
-  );
-  if (tracked.length === 0) return;
-  const remediation = tracked.map((name) => shellQuote(gitLiteralPathspec(name))).join(' ');
+  const trackedNames = logNames.filter((name) => {
+    const dir = `${prefix}${name}`;
+    return files.some((file) => file === dir || file.startsWith(`${dir}/`));
+  });
+  if (trackedNames.length === 0) return;
+  const tracked = trackedNames.map((name) => `${prefix}${name}`);
   printLine(
     `warning: local log mode is on, but ${tracked.join(' and ')} ` +
       `${tracked.length === 1 ? 'is' : 'are'} still tracked by git; run ` +
-      `\`git rm -r --cached -- ${remediation}\` from the repository root ` +
+      `\`git rm -r --cached -- ${trackedNames.join(' ')}\` from this directory ` +
       'and add them to .gitignore to keep the logs local'
   );
 }
