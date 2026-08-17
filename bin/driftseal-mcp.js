@@ -6,6 +6,8 @@ const { createApi, DECISION_STATUSES, END_STATUSES } = require('./driftseal.js')
 
 const SERVER_NAME = 'driftseal';
 const SERVER_VERSION = require('../package.json').version;
+const READ_ONLY_SUFFIX =
+  '(read-only: another mutation holds the lock; this snapshot may be incomplete)';
 
 function parseArguments(argv) {
   let root = process.cwd();
@@ -75,11 +77,14 @@ function registerTools(server, api, z) {
     status: z.enum(END_STATUSES).or(z.literal('in_progress')),
     note: z.string().nullable(),
     verifyResult: z.string().nullable(),
+    beginHead: z.string().nullable(),
+    endHead: z.string().nullable(),
     beganAt: z.string(),
     endedAt: z.string().nullable(),
     reclaimed: z.boolean(),
     reclaimReason: z.string().nullable(),
     reclaimedAt: z.string().nullable(),
+    readOnly: z.boolean().optional(),
   });
   const decisionRecord = z.object({
     id: z.string(),
@@ -115,15 +120,24 @@ function registerTools(server, api, z) {
       description:
         'Inspect the one intent currently in progress before repository work or after context loss. Returns null when no intent is open.',
       inputSchema: {},
-      outputSchema: { root: z.string(), intent: intentRecord.nullable() },
+      outputSchema: {
+        root: z.string(),
+        intent: intentRecord.nullable(),
+        readOnly: z.boolean().optional(),
+      },
       annotations: readOnly,
     },
     async () =>
       guarded(() => {
         const intent = api.status();
+        const readOnly = api.readOnly;
+        const snapshot = intent && readOnly ? { ...intent, readOnly: true } : intent;
+        const summary = snapshot
+          ? `Intent ${snapshot.id} is ${snapshot.status}.`
+          : 'No DriftSeal intent is in progress.';
         return success(
-          { root: api.root, intent },
-          intent ? `Intent ${intent.id} is ${intent.status}.` : 'No DriftSeal intent is in progress.'
+          { root: api.root, intent: snapshot, ...(readOnly ? { readOnly: true } : {}) },
+          readOnly ? `${summary} ${READ_ONLY_SUFFIX}` : summary
         );
       })
   );
@@ -184,13 +198,22 @@ function registerTools(server, api, z) {
         last: z.number().int().positive().max(100).optional(),
         includeReclaimed: z.boolean().default(false),
       },
-      outputSchema: { root: z.string(), intents: z.array(intentRecord) },
+      outputSchema: {
+        root: z.string(),
+        intents: z.array(intentRecord),
+        readOnly: z.boolean().optional(),
+      },
       annotations: readOnly,
     },
     async (input) =>
       guarded(() => {
         const intents = api.log({ last: input.last, all: input.includeReclaimed });
-        return success({ root: api.root, intents }, `Found ${intents.length} DriftSeal intent records.`);
+        const readOnly = api.readOnly;
+        const summary = `Found ${intents.length} DriftSeal intent records.`;
+        return success(
+          { root: api.root, intents, ...(readOnly ? { readOnly: true } : {}) },
+          readOnly ? `${summary} ${READ_ONLY_SUFFIX}` : summary
+        );
       })
   );
 

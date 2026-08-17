@@ -213,9 +213,12 @@ If the scope changes, close the current intent as `partial` or `abandoned`, then
 Git operations are entirely outside the intent log because Git maintains their
 history. Inspection, branch and worktree management, staging, commits, merges,
 rebases, cherry-picks, tags, and pushes never need an intent of their own. They
-still require normal authorization and safety checks. Single-step builds and
-checks, such as compiling or running tests, also need no intent. Any non-Git
-content change starts a new work round.
+still require normal authorization and safety checks. A command whose result
+can be reconstructed from Git state, such as a patch file regenerated from a
+commit range or a scratch harness that re-runs, needs no intent either; content
+that will be committed and cannot be reconstructed, such as a `.gitignore`
+edit, does. Single-step builds and checks, such as compiling or running tests,
+also need no intent. Any other non-Git content change starts a new work round.
 
 ## Commands
 
@@ -237,7 +240,7 @@ content change starts a new work round.
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the repository-pinned MCP server into Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | Install advisory lifecycle reminders into Kimi Code, Claude Code, or Codex. |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | Emit the reminder a lifecycle hook injects; never blocks. |
-| `driftseal init [--lang <tag>]` | Add the adoption protocol to `AGENTS.md` and configure the git merge driver. `--lang` sets the intent/decision log language (BCP 47, default `en`). |
+| `driftseal init [--lang <tag>] [--local-log]` | Add the adoption protocol to `AGENTS.md` and configure the git merge driver. `--lang` sets the intent/decision log language (BCP 47, default `en`). `--local-log` keeps the logs local and untracked instead of committing them with the code; if the logs are already tracked, init warns with the remediation steps and leaves the index and `.gitignore` untouched. |
 | `driftseal --version` or `driftseal -V` | Print the installed DriftSeal version. |
 | `driftseal help` | Print CLI usage. |
 

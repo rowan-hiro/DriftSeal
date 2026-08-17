@@ -244,3 +244,92 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     await client.close();
   }
 });
+
+function holdLogLock(root) {
+  const lock = path.join(root, '.intent-log', '.driftseal.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(
+    path.join(lock, 'owner.json'),
+    JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString() })
+  );
+  return lock;
+}
+
+const READ_ONLY_ENV = {
+  ...process.env,
+  _DRIFTSEAL_TEST_READ_ONLY_LOCK_WAIT_MS: '50',
+};
+
+test('MCP status and log surface a degraded read-only snapshot', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-readonly-'));
+  const setup = createApi({ root, isolateStorage: true });
+  setup.begin({ intent: 'MCP round behind a held lock', verify: 'true' });
+  holdLogLock(root);
+  const client = await connect(root, READ_ONLY_ENV);
+
+  try {
+    const status = await call(client, 'driftseal_status');
+    assert.equal(status.isError, undefined);
+    assert.equal(status.structuredContent.readOnly, true);
+    assert.equal(status.structuredContent.intent.status, 'in_progress');
+    assert.equal(status.structuredContent.intent.readOnly, true);
+    assert.match(status.content[0].text, /read-only/);
+
+    const log = await call(client, 'driftseal_log', { last: 10 });
+    assert.equal(log.isError, undefined);
+    assert.equal(log.structuredContent.readOnly, true);
+    assert.equal(log.structuredContent.intents.length, 1);
+    assert.match(log.content[0].text, /read-only/);
+  } finally {
+    await client.close();
+  }
+});
+
+test('MCP status with no open intent still reports a degraded snapshot', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-readonly-empty-'));
+  holdLogLock(root);
+  const client = await connect(root, READ_ONLY_ENV);
+
+  try {
+    const status = await call(client, 'driftseal_status');
+    assert.equal(status.isError, undefined);
+    assert.equal(status.structuredContent.intent, null);
+    assert.equal(status.structuredContent.readOnly, true);
+    assert.match(status.content[0].text, /No DriftSeal intent is in progress/);
+    assert.match(status.content[0].text, /read-only/);
+  } finally {
+    await client.close();
+  }
+});
+
+test('MCP driftseal_log coerces a non-string head to null without a schema error', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-corrupt-head-'));
+  const api = createApi({ root, isolateStorage: true });
+  api.begin({ intent: 'round whose head is corrupted on disk', verify: 'true' });
+  api.end({ status: 'completed', note: 'done', verifyResult: 'ok' });
+
+  const file = path.join(root, '.intent-log', 'events.jsonl');
+  const events = fs
+    .readFileSync(file, 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  events.find((event) => event.type === 'begin').head = {};
+  events.find((event) => event.type === 'end').head = 42;
+  fs.writeFileSync(file, events.map((event) => JSON.stringify(event)).join('\n') + '\n');
+
+  const client = await connect(root);
+  try {
+    const log = await call(client, 'driftseal_log', { last: 10 });
+    assert.equal(log.isError, undefined);
+    assert.equal(log.structuredContent.intents.length, 1);
+    assert.equal(log.structuredContent.intents[0].beginHead, null);
+    assert.equal(log.structuredContent.intents[0].endHead, null);
+
+    const status = await call(client, 'driftseal_status');
+    assert.equal(status.isError, undefined);
+    assert.equal(status.structuredContent.intent, null);
+  } finally {
+    await client.close();
+  }
+});
