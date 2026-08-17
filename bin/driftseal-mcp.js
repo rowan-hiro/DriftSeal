@@ -75,6 +75,8 @@ function registerTools(server, api, z) {
     status: z.enum(END_STATUSES).or(z.literal('in_progress')),
     note: z.string().nullable(),
     verifyResult: z.string().nullable(),
+    beginHead: z.string().nullable(),
+    endHead: z.string().nullable(),
     beganAt: z.string(),
     endedAt: z.string().nullable(),
     reclaimed: z.boolean(),

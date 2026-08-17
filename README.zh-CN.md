@@ -225,7 +225,7 @@ Git 操作完全不计入 intent log，因为 Git 会自行维护历史。查看
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |
-| `driftseal init [--lang <tag>]` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。`--lang` 设置 intent / decision log 的语言（BCP 47，默认 `en`）。 |
+| `driftseal init [--lang <tag>] [--local-log]` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。`--lang` 设置 intent / decision log 的语言（BCP 47，默认 `en`）。`--local-log` 让日志保持本地、不入库，不随代码提交。 |
 | `driftseal --version` 或 `driftseal -V` | 输出当前安装的 DriftSeal 版本。 |
 | `driftseal help` | 查看 CLI 用法。 |
 

@@ -7,7 +7,7 @@ and decision records in `.decision-log/` (override with
 `$DRIFTSEAL_DECISION_HOME`); both are meant to be committed.
 
 <!-- driftseal -->
-<!-- driftseal-version: 11 -->
+<!-- driftseal-version: 12 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: intent write-ahead log
@@ -29,23 +29,31 @@ names, flags, status tokens, and ids in English.
    Git operations never need an intent and are not included in the intent log;
    Git maintains their history. This includes inspection, branch and worktree
    management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.
+   A command whose result can be reconstructed from Git state (for example a
+   patch file regenerated from a commit range, or a scratch harness that
+   re-runs) needs no intent; content that will be committed and cannot be
+   reconstructed (for example a .gitignore edit) does.
    Single-step commands that only build or check work already done, such as
    compiling or running tests, also need no intent.
+   Size an intent to the smallest unit that leaves the tree self-consistent
+   and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
    (`driftseal end -s partial|abandoned -n "<why>"`) and `driftseal begin` a new one.
 3. **Verify, then close**: run the declared verification, then
-   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<verify output>"`.
+   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<what the verification showed, written for the next agent>"`.
    Never report success without closing the intent.
    Before closing a linked intent as `completed` or `partial`, reconcile every
    declared decision with `driftseal decision update <id> --status <status> --note "<why>"`.
    DriftSeal rejects a successful close when a declared decision was not reconciled.
-   Do not edit a decision after reconciling it; run `decision update` again so
-   the final content hash is recorded. Interrupted reconciliation is recovered
+   To revise a decision's prose, edit the file, then run `decision update` to
+   record the new content hash. Do not edit a decision after reconciling it;
+   run `decision update` again so the final content hash is recorded.
+   Interrupted reconciliation is recovered
    by the next linked `decision update` or successful `end`. Closing as
    `failed` or `abandoned` cancels pending recovery for that intent.
    Git operations remain subject to normal authorization and safety requirements
    even though they do not require an intent. Any non-Git content change made while
-   preparing a Git operation does require a new intent.
+   preparing a Git operation does require a new intent, per the step 1 test.
 4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before
    doing anything else. The open intent is the source of truth: resume it when its
    objective still matches the current task; otherwise close it (`partial` or
@@ -64,7 +72,7 @@ Log: `.intent-log/events.jsonl` (override with `$DRIFTSEAL_HOME`); commit it wit
 <!-- /driftseal -->
 
 <!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 11 -->
+<!-- driftseal-decisions-version: 12 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: decision log

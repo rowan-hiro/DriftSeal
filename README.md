@@ -237,7 +237,7 @@ content change starts a new work round.
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | Install the repository-pinned MCP server into Codex, Kimi Code, OpenCode, Claude Code, or Cursor. |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | Install advisory lifecycle reminders into Kimi Code, Claude Code, or Codex. |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | Emit the reminder a lifecycle hook injects; never blocks. |
-| `driftseal init [--lang <tag>]` | Add the adoption protocol to `AGENTS.md` and configure the git merge driver. `--lang` sets the intent/decision log language (BCP 47, default `en`). |
+| `driftseal init [--lang <tag>] [--local-log]` | Add the adoption protocol to `AGENTS.md` and configure the git merge driver. `--lang` sets the intent/decision log language (BCP 47, default `en`). `--local-log` keeps the logs local and untracked instead of committing them with the code. |
 | `driftseal --version` or `driftseal -V` | Print the installed DriftSeal version. |
 | `driftseal help` | Print CLI usage. |
 

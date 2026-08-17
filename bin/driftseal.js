@@ -38,11 +38,13 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const EVENT_SCHEMA_VERSION = 3;
-const PROTOCOL_VERSION = 11;
+const PROTOCOL_VERSION = 12;
 const DEFAULT_LOG_LANGUAGE = 'en';
 const IN_PROGRESS_GIT_PATH = 'driftseal-in-progress.jsonl';
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
+const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repair skipped)';
+const READ_ONLY_LOCK_WAIT_MS = Number(process.env._DRIFTSEAL_TEST_READ_ONLY_LOCK_WAIT_MS) || 1500;
 const MAX_DECISION_SLUG_LENGTH = 180;
 
 class DriftSealError extends Error {
@@ -50,6 +52,44 @@ class DriftSealError extends Error {
     super(message);
     this.name = 'DriftSealError';
   }
+}
+
+/** Thrown by parseArgs on --help/-h; dispatch prints the usage and exits 0. */
+class HelpRequested extends DriftSealError {
+  constructor(usageKey) {
+    super('help requested');
+    this.name = 'HelpRequested';
+    this.usageKey = usageKey || null;
+  }
+}
+
+/** Single source of truth for per-command usage lines. */
+function usageFor(key) {
+  const lines = {
+    begin: 'usage: driftseal begin "<intent>" [--verify "<how to verify>"] [--decision <id>] [--force]',
+    end: 'usage: driftseal end [id] [options]',
+    status: 'usage: driftseal status',
+    log: 'usage: driftseal log [--last N] [--all]',
+    reclaim:
+      'usage: driftseal reclaim [id ...] --reason "<why>" [--older-than <days>] [--force] [--dry-run]',
+    unreclaim: 'usage: driftseal unreclaim <id> --reason "<why>"',
+    absorb: absorbUsage(),
+    init: 'usage: driftseal init [--lang <tag>] [--local-log]',
+    decision: 'usage: driftseal decision add|update|list|show (run: driftseal help)',
+    'decision add':
+      'usage: driftseal decision add "<title>" --context "..." --outcome "..." [options]',
+    'decision update':
+      'usage: driftseal decision update <id> [--status <status>] --note "<what changed or was confirmed>"',
+    'decision list': 'usage: driftseal decision list [--status STATUS] [--last N | --count]',
+    'decision show': 'usage: driftseal decision show <id>',
+    hook: hookUsage(),
+    'hook install': hookUsage(),
+    'hook prompt': hookUsage(),
+    'hook stop': hookUsage(),
+    mcp: mcpInstallUsage(),
+    skill: skillInstallUsage(),
+  };
+  return lines[key] || null;
 }
 
 let activeOutput = null;
@@ -236,7 +276,7 @@ function shouldAttachInProgress(file) {
   return live !== null && sameResolvedPath(file, live);
 }
 
-function readJsonlRecordsFromFile(file, { repairTail = false } = {}) {
+function readJsonlRecordsFromFile(file, { repairTail = false, readOnly = false } = {}) {
   if (!fs.existsSync(file)) return [];
   let content = fs.readFileSync(file, 'utf8');
   const rawLines = content.split('\n');
@@ -245,14 +285,16 @@ function readJsonlRecordsFromFile(file, { repairTail = false } = {}) {
     try {
       JSON.parse(tail);
     } catch {
-      if (!repairTail) fail(`corrupt final log line in ${file}`);
       const validLength = content.lastIndexOf('\n') + 1;
-      const fd = fs.openSync(file, 'r+');
-      try {
-        fs.ftruncateSync(fd, Buffer.byteLength(content.slice(0, validLength), 'utf8'));
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
+      if (!readOnly) {
+        if (!repairTail) fail(`corrupt final log line in ${file}`);
+        const fd = fs.openSync(file, 'r+');
+        try {
+          fs.ftruncateSync(fd, Buffer.byteLength(content.slice(0, validLength), 'utf8'));
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
       }
       content = content.slice(0, validLength);
     }
@@ -279,9 +321,9 @@ function overlayIsCommitted(committedEvents, overlayEvents) {
 }
 
 /** How a parked overlay lines up with the committed log; touches neither file. */
-function planInProgressOverlay(committedEvents, park, { repairTail = false } = {}) {
+function planInProgressOverlay(committedEvents, park, { repairTail = false, readOnly = false } = {}) {
   if (!park || !fs.existsSync(park)) return null;
-  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail });
+  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail, readOnly });
   const overlayEvents = overlayRecords.map((record) => record.event);
   if (overlayEvents.length === 0 || overlayIsCommitted(committedEvents, overlayEvents)) {
     return { park, records: [], mappings: [], alreadyCommitted: true };
@@ -295,24 +337,28 @@ function discardInProgressLog(park) {
   fsyncDirectory(path.dirname(park));
 }
 
-function reconcileInProgressRecords(committedEvents, { repairTail = false, park = inProgressFile() } = {}) {
-  const plan = planInProgressOverlay(committedEvents, park, { repairTail });
+function reconcileInProgressRecords(
+  committedEvents,
+  { repairTail = false, readOnly = false, park = inProgressFile() } = {}
+) {
+  const plan = planInProgressOverlay(committedEvents, park, { repairTail, readOnly });
   if (!plan) return [];
   if (plan.alreadyCommitted) {
-    discardInProgressLog(park);
+    if (!readOnly) discardInProgressLog(park);
     return [];
   }
-  if (plan.mappings.length > 0) writeJsonl(park, plan.records);
+  if (!readOnly && plan.mappings.length > 0) writeJsonl(park, plan.records);
   return plan.records;
 }
 
-function readEvents({ repairTail = false, file = logFile() } = {}) {
-  const records = readJsonlRecordsFromFile(file, { repairTail });
+function readEvents({ repairTail = false, readOnly = false, file = logFile() } = {}) {
+  const records = readJsonlRecordsFromFile(file, { repairTail, readOnly });
   const events = records.map((record) => record.event);
   if (!shouldAttachInProgress(file)) return events;
   return events.concat(
     reconcileInProgressRecords(events, {
       repairTail,
+      readOnly,
       park: worktreeInProgressFile(),
     }).map((record) => record.event)
   );
@@ -599,17 +645,23 @@ function clearStaleLock(lock) {
   return true;
 }
 
-function acquireMutationLock(resource) {
+const LOCK_WAIT_SIGNAL = new Int32Array(new SharedArrayBuffer(4));
+
+function acquireMutationLock(resource, { waitMs = 0, intervalMs = 100 } = {}) {
   ensureDirectoryDurable(resource);
   const lock = path.join(resource, '.driftseal.lock');
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
     try {
       fs.mkdirSync(lock, { mode: 0o700 });
       break;
     } catch (err) {
-      if (err.code !== 'EEXIST' || attempt > 0 || !clearStaleLock(lock)) {
+      if (err.code === 'EEXIST' && clearStaleLock(lock)) continue;
+      if (err.code !== 'EEXIST' || Date.now() >= deadline) {
+        if (waitMs > 0) return null;
         fail(`another DriftSeal mutation is in progress (lock: ${lock})`);
       }
+      Atomics.wait(LOCK_WAIT_SIGNAL, 0, 0, intervalMs);
     }
   }
   let token;
@@ -664,7 +716,7 @@ function acquireMutationLock(resource) {
   };
 }
 
-function withMutationLocks(resources, action) {
+function withMutationLocks(resources, action, { tryWaitMs } = {}) {
   const roots = [
     ...new Set(
       resources.map((resource) => {
@@ -697,8 +749,16 @@ function withMutationLocks(resources, action) {
   let actionFailed = false;
   process.once('exit', bestEffortCleanup);
   try {
-    for (const root of roots) releases.push(acquireMutationLock(root));
-    return action();
+    for (const root of roots) {
+      const release =
+        tryWaitMs === undefined
+          ? acquireMutationLock(root)
+          : acquireMutationLock(root, { waitMs: tryWaitMs });
+      if (!release) return null;
+      releases.push(release);
+    }
+    const data = action();
+    return tryWaitMs === undefined ? data : { acquired: true, data };
   } catch (err) {
     actionFailed = true;
     throw err;
@@ -722,6 +782,7 @@ function fold(events) {
         tsBegin: ev.ts,
         intent: ev.intent,
         verify: ev.verify || null,
+        beginHead: ev.head || null,
         decisions: Array.isArray(ev.decisions) ? ev.decisions : [],
         schemaVersion: ev.schemaVersion || 1,
         decisionPrepares: [],
@@ -731,6 +792,7 @@ function fold(events) {
         tsEnd: null,
         note: null,
         verifyResult: null,
+        endHead: null,
         reclaimed: false,
         reclaimReason: null,
         reclaimedAt: null,
@@ -783,6 +845,7 @@ function fold(events) {
       rec.tsEnd = ev.ts;
       rec.note = ev.note || null;
       rec.verifyResult = ev.verifyResult || null;
+      rec.endHead = ev.head || null;
     } else if (ev.type === 'decision_reconcile_prepare') {
       const rec = records.get(ev.id);
       if (!rec) fail(`decision reconciliation references unknown intent id: ${ev.id}`);
@@ -1160,6 +1223,7 @@ function closeIntentAsEscape(events, record, requestedStatus, note, verifyResult
       status,
       note: note || null,
       verifyResult: verifyResult || null,
+      head: gitCapture(['rev-parse', 'HEAD']),
     })
   );
   return status;
@@ -1184,7 +1248,7 @@ function looksLikeFlag(value, spec) {
 }
 
 /** Minimal flag parser: positionals + --flag value / --flag=value / -x value */
-function parseArgs(argv, spec) {
+function parseArgs(argv, spec, usageKey) {
   const positionals = [];
   const flags = {};
   const assignFlag = (name, value) => {
@@ -1198,6 +1262,7 @@ function parseArgs(argv, spec) {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === '--help' || arg === '-h') throw new HelpRequested(usageKey);
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
       const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
@@ -1238,6 +1303,9 @@ function render(rec) {
   if (rec.verify) lines.push(`  verify: ${rec.verify}`);
   if (rec.verifyResult) lines.push(`  verify-result: ${rec.verifyResult}`);
   if (rec.note) lines.push(`  note: ${rec.note}`);
+  if (rec.beginHead || rec.endHead) {
+    lines.push(`  head: ${rec.beginHead || '-'}..${rec.endHead || '-'}`);
+  }
   lines.push(`  began: ${rec.tsBegin}` + (rec.tsEnd ? `  ended: ${rec.tsEnd}` : ''));
   if (rec.reclaimed) lines.push(`  reclaimed: ${rec.reclaimReason}`);
   return lines.join('\n');
@@ -1253,6 +1321,8 @@ function publicIntent(rec) {
     status: rec.status,
     note: rec.note,
     verifyResult: rec.verifyResult,
+    beginHead: rec.beginHead,
+    endHead: rec.endHead,
     beganAt: rec.tsBegin,
     endedAt: rec.tsEnd,
     reclaimed: rec.reclaimed,
@@ -1278,6 +1348,7 @@ const DECISION_PROTOCOL_MARKER = '<!-- driftseal-decisions -->';
 const DECISION_PROTOCOL_END = '<!-- /driftseal-decisions -->';
 const LOG_LANGUAGE_COMMENT_RE = /^<!-- driftseal-log-language: ([^>\r\n]+) -->\r?$/m;
 const LOG_LANGUAGE_PROSE_RE = /\*\*Log language:\*\* `([^`]+)`/;
+const LOCAL_LOG_COMMENT_RE = /^<!-- driftseal-local-log: true -->\r?$/m;
 const IRREGULAR_GRANDFATHERED_TAGS = new Map([
   ['en-gb-oed', 'en-GB-oed'],
   ['i-ami', 'i-ami'],
@@ -1461,6 +1532,14 @@ function resolveInitLogLanguage(requested, content) {
   return languages.size === 1 ? [...languages][0] : DEFAULT_LOG_LANGUAGE;
 }
 
+function resolveInitLocalLog(requested, content) {
+  if (requested) return true;
+  const intent = extractManagedBlock(content, INTENT_PROTOCOL_MARKER, INTENT_PROTOCOL_END);
+  if (intent && LOCAL_LOG_COMMENT_RE.test(intent)) return true;
+  const decision = extractManagedBlock(content, DECISION_PROTOCOL_MARKER, DECISION_PROTOCOL_END);
+  return Boolean(decision && LOCAL_LOG_COMMENT_RE.test(decision));
+}
+
 function protocolBlockKey(block) {
   return block
     .replace(/^<!-- driftseal-log-language: [^>\r\n]+ -->\r?$/m, '<!-- driftseal-log-language: -->')
@@ -1479,10 +1558,10 @@ function stripDecisionLogLanguage(block, language = DEFAULT_LOG_LANGUAGE) {
     .replace(`\n${decisionLogLanguageParagraph(language)}\n`, '');
 }
 
-function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE) {
+function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   return `${INTENT_PROTOCOL_MARKER}
 <!-- driftseal-version: ${version} -->
-<!-- driftseal-log-language: ${language} -->
+<!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
 
 ## Agent protocol: intent write-ahead log
 
@@ -1501,23 +1580,31 @@ ${intentLogLanguageParagraph(language)}
    Git operations never need an intent and are not included in the intent log;
    Git maintains their history. This includes inspection, branch and worktree
    management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.
+   A command whose result can be reconstructed from Git state (for example a
+   patch file regenerated from a commit range, or a scratch harness that
+   re-runs) needs no intent; content that will be committed and cannot be
+   reconstructed (for example a .gitignore edit) does.
    Single-step commands that only build or check work already done, such as
    compiling or running tests, also need no intent.
+   Size an intent to the smallest unit that leaves the tree self-consistent
+   and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
    (\`driftseal end -s partial|abandoned -n "<why>"\`) and \`driftseal begin\` a new one.
 3. **Verify, then close**: run the declared verification, then
-   \`driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<verify output>"\`.
+   \`driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<what the verification showed, written for the next agent>"\`.
    Never report success without closing the intent.
    Before closing a linked intent as \`completed\` or \`partial\`, reconcile every
    declared decision with \`driftseal decision update <id> --status <status> --note "<why>"\`.
    DriftSeal rejects a successful close when a declared decision was not reconciled.
-   Do not edit a decision after reconciling it; run \`decision update\` again so
-   the final content hash is recorded. Interrupted reconciliation is recovered
+   To revise a decision's prose, edit the file, then run \`decision update\` to
+   record the new content hash. Do not edit a decision after reconciling it;
+   run \`decision update\` again so the final content hash is recorded.
+   Interrupted reconciliation is recovered
    by the next linked \`decision update\` or successful \`end\`. Closing as
    \`failed\` or \`abandoned\` cancels pending recovery for that intent.
    Git operations remain subject to normal authorization and safety requirements
    even though they do not require an intent. Any non-Git content change made while
-   preparing a Git operation does require a new intent.
+   preparing a Git operation does require a new intent, per the step 1 test.
 4. **Re-anchor after context loss**: run \`driftseal status\` and \`driftseal log --last 3\` before
    doing anything else. The open intent is the source of truth: resume it when its
    objective still matches the current task; otherwise close it (\`partial\` or
@@ -1532,12 +1619,42 @@ After a merge collision, run \`driftseal absorb\` rather than editing the log;
 if both sides still have an open intent, add \`--abandon-theirs\` or
 \`--abandon-ours\`.
 
-Log: \`.intent-log/events.jsonl\` (override with \`$DRIFTSEAL_HOME\`); commit it with the code.
+Log: \`.intent-log/events.jsonl\` (override with \`$DRIFTSEAL_HOME\`); ${localLog ? 'this repository keeps the log local and untracked; do not add it to commits.' : 'commit it with the code.'}
 ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version) {
-  const v10 = stripIntentLogLanguage(intentProtocolBlock(version, DEFAULT_LOG_LANGUAGE));
+  const v11 = intentProtocolBlock(version, DEFAULT_LOG_LANGUAGE)
+    .replace(
+      '-r "<what the verification showed, written for the next agent>"',
+      '-r "<verify output>"'
+    )
+    .replace(
+      '\n   A command whose result can be reconstructed from Git state (for example a\n' +
+        '   patch file regenerated from a commit range, or a scratch harness that\n' +
+        '   re-runs) needs no intent; content that will be committed and cannot be\n' +
+        '   reconstructed (for example a .gitignore edit) does.',
+      ''
+    )
+    .replace(
+      '\n   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
+        '   and can be verified on its own.',
+      ''
+    )
+    .replace(
+      '   To revise a decision\'s prose, edit the file, then run `decision update` to\n' +
+        '   record the new content hash. Do not edit a decision after reconciling it;\n' +
+        '   run `decision update` again so the final content hash is recorded.\n' +
+        '   Interrupted reconciliation is recovered',
+      '   Do not edit a decision after reconciling it; run `decision update` again so\n' +
+        '   the final content hash is recorded. Interrupted reconciliation is recovered'
+    )
+    .replace(
+      'preparing a Git operation does require a new intent, per the step 1 test.',
+      'preparing a Git operation does require a new intent.'
+    );
+  if (version >= 11) return v11;
+  const v10 = stripIntentLogLanguage(v11);
   if (version >= 10) return v10;
   const v9 = v10.replace(
       '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
@@ -1618,10 +1735,10 @@ function protocolEol(content, eol) {
   return eol === '\n' ? content : content.replace(/\n/g, eol);
 }
 
-function decisionProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE) {
+function decisionProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   return `${DECISION_PROTOCOL_MARKER}
 <!-- driftseal-decisions-version: ${version} -->
-<!-- driftseal-log-language: ${language} -->
+<!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
 
 ## Agent protocol: decision log
 
@@ -1645,7 +1762,7 @@ When an intent declares an existing decision with \`--decision <id>\`, use
 \`driftseal decision update\` to record its status transition or explicit confirmation.
 After a merge, colliding decision ids are remapped with \`driftseal absorb\`;
 concurrent edits of a shared decision are not auto-merged.
-Commit \`.decision-log/\` with the code.
+${localLog ? 'Keep `.decision-log/` local and untracked; do not add it to commits.' : 'Commit `.decision-log/` with the code.'}
 ${DECISION_PROTOCOL_END}`;
 }
 
@@ -1701,6 +1818,7 @@ Commit \`.decision-log/\` with the code.`;
 }
 
 function previousDecisionProtocolBlock(version) {
+  if (version >= 11) return decisionProtocolBlock(version, DEFAULT_LOG_LANGUAGE);
   const v10 = stripDecisionLogLanguage(decisionProtocolBlock(version, DEFAULT_LOG_LANGUAGE));
   if (version >= 9) return v10;
   const v8 = v10.replace(
@@ -1815,6 +1933,7 @@ function mcpConfigLocation(target, scope, root) {
 
 function parseMcpInstallRequest(argv) {
   const [subcommand, ...rest] = argv;
+  if (subcommand === '--help' || subcommand === '-h') throw new HelpRequested('mcp');
   if (subcommand !== 'install') {
     fail(mcpInstallUsage());
   }
@@ -1823,7 +1942,7 @@ function parseMcpInstallRequest(argv) {
     scope: 'single',
     root: 'single',
     force: 'boolean',
-  });
+  }, 'mcp');
   if (positionals.length > 0 || !flags.target) {
     fail(mcpInstallUsage());
   }
@@ -2039,13 +2158,14 @@ function skillInstallLocation(target, scope, root) {
 
 function parseSkillInstallRequest(argv) {
   const [subcommand, ...rest] = argv;
+  if (subcommand === '--help' || subcommand === '-h') throw new HelpRequested('skill');
   if (subcommand !== 'install') fail(skillInstallUsage());
   const { positionals, flags } = parseArgs(rest, {
     target: 'single',
     scope: 'single',
     root: 'single',
     force: 'boolean',
-  });
+  }, 'skill');
   if (positionals.length > 0 || !flags.target) fail(skillInstallUsage());
 
   const target = flags.target.toLowerCase();
@@ -2212,7 +2332,7 @@ function parseHookInstallRequest(argv) {
     scope: 'single',
     root: 'single',
     force: 'boolean',
-  });
+  }, 'hook install');
   if (positionals.length > 0 || !flags.target) {
     fail(hookUsage());
   }
@@ -2435,7 +2555,7 @@ function hookLogFile() {
 }
 
 /** Advisory reminder text; null when no ancestor has an intent log yet. */
-function hookReminder(event) {
+function hookReminder(event, { readOnly = false } = {}) {
   const file = hookLogFile();
   if (!file) return null;
   if (event === 'prompt') {
@@ -2446,7 +2566,7 @@ function hookReminder(event) {
       'reminder when it does not apply.'
     );
   }
-  const open = openIntent(fold(readEvents({ file })));
+  const open = openIntent(fold(readEvents({ file, readOnly })));
   if (open) {
     return (
       `DriftSeal reminder: intent ${open.id} is still in_progress: "${open.intent}". ` +
@@ -2460,8 +2580,8 @@ function hookReminder(event) {
   );
 }
 
-function runHookReminder(event, argv) {
-  const { positionals, flags } = parseArgs(argv, { format: 'single' });
+function runHookReminder(event, argv, { readOnly = false } = {}) {
+  const { positionals, flags } = parseArgs(argv, { format: 'single' }, `hook ${event}`);
   if (positionals.length > 0) fail(hookUsage());
   const format = (flags.format || 'plain').toLowerCase();
   if (!['plain', 'claude-code'].includes(format)) {
@@ -2471,7 +2591,7 @@ function runHookReminder(event, argv) {
   // Hooks must never block the agent: any failure exits quietly with no output.
   let reminder = null;
   try {
-    reminder = hookReminder(event);
+    reminder = hookReminder(event, { readOnly });
   } catch {
     reminder = null;
   }
@@ -3343,10 +3463,10 @@ const commands = {
       verify: '-v',
       decision: 'multiple',
       force: 'boolean',
-    });
+    }, 'begin');
     const intent = positionals.join(' ').trim();
     if (!intent) {
-      fail('usage: driftseal begin "<intent>" [--verify "<how to verify>"] [--decision <id>] [--force]');
+      fail(usageFor('begin'));
     }
     const requestedDecisions = flags.decision || [];
     const index = requestedDecisions.length > 0 ? decisionIndex() : [];
@@ -3390,6 +3510,7 @@ const commands = {
       intent,
       verify: flags.verify || null,
       decisions,
+      head: gitCapture(['rev-parse', 'HEAD']),
     }));
     const record = fold(events).find((candidate) => candidate.id === id);
     printLine(id);
@@ -3401,9 +3522,9 @@ const commands = {
       status: '-s',
       note: '-n',
       'verify-result': '-r',
-    });
+    }, 'end');
     const status = flags.status || 'completed';
-    if (positionals.length > 1) fail('usage: driftseal end [id] [options]');
+    if (positionals.length > 1) fail(usageFor('end'));
     if (!END_STATUSES.includes(status)) {
       fail(`invalid status "${status}" (expected: ${END_STATUSES.join(', ')})`);
     }
@@ -3474,16 +3595,17 @@ const commands = {
       status,
       note: flags.note || null,
       verifyResult: flags['verify-result'] || null,
+      head: gitCapture(['rev-parse', 'HEAD']),
     }));
     const record = fold(events).find((candidate) => candidate.id === target.id);
     printLine(`${target.id} ${status}`);
     return publicIntent(record);
   },
 
-  status(argv) {
-    const { positionals } = parseArgs(argv, {});
-    if (positionals.length > 0) fail('usage: driftseal status');
-    const open = openIntent(fold(readEvents({ repairTail: true })));
+  status(argv, { readOnly = false } = {}) {
+    const { positionals } = parseArgs(argv, {}, 'status');
+    if (positionals.length > 0) fail(usageFor('status'));
+    const open = openIntent(fold(readEvents({ repairTail: true, readOnly })));
     if (!open) {
       printLine('no intent in progress');
       return null;
@@ -3492,10 +3614,10 @@ const commands = {
     return publicIntent(open);
   },
 
-  log(argv) {
-    const { positionals, flags } = parseArgs(argv, { last: '-n', all: 'boolean' });
-    if (positionals.length > 0) fail('usage: driftseal log [--last N] [--all]');
-    let records = fold(readEvents({ repairTail: true }));
+  log(argv, { readOnly = false } = {}) {
+    const { positionals, flags } = parseArgs(argv, { last: '-n', all: 'boolean' }, 'log');
+    if (positionals.length > 0) fail(usageFor('log'));
+    let records = fold(readEvents({ repairTail: true, readOnly }));
     if (!flags.all) records = records.filter((record) => !record.reclaimed);
     if (flags.last) {
       const n = positiveInteger(flags.last, '--last');
@@ -3515,12 +3637,10 @@ const commands = {
       'older-than': 'single',
       force: 'boolean',
       'dry-run': 'boolean',
-    });
+    }, 'reclaim');
     const reason = flags.reason && flags.reason.trim();
     if (!reason) {
-      fail(
-        'usage: driftseal reclaim [id ...] --reason "<why>" [--older-than <days>] [--force] [--dry-run]'
-      );
+      fail(usageFor('reclaim'));
     }
     let olderThanDays = 7;
     if (flags['older-than'] !== undefined) {
@@ -3590,10 +3710,10 @@ const commands = {
   },
 
   unreclaim(argv) {
-    const { positionals, flags } = parseArgs(argv, { reason: '-r' });
+    const { positionals, flags } = parseArgs(argv, { reason: '-r' }, 'unreclaim');
     const reason = flags.reason && flags.reason.trim();
     if (positionals.length !== 1 || !reason) {
-      fail('usage: driftseal unreclaim <id> --reason "<why>"');
+      fail(usageFor('unreclaim'));
     }
     const events = readEvents({ repairTail: true });
     const record = fold(events).find((candidate) => candidate.id === positionals[0]);
@@ -3614,6 +3734,7 @@ const commands = {
 
   decision(argv) {
     const [subcommand, ...rest] = argv;
+    if (subcommand === '--help' || subcommand === '-h') throw new HelpRequested('decision');
     if (subcommand === 'add') {
       const { positionals, flags } = parseArgs(rest, {
         context: '-c',
@@ -3622,12 +3743,12 @@ const commands = {
         driver: 'multiple',
         option: 'multiple',
         consequence: 'multiple',
-      });
+      }, 'decision add');
       const title = positionals.join(' ').replace(/\s+/g, ' ').trim();
       const context = flags.context && flags.context.trim();
       const outcome = flags.outcome && flags.outcome.trim();
       if (!title || !context || !outcome) {
-        fail('usage: driftseal decision add "<title>" --context "..." --outcome "..." [options]');
+        fail(usageFor('decision add'));
       }
       const status = (flags.status || 'accepted').toLowerCase();
       if (!DECISION_STATUSES.includes(status)) {
@@ -3656,10 +3777,10 @@ const commands = {
     }
 
     if (subcommand === 'update') {
-      const { positionals, flags } = parseArgs(rest, { status: '-s', note: '-n' });
+      const { positionals, flags } = parseArgs(rest, { status: '-s', note: '-n' }, 'decision update');
       const note = flags.note && flags.note.trim();
       if (positionals.length !== 1 || !note) {
-        fail('usage: driftseal decision update <id> [--status <status>] --note "<what changed or was confirmed>"');
+        fail(usageFor('decision update'));
       }
 
       let events = readEvents({ repairTail: true });
@@ -3696,9 +3817,9 @@ const commands = {
     }
 
     if (subcommand === 'list') {
-      const { positionals, flags } = parseArgs(rest, { last: '-n', status: '-s', count: 'boolean' });
+      const { positionals, flags } = parseArgs(rest, { last: '-n', status: '-s', count: 'boolean' }, 'decision list');
       if (positionals.length > 0) {
-        fail('usage: driftseal decision list [--status STATUS] [--last N | --count]');
+        fail(usageFor('decision list'));
       }
       if (flags.count && flags.last) fail('--count cannot be combined with --last');
       const last = flags.last && positiveInteger(flags.last, '--last');
@@ -3733,16 +3854,16 @@ const commands = {
     }
 
     if (subcommand === 'show') {
-      const { positionals } = parseArgs(rest, {});
+      const { positionals } = parseArgs(rest, {}, 'decision show');
       if (positionals.length !== 1 || !/^\d+$/.test(positionals[0])) {
-        fail('usage: driftseal decision show <id>');
+        fail(usageFor('decision show'));
       }
       const decision = findDecision(positionals[0]);
       writeOutput(decision.content);
       return publicDecision(decision, { includeContent: true });
     }
 
-    fail('usage: driftseal decision add|update|list|show (run: driftseal help)');
+    fail(usageFor('decision'));
   },
 
   mcp(argv) {
@@ -3754,13 +3875,14 @@ const commands = {
     return installSkill(parseSkillInstallRequest(argv));
   },
 
-  hook(argv) {
+  hook(argv, { readOnly = false } = {}) {
     const [subcommand, ...rest] = argv;
+    if (subcommand === '--help' || subcommand === '-h') throw new HelpRequested('hook');
     if (subcommand === 'install') {
       return installHook(parseHookInstallRequest(rest));
     }
     if (HOOK_EVENTS.includes(subcommand)) {
-      return runHookReminder(subcommand, rest);
+      return runHookReminder(subcommand, rest, { readOnly });
     }
     fail(hookUsage());
   },
@@ -3772,7 +3894,7 @@ const commands = {
       'abandon-theirs': 'boolean',
       'abandon-ours': 'boolean',
       'dry-run': 'boolean',
-    });
+    }, 'absorb');
     if (flags['abandon-theirs'] && flags['abandon-ours']) {
       fail('cannot combine --abandon-theirs and --abandon-ours');
     }
@@ -3789,15 +3911,16 @@ const commands = {
   },
 
   init(argv) {
-    const { positionals, flags } = parseArgs(argv, { lang: 'single' });
-    if (positionals.length > 0) fail('usage: driftseal init [--lang <tag>]');
+    const { positionals, flags } = parseArgs(argv, { lang: 'single', 'local-log': 'boolean' }, 'init');
+    if (positionals.length > 0) fail(usageFor('init'));
     const target = path.join(process.cwd(), 'AGENTS.md');
     const existed = fs.existsSync(target);
     const current = existed ? fs.readFileSync(target, 'utf8') : '';
     const eol = current.includes('\r\n') ? '\r\n' : '\n';
     const language = resolveInitLogLanguage(flags.lang, current);
-    const intentBlock = protocolEol(intentProtocolBlock(PROTOCOL_VERSION, language), eol);
-    const decisionBlock = protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, language), eol);
+    const localLog = resolveInitLocalLog(flags['local-log'] === true, current);
+    const intentBlock = protocolEol(intentProtocolBlock(PROTOCOL_VERSION, language, localLog), eol);
+    const decisionBlock = protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, language, localLog), eol);
     let updated = current;
     const intent = upgradeManagedBlock({
       content: updated,
@@ -3815,6 +3938,7 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(8), eol),
         protocolEol(previousIntentProtocolBlock(9), eol),
         protocolEol(previousIntentProtocolBlock(10), eol),
+        protocolEol(previousIntentProtocolBlock(11), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -3835,6 +3959,7 @@ const commands = {
         protocolEol(previousDecisionProtocolBlock(8), eol),
         protocolEol(previousDecisionProtocolBlock(9), eol),
         protocolEol(previousDecisionProtocolBlock(10), eol),
+        protocolEol(previousDecisionProtocolBlock(11), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });
@@ -3915,8 +4040,10 @@ usage:
                                  targets: kimi-code (global only), claude-code, codex (prompt only)
   driftseal hook prompt|stop [--format plain|claude-code]
                                  emit the reminder a lifecycle hook injects; never blocks
-  driftseal init [--lang <tag>]        inject protocols into ./AGENTS.md and configure the git merge driver
+  driftseal init [--lang <tag>] [--local-log]
+                                 inject protocols into ./AGENTS.md and configure the git merge driver
                                  --lang sets the intent/decision log language (BCP 47, default: en)
+                                 --local-log keeps the logs local and untracked instead of committing them
   driftseal --version | -V             print the installed DriftSeal version
   driftseal help
 
@@ -3973,18 +4100,51 @@ function dispatch(argv) {
   }
   const fn = commands[cmd];
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
-  const mutates =
-    ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
-    (cmd === 'hook' && rest[0] === 'install') ||
-    (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
-  const readsIntentLog =
-    ['status', 'log'].includes(cmd) || (cmd === 'hook' && ['prompt', 'stop'].includes(rest[0]));
-  if (mutates || readsIntentLog) {
-    const resources = readsIntentLog ? [logDir()] : mutationResources(cmd, rest);
-    const data = withMutationLocks(resources, () => fn(rest));
-    return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0 };
+  try {
+    // Help must print even while another session holds the mutation lock. A bare
+    // --help/-h token that does not follow a flag token is always parsed as a flag
+    // by parseArgs, so this probe can never bypass the lock for a real mutation.
+    const wantsHelp = rest.some(
+      (arg, index) =>
+        (arg === '--help' || arg === '-h') && (index === 0 || !rest[index - 1].startsWith('-'))
+    );
+    if (wantsHelp) return { data: fn(rest), exitCode: 0 };
+    const mutates =
+      ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
+      (cmd === 'hook' && rest[0] === 'install') ||
+      (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
+    const readsIntentLog =
+      ['status', 'log'].includes(cmd) || (cmd === 'hook' && ['prompt', 'stop'].includes(rest[0]));
+    if (mutates || readsIntentLog) {
+      const resources = readsIntentLog ? [logDir()] : mutationResources(cmd, rest);
+      if (readsIntentLog) {
+        const locked = withMutationLocks(resources, () => fn(rest), {
+          tryWaitMs: READ_ONLY_LOCK_WAIT_MS,
+        });
+        if (locked !== null) {
+          return {
+            data: locked.data,
+            exitCode:
+              locked.data && Number.isInteger(locked.data.exitCode) ? locked.data.exitCode : 0,
+          };
+        }
+        // Degrade to a lock-free read-only read rather than blocking re-anchoring.
+        if (cmd === 'hook') printError(READ_ONLY_NOTICE);
+        else printLine(READ_ONLY_NOTICE);
+        const data = fn(rest, { readOnly: true });
+        return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0 };
+      }
+      const data = withMutationLocks(resources, () => fn(rest));
+      return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0 };
+    }
+    return { data: fn(rest), exitCode: 0 };
+  } catch (err) {
+    if (err instanceof HelpRequested) {
+      printLine(usageFor(err.usageKey) || usageFor(cmd) || 'run: driftseal help');
+      return { data: null, exitCode: 0 };
+    }
+    throw err;
   }
-  return { data: fn(rest), exitCode: 0 };
 }
 
 function repositoryRoot(root) {
