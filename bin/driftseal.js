@@ -1921,11 +1921,18 @@ function upgradeManagedBlock({
         `protocol version ${version} requires a newer DriftSeal client (supported: ${PROTOCOL_VERSION})`
       );
     }
-    if (
-      block !== replacement &&
-      !knownManagedBlocks.includes(block) &&
-      protocolBlockKey(block) !== protocolBlockKey(replacement)
-    ) {
+    // A block counts as unmodified when it matches the replacement or a known
+    // released block, either exactly or once log-language declarations are
+    // neutralized. The lenient key comparison covers every candidate, not just
+    // the replacement, so `--lang` still repairs a block whose comment and
+    // prose disagree even when the same run also toggles local log mode.
+    const key = protocolBlockKey(block);
+    const recognized =
+      block === replacement ||
+      knownManagedBlocks.includes(block) ||
+      key === protocolBlockKey(replacement) ||
+      knownManagedBlocks.some((known) => key === protocolBlockKey(known));
+    if (!recognized) {
       fail(`cannot safely upgrade customized protocol block beginning with ${marker}`);
     }
     return {
@@ -2689,8 +2696,38 @@ function gitCapture(args, cwd = process.cwd()) {
   return output === null ? null : output.trim();
 }
 
+/**
+ * Capture a single git value without touching the payload: only the one
+ * newline git appends is removed, so paths that begin or end with whitespace
+ * survive intact (`gitCapture` would trim them away).
+ */
+function gitCaptureLine(args, cwd = process.cwd()) {
+  const output = gitCaptureRaw(args, cwd);
+  if (output === null) return null;
+  return output.endsWith('\n') ? output.slice(0, -1) : output;
+}
+
 function isGitWorkTree(cwd = process.cwd()) {
   return gitCapture(['rev-parse', '--is-inside-work-tree'], cwd) === 'true';
+}
+
+const SHELL_SAFE_RE = /^[A-Za-z0-9@%+=:,./_-]+$/;
+
+/** Quote a value so a POSIX shell passes it to git byte for byte. */
+function shellQuote(value) {
+  if (value.length > 0 && SHELL_SAFE_RE.test(value)) return value;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+const PATHSPEC_MAGIC_RE = /[*?[\\]/;
+
+/**
+ * Render a path as a pathspec that matches only itself. Git reads `*?[\` as
+ * wildcards and a leading `:` as pathspec magic, so such paths get explicit
+ * `:(literal)` magic; ordinary paths stay readable.
+ */
+function gitLiteralPathspec(value) {
+  return PATHSPEC_MAGIC_RE.test(value) || value.startsWith(':') ? `:(literal)${value}` : value;
 }
 
 /**
@@ -2698,25 +2735,34 @@ function isGitWorkTree(cwd = process.cwd()) {
  * but the default log paths are still tracked by git. The log directories are
  * resolved relative to the init cwd (init writes ./AGENTS.md there), so a
  * nested init checks its own logs rather than the repository root's.
+ *
+ * Paths are read from `ls-files -z` because git's human-readable listing
+ * C-quotes non-ASCII names, and the printed remediation is shell-quoted with
+ * literal pathspecs after `--` so it runs as printed for names containing
+ * spaces, wildcards, or a leading dash.
  */
 function warnIfDefaultLogsTracked(cwd = process.cwd()) {
   if (!isGitWorkTree(cwd)) return;
-  const root = gitCapture(['rev-parse', '--show-toplevel'], cwd);
+  const root = gitCaptureLine(['rev-parse', '--show-toplevel'], cwd);
   if (!root) return;
-  const prefix = gitCapture(['rev-parse', '--show-prefix'], cwd);
+  const prefix = gitCaptureLine(['rev-parse', '--show-prefix'], cwd);
   if (prefix === null) return;
   const logDirs = ['.intent-log', '.decision-log'].map((name) => `${prefix}${name}`);
-  const listing = gitCapture(['ls-files', '--', ...logDirs], root);
+  const listing = gitCaptureRaw(
+    ['ls-files', '-z', '--', ...logDirs.map((name) => `:(literal)${name}`)],
+    root
+  );
   if (!listing) return;
-  const files = listing.split('\n');
+  const files = listing.split('\0').filter((file) => file.length > 0);
   const tracked = logDirs.filter((name) =>
     files.some((file) => file === name || file.startsWith(`${name}/`))
   );
   if (tracked.length === 0) return;
+  const remediation = tracked.map((name) => shellQuote(gitLiteralPathspec(name))).join(' ');
   printLine(
     `warning: local log mode is on, but ${tracked.join(' and ')} ` +
       `${tracked.length === 1 ? 'is' : 'are'} still tracked by git; run ` +
-      `\`git rm -r --cached ${tracked.join(' ')}\` from the repository root ` +
+      `\`git rm -r --cached -- ${remediation}\` from the repository root ` +
       'and add them to .gitignore to keep the logs local'
   );
 }

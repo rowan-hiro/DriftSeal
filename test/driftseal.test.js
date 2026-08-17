@@ -101,6 +101,23 @@ function setupGitRepository(prefix = 'driftseal-git-test-') {
   return { cwd, env, git, gitFail, run };
 }
 
+/** The remediation command a warning tells the user to run, verbatim. */
+function remediationCommand(output) {
+  const match = output.match(/run `([^`]+)`/);
+  assert.ok(match, `expected a remediation command in: ${output}`);
+  return match[1];
+}
+
+/** Run a printed remediation exactly as a user would paste it into a shell. */
+function runInShell(repo, command) {
+  return execFileSync('sh', ['-c', command], {
+    cwd: repo.cwd,
+    encoding: 'utf8',
+    env: repo.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
 function readJsonl(file) {
   if (!fs.existsSync(file)) return [];
   return fs
@@ -2157,6 +2174,66 @@ test('init --local-log --lang upgrades a v11 English protocol to local mode in o
   assert.match(upgraded, /local and untracked/);
 });
 
+test('init --local-log --lang recovers a block whose language declarations disagree', () => {
+  // A v12 default block can carry a comment and a prose declaration that name
+  // different languages; --lang is the documented repair, and asking for local
+  // mode in the same run must not turn that into a "customized" rejection.
+  const cases = [
+    { label: 'prose drifted', from: '**Log language:** `en`', to: '**Log language:** `fr`' },
+    {
+      label: 'comment drifted',
+      from: '<!-- driftseal-log-language: en -->',
+      to: '<!-- driftseal-log-language: fr -->',
+    },
+  ];
+
+  for (const { label, from, to } of cases) {
+    const { run, runFail } = setup();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-lang-mismatch-'));
+    const agentsFile = path.join(cwd, 'AGENTS.md');
+
+    run(['init'], { cwd });
+    const mismatched = fs.readFileSync(agentsFile, 'utf8').split(from).join(to);
+    assert.notEqual(mismatched, fs.readFileSync(agentsFile, 'utf8'), `${label}: setup must edit`);
+    fs.writeFileSync(agentsFile, mismatched);
+
+    // Without --lang the mismatch is still an error that points at --lang.
+    assert.match(
+      runFail(['init', '--local-log'], { cwd }).stderr,
+      /declares different log languages in the comment \(\w+\) and prose \(\w+\); pass --lang to set one/,
+      `${label}: the mismatch must still be reported`
+    );
+    assert.equal(fs.readFileSync(agentsFile, 'utf8'), mismatched, `${label}: no partial write`);
+
+    // --lang alone repairs it, and --local-log in the same run must too.
+    run(['init', '--local-log', '--lang', 'zh-CN'], { cwd });
+    const repaired = fs.readFileSync(agentsFile, 'utf8');
+    assert.equal(
+      (repaired.match(/<!-- driftseal-log-language: zh-CN -->/g) || []).length,
+      2,
+      `${label}: both comments must switch`
+    );
+    assert.equal(
+      (repaired.match(/\*\*Log language:\*\* `zh-CN`/g) || []).length,
+      2,
+      `${label}: both prose declarations must switch`
+    );
+    assert.doesNotMatch(
+      repaired,
+      /(driftseal-log-language: |\*\*Log language:\*\* `)(?!zh-CN)/,
+      `${label}: no stale language declaration may survive`
+    );
+    assert.equal(
+      (repaired.match(/<!-- driftseal-local-log: true -->/g) || []).length,
+      2,
+      `${label}: local mode must be enabled in the same run`
+    );
+
+    run(['init'], { cwd }); // the repaired file is a clean default again
+    assert.equal(fs.readFileSync(agentsFile, 'utf8'), repaired, `${label}: re-run must be stable`);
+  }
+});
+
 test('init --local-log --lang still rejects a customized protocol block', () => {
   const { run, runFail } = setup();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-custom-local-lang-'));
@@ -2183,10 +2260,9 @@ test('init --local-log warns when the logs are still tracked by git', () => {
 
   const warned = trackedRepo.run(['init', '--local-log']);
   assert.match(warned, /warning: local log mode is on, but \.intent-log is still tracked by git/);
-  assert.match(warned, /`git rm -r --cached \.intent-log`/); // only the actually-tracked path
+  assert.match(warned, /`git rm -r --cached -- \.intent-log`/); // only the actually-tracked path
   assert.doesNotMatch(warned, /rm -r --cached [^`]*\.decision-log/);
-  const remediation = warned.match(/`git (rm -r --cached [^`]+)`/)[1].split(' ');
-  trackedRepo.git(remediation); // the suggested command must work as printed
+  runInShell(trackedRepo, remediationCommand(warned)); // must work as printed
   assert.equal(trackedRepo.git(['ls-files', '--', '.intent-log']), '');
 
   const bothRepo = setupGitRepository('driftseal-local-both-tracked-');
@@ -2198,8 +2274,8 @@ test('init --local-log warns when the logs are still tracked by git', () => {
 
   const bothWarned = bothRepo.run(['init', '--local-log']);
   assert.match(bothWarned, /\.intent-log and \.decision-log are still tracked by git/);
-  assert.match(bothWarned, /`git rm -r --cached \.intent-log \.decision-log`/);
-  bothRepo.git(bothWarned.match(/`git (rm -r --cached [^`]+)`/)[1].split(' '));
+  assert.match(bothWarned, /`git rm -r --cached -- \.intent-log \.decision-log`/);
+  runInShell(bothRepo, remediationCommand(bothWarned));
   assert.equal(bothRepo.git(['ls-files', '--', '.intent-log', '.decision-log']), '');
 
   const untrackedRepo = setupGitRepository('driftseal-local-untracked-');
@@ -2219,8 +2295,8 @@ test('init --local-log detects tracked logs nested at the init cwd', () => {
 
   const warned = nestedRepo.run(['init', '--local-log'], { cwd: nested });
   assert.match(warned, /packages\/app\/\.intent-log is still tracked by git/);
-  assert.match(warned, /`git rm -r --cached packages\/app\/\.intent-log`/);
-  nestedRepo.git(warned.match(/`git (rm -r --cached [^`]+)`/)[1].split(' '));
+  assert.match(warned, /`git rm -r --cached -- packages\/app\/\.intent-log`/);
+  runInShell(nestedRepo, remediationCommand(warned));
   assert.equal(nestedRepo.git(['ls-files', '--', 'packages/app/.intent-log']), '');
 
   const rootRepo = setupGitRepository('driftseal-local-root-only-');
@@ -2232,6 +2308,70 @@ test('init --local-log detects tracked logs nested at the init cwd', () => {
 
   const quiet = rootRepo.run(['init', '--local-log'], { cwd: subdir });
   assert.doesNotMatch(quiet, /warning: local log mode/); // no false positive from the root log
+});
+
+test('init --local-log warns with a runnable command for awkward nested paths', () => {
+  // git's human-readable ls-files C-quotes non-ASCII names, and an unquoted
+  // suggestion breaks on spaces, wildcards, and leading dashes.
+  const cases = [
+    { label: 'non-ascii', dir: '应用', quoted: "'packages/应用/.intent-log'" },
+    { label: 'whitespace', dir: 'my app', quoted: "'packages/my app/.intent-log'" },
+    { label: 'wildcard', dir: 'app[1]', quoted: "':(literal)packages/app[1]/.intent-log'" },
+    { label: 'option-looking', dir: '--force', quoted: 'packages/--force/.intent-log' },
+  ];
+
+  for (const { label, dir, quoted } of cases) {
+    const repo = setupGitRepository(`driftseal-local-awkward-${label}-`);
+    const nested = path.join(repo.cwd, 'packages', dir);
+    fs.mkdirSync(path.join(nested, '.intent-log'), { recursive: true });
+    fs.writeFileSync(path.join(nested, '.intent-log', 'events.jsonl'), '');
+    repo.git(['add', '--', `:(literal)packages/${dir}/.intent-log`]);
+    const pathspec = `:(literal)packages/${dir}/.intent-log`;
+    assert.notEqual(repo.git(['ls-files', '--', pathspec]), '', `${label}: setup must track`);
+
+    const warned = repo.run(['init', '--local-log'], { cwd: nested });
+    assert.ok(
+      warned.includes(`warning: local log mode is on, but packages/${dir}/.intent-log is still`),
+      `${label}: the tracked path must be reported losslessly, got: ${warned}`
+    );
+    assert.equal(
+      remediationCommand(warned),
+      `git rm -r --cached -- ${quoted}`,
+      `${label}: the remediation must be shell-safe`
+    );
+
+    runInShell(repo, remediationCommand(warned)); // exactly as printed, from the repository root
+    assert.equal(repo.git(['ls-files', '--', pathspec]), '', `${label}: log must become untracked`);
+    assert.doesNotMatch(
+      repo.run(['init', '--local-log'], { cwd: nested }),
+      /warning: local log mode/,
+      `${label}: the warning must clear once the log is untracked`
+    );
+  }
+});
+
+test('init --local-log does not confuse a wildcard path with its literal sibling', () => {
+  const repo = setupGitRepository('driftseal-local-wildcard-sibling-');
+  const wildcard = path.join(repo.cwd, 'packages', 'app[1]');
+  const sibling = path.join(repo.cwd, 'packages', 'app1');
+  for (const dir of [wildcard, sibling]) {
+    fs.mkdirSync(path.join(dir, '.intent-log'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.intent-log', 'events.jsonl'), '');
+  }
+  repo.git(['add', '--', ':(literal)packages/app1/.intent-log']); // only the sibling is tracked
+
+  const quiet = repo.run(['init', '--local-log'], { cwd: wildcard });
+  assert.doesNotMatch(quiet, /warning: local log mode/); // app[1] must not match app1
+
+  repo.git(['add', '--', ':(literal)packages/app[1]/.intent-log']);
+  const warned = repo.run(['init', '--local-log'], { cwd: wildcard });
+  runInShell(repo, remediationCommand(warned));
+  assert.equal(repo.git(['ls-files', '--', ':(literal)packages/app[1]/.intent-log']), '');
+  assert.notEqual(
+    repo.git(['ls-files', '--', ':(literal)packages/app1/.intent-log']),
+    '',
+    'the untouched sibling must stay tracked'
+  );
 });
 
 test('skill install uses each platform project directory and is idempotent', () => {
