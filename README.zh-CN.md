@@ -202,8 +202,10 @@ driftseal end \
 
 Git 操作完全不计入 intent log，因为 Git 会自行维护历史。查看状态、管理 branch
 或 worktree、stage、commit、merge、rebase、cherry-pick、tag 和 push 都不需要
-单独开启 intent，但仍须遵守正常的授权与安全要求。编译、跑测试等单步构建或检查
-也不需要 intent；只要要做非 Git 内容改动，就开启新一轮。
+单独开启 intent，但仍须遵守正常的授权与安全要求。结果能从 Git 状态重建的命令
+——比如从 commit range 重新生成的 patch 文件、可以重跑的临时 harness——也不需要
+intent；会被提交且无法重建的内容改动（比如编辑 `.gitignore`）则需要。编译、跑测试
+等单步构建或检查同样不需要 intent；除此之外的非 Git 内容改动，都要开启新一轮。
 
 ## 命令速览
 
@@ -225,7 +227,7 @@ Git 操作完全不计入 intent log，因为 Git 会自行维护历史。查看
 | `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
 | `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
 | `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |
-| `driftseal init [--lang <tag>] [--local-log]` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。`--lang` 设置 intent / decision log 的语言（BCP 47，默认 `en`）。`--local-log` 让日志保持本地、不入库，不随代码提交。 |
+| `driftseal init [--lang <tag>] [--local-log]` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。`--lang` 设置 intent / decision log 的语言（BCP 47，默认 `en`）。`--local-log` 让日志保持本地、不入库，不随代码提交；如果日志已被 git 跟踪，init 会打印警告和处理建议，但不会改动 index 或 `.gitignore`。 |
 | `driftseal --version` 或 `driftseal -V` | 输出当前安装的 DriftSeal 版本。 |
 | `driftseal help` | 查看 CLI 用法。 |
 

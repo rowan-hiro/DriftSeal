@@ -36,11 +36,11 @@ function setup() {
   return { dir, run, runFail, events };
 }
 
-function spawnResult(args, env) {
+function spawnResult(args, env, cwd = os.tmpdir()) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [DRIFTSEAL, ...args], {
       env,
-      cwd: os.tmpdir(),
+      cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -215,6 +215,53 @@ test('subcommand --help prints usage even while a mutation lock is held', () => 
   assert.equal(fs.existsSync(lock), true);
 });
 
+test('help after a boolean flag prints usage even while a mutation lock is held', () => {
+  const { dir, run } = setup();
+  const lock = path.join(dir, '.driftseal.lock');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(
+    path.join(lock, 'owner.json'),
+    JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString() })
+  );
+  const cases = [
+    [['begin', '--force', '--help'], /usage: driftseal begin/],
+    [['end', '-s', 'completed', '--help'], /usage: driftseal end/],
+    [['decision', 'update', '0001', '--note', 'x', '--help'], /usage: driftseal decision update/],
+  ];
+  for (const [args, pattern] of cases) {
+    assert.match(run(args), pattern, `driftseal ${args.join(' ')}`);
+  }
+  assert.equal(fs.existsSync(lock), true);
+  assert.equal(fs.existsSync(path.join(dir, 'decisions')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'events.jsonl')), false);
+});
+
+test('help after a boolean flag creates no storage directories', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-help-nolock-')));
+  const env = { ...process.env };
+  delete env.DRIFTSEAL_HOME;
+  delete env.DRIFTSEAL_DECISION_HOME;
+  const run = (args) =>
+    execFileSync(process.execPath, [DRIFTSEAL, ...args], {
+      cwd: root,
+      env,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  assert.match(run(['begin', '--force', '--help']), /usage: driftseal begin/);
+  assert.match(run(['end', '-s', 'completed', '--help']), /usage: driftseal end/);
+  assert.match(run(['decision', 'update', '0001', '--note', 'x', '--help']), /usage: driftseal decision update/);
+  assert.equal(fs.existsSync(path.join(root, '.intent-log')), false);
+  assert.equal(fs.existsSync(path.join(root, '.decision-log')), false);
+});
+
+test('a --help token consumed as a flag value is not treated as help', () => {
+  const { runFail } = setup();
+  // parseArgs rejects it: --help is not a valid value for the value-taking --verify.
+  const err = runFail(['begin', '--verify', '--help']);
+  assert.match(err.stderr, /flag --verify requires a value/);
+});
+
 test('begin creates an in_progress intent and prints its id', () => {
   const { run, events } = setup();
   const id = run(['begin', 'add login form', '--verify', 'npm test']).trim();
@@ -361,6 +408,66 @@ test('escape closes record the head in a git repository', () => {
   assert.equal(ends.length, 2);
   assert.ok(ends.every((event) => event.status === 'abandoned'));
   for (const end of ends) assert.equal(end.head, head);
+});
+
+test('absorb --abandon-theirs records the head on the synthesized end event', () => {
+  const { git, run, log } = setupParkedMergeConflict('driftseal-git-park-absorb-head-');
+  const head = git(['rev-parse', 'HEAD']).trim();
+
+  run(['absorb', '--abandon-theirs']);
+  const absorbed = log();
+  const synthesizedEnd = absorbed.find((event) => event.type === 'end');
+  assert.equal(synthesizedEnd.status, 'abandoned');
+  assert.equal(synthesizedEnd.head, head);
+
+  const beginHead = absorbed.find((event) => event.type === 'begin').head;
+  assert.match(run(['log']), new RegExp(`head: ${beginHead}\\.\\.${head}`));
+});
+
+test('log and status treat a non-string head as null instead of crashing', () => {
+  const { dir, run } = setup();
+  const corrupt = [
+    {
+      type: 'begin',
+      id: '2026-01-01-001',
+      ts: '2026-01-01T00:00:00.000Z',
+      intent: 'closed with a corrupt end head',
+      verify: null,
+      decisions: [],
+      head: 'abc123',
+    },
+    {
+      type: 'end',
+      id: '2026-01-01-001',
+      ts: '2026-01-01T01:00:00.000Z',
+      status: 'completed',
+      note: null,
+      verifyResult: null,
+      head: 42,
+    },
+    {
+      type: 'begin',
+      id: '2026-01-01-002',
+      ts: '2026-01-01T02:00:00.000Z',
+      intent: 'open with a corrupt begin head',
+      verify: null,
+      decisions: [],
+      head: {},
+    },
+  ];
+  fs.writeFileSync(
+    path.join(dir, 'events.jsonl'),
+    corrupt.map((event) => JSON.stringify(event)).join('\n') + '\n'
+  );
+
+  const log = run(['log']);
+  assert.match(log, /closed with a corrupt end head/);
+  assert.match(log, /head: abc123\.\.-/);
+  assert.doesNotMatch(log, /head: abc123\.\.42/);
+
+  const status = run(['status']);
+  assert.match(status, /open with a corrupt begin head/);
+  assert.doesNotMatch(status, /head:/);
 });
 
 test('mutation lock rejects active owners and recovers dead owners', () => {
@@ -623,6 +730,92 @@ test('read-only fallback performs no park-file writes or deletes', () => {
   assert.doesNotMatch(clean, /read-only/);
   assert.match(clean, /parked work under lock/);
   assert.equal(fs.existsSync(park), false);
+});
+
+function holdLogLock(logDirPath) {
+  const lock = path.join(logDirPath, '.driftseal.lock');
+  fs.mkdirSync(logDirPath, { recursive: true });
+  fs.mkdirSync(lock);
+  fs.writeFileSync(
+    path.join(lock, 'owner.json'),
+    JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString() })
+  );
+  return lock;
+}
+
+test('read-only status and log survive the park vanishing mid-read', () => {
+  const { cwd, env, run, park } = setupParkedRepository('driftseal-readonly-toctou-');
+  run(['begin', 'parked intent racing a flush']);
+  const lock = holdLogLock(path.join(cwd, '.intent-log'));
+  const raceEnv = {
+    ...env,
+    _DRIFTSEAL_TEST_READ_ONLY_LOCK_WAIT_MS: '50',
+    _DRIFTSEAL_TEST_UNLINK_PARK_BEFORE_READ: '1',
+  };
+
+  const status = run(['status'], { env: raceEnv });
+  assert.match(status, /read-only: another mutation holds the lock/);
+  assert.match(status, /no intent in progress/);
+  assert.equal(fs.existsSync(park), false);
+  assert.equal(fs.existsSync(lock), true);
+
+  const log = run(['log'], { env: raceEnv });
+  assert.match(log, /read-only: another mutation holds the lock/);
+  assert.match(log, /log is empty/);
+});
+
+test('read-only status re-reads the main log when the park flush lands mid-read', () => {
+  const { cwd, env, run, park } = setupParkedRepository('driftseal-readonly-flush-race-');
+  run(['begin', 'flushed during a read-only status']);
+  const logDirPath = path.join(cwd, '.intent-log');
+  fs.mkdirSync(logDirPath, { recursive: true });
+  // The writer's flush appended the park to the main log but has not unlinked it yet.
+  fs.writeFileSync(path.join(logDirPath, 'events.jsonl'), fs.readFileSync(park, 'utf8'));
+  holdLogLock(logDirPath);
+
+  const status = run(['status'], {
+    env: {
+      ...env,
+      _DRIFTSEAL_TEST_READ_ONLY_LOCK_WAIT_MS: '50',
+      _DRIFTSEAL_TEST_UNLINK_PARK_BEFORE_READ: '1',
+    },
+  });
+  assert.match(status, /read-only: another mutation holds the lock/);
+  assert.match(status, /flushed during a read-only status/);
+  assert.match(status, /in_progress/);
+  assert.equal(fs.existsSync(park), false);
+});
+
+test('hook from a subdirectory contends on the root log lock, not a cwd-relative one', async () => {
+  const { cwd, env, run, park } = setupParkedRepository('driftseal-hook-subdir-lock-');
+  run(['begin', 'parked intent behind the root lock']);
+  const parkedLine = fs.readFileSync(park, 'utf8');
+  const nested = path.join(cwd, 'packages', 'app');
+  fs.mkdirSync(nested, { recursive: true });
+  const lock = holdLogLock(path.join(cwd, '.intent-log'));
+
+  const hook = await spawnResult(
+    ['hook', 'stop'],
+    { ...env, _DRIFTSEAL_TEST_READ_ONLY_LOCK_WAIT_MS: '50' },
+    nested
+  );
+  assert.equal(hook.code, 0);
+  assert.match(hook.stdout, /still in_progress/);
+  assert.match(hook.stderr, /read-only: another mutation holds the lock/);
+  assert.equal(fs.existsSync(path.join(nested, '.intent-log')), false);
+  assert.equal(fs.existsSync(lock), true);
+  assert.equal(fs.readFileSync(park, 'utf8'), parkedLine);
+});
+
+test('hook in a repository without any intent log creates no directories', () => {
+  const { cwd, run } = setupGitRepository('driftseal-hook-no-log-');
+  const nested = path.join(cwd, 'sub');
+  fs.mkdirSync(nested);
+
+  assert.equal(run(['hook', 'prompt'], { cwd: nested }), '');
+  assert.equal(run(['hook', 'stop'], { cwd: nested }), '');
+  assert.equal(fs.existsSync(path.join(cwd, '.intent-log')), false);
+  assert.equal(fs.existsSync(path.join(nested, '.intent-log')), false);
 });
 
 test('normal lock release failures make the mutation fail visibly', () => {
@@ -1785,6 +1978,50 @@ test('init --lang sets, preserves, and canonicalizes the log language', () => {
   assert.equal((portuguese.match(/driftseal-log-language: pt-BR/g) || []).length, 2);
 });
 
+test('init upgrades a v11 protocol block written in a non-English log language', () => {
+  const { run } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-lang-upgrade-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+
+  run(['init', '--lang', 'zh-CN'], { cwd });
+  const current = fs.readFileSync(agentsFile, 'utf8');
+  const versionElevenChinese = current
+    .replace('driftseal-version: 12', 'driftseal-version: 11')
+    .replace('driftseal-decisions-version: 12', 'driftseal-decisions-version: 11')
+    .replace(
+      '-r "<what the verification showed, written for the next agent>"',
+      '-r "<verify output>"'
+    )
+    .replace(
+      '\n   A command whose result can be reconstructed from Git state (for example a\n' +
+        '   patch file regenerated from a commit range, or a scratch harness that\n' +
+        '   re-runs) needs no intent; content that will be committed and cannot be\n' +
+        '   reconstructed (for example a .gitignore edit) does.',
+      ''
+    )
+    .replace(
+      '\n   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
+        '   and can be verified on its own.',
+      ''
+    )
+    .replace(
+      '   To revise a decision\'s prose, edit the file, then run `decision update` to\n' +
+        '   record the new content hash. Do not edit a decision after reconciling it;\n' +
+        '   run `decision update` again so the final content hash is recorded.\n' +
+        '   Interrupted reconciliation is recovered',
+      '   Do not edit a decision after reconciling it; run `decision update` again so\n' +
+        '   the final content hash is recorded. Interrupted reconciliation is recovered'
+    )
+    .replace(
+      'preparing a Git operation does require a new intent, per the step 1 test.',
+      'preparing a Git operation does require a new intent.'
+    );
+  fs.writeFileSync(agentsFile, versionElevenChinese);
+
+  run(['init'], { cwd }); // plain init upgrades in place, keeping the language
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), current);
+});
+
 test('init --local-log persists the local, untracked log mode', () => {
   const { run, runFail } = setup();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-local-log-'));
@@ -1822,6 +2059,56 @@ test('init --local-log persists the local, untracked log mode', () => {
   assert.doesNotMatch(committed, /driftseal-local-log/);
   assert.match(committed, /commit it with the code\./);
   assert.match(committed, /Commit `\.decision-log\/` with the code\./);
+});
+
+test('init --local-log enables local mode on an already-current repository', () => {
+  const { run, runFail } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-local-enable-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+
+  run(['init'], { cwd });
+  const committed = fs.readFileSync(agentsFile, 'utf8');
+  assert.doesNotMatch(committed, /driftseal-local-log/);
+
+  run(['init', '--local-log'], { cwd }); // same-version default -> local is an upgrade, not a customization
+  const local = fs.readFileSync(agentsFile, 'utf8');
+  assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
+  assert.match(local, /driftseal-version: 12/);
+  assert.match(local, /keeps the log local and untracked; do not add it to commits\./);
+  assert.match(local, /Keep `\.decision-log\/` local and untracked; do not add it to commits\./);
+
+  run(['init'], { cwd }); // plain re-run preserves the persisted choice
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), local);
+
+  const disabled = local.replace(/^<!-- driftseal-local-log: true -->\n/gm, '');
+  fs.writeFileSync(agentsFile, disabled);
+  assert.match(
+    runFail(['init'], { cwd }).stderr,
+    /cannot safely upgrade customized protocol block/
+  );
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), disabled);
+});
+
+test('init --local-log warns when the logs are still tracked by git', () => {
+  const trackedRepo = setupGitRepository('driftseal-local-tracked-');
+  fs.mkdirSync(path.join(trackedRepo.cwd, '.intent-log'), { recursive: true });
+  fs.writeFileSync(path.join(trackedRepo.cwd, '.intent-log', 'events.jsonl'), '');
+  trackedRepo.git(['add', '.intent-log']);
+
+  const warned = trackedRepo.run(['init', '--local-log']);
+  assert.match(warned, /warning: local log mode is on, but \.intent-log is still tracked by git/);
+  assert.match(warned, /git rm -r --cached \.intent-log \.decision-log/);
+  assert.match(
+    trackedRepo.git(['ls-files', '--', '.intent-log']),
+    /\.intent-log\/events\.jsonl/
+  ); // warning only: the index is untouched
+
+  const untrackedRepo = setupGitRepository('driftseal-local-untracked-');
+  fs.mkdirSync(path.join(untrackedRepo.cwd, '.intent-log'), { recursive: true });
+  fs.writeFileSync(path.join(untrackedRepo.cwd, '.intent-log', 'events.jsonl'), '');
+
+  const quiet = untrackedRepo.run(['init', '--local-log']);
+  assert.doesNotMatch(quiet, /warning: local log mode/);
 });
 
 test('skill install uses each platform project directory and is idempotent', () => {

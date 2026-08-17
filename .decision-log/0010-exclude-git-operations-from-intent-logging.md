@@ -4,7 +4,7 @@ Date: 2026-08-13
 
 ## Status
 
-Accepted
+Superseded
 
 ## Context and Problem Statement
 
@@ -31,3 +31,12 @@ Treat every Git operation as outside DriftSeal intent scope. Do not begin an int
 * Git-only work does not create intent records
 * Git history and reflogs remain the evidence for repository operations
 * Authorization and destructive-action safeguards remain unchanged
+
+## Decision History
+
+<!-- driftseal-reconciliation: 9ab22e11-048b-4a31-a467-b552e92116c6 -->
+### 2026-08-17T13:56:09.392Z — Intent `2026-08-17-008`
+
+Status: Accepted → Superseded
+
+Superseded by 0014: the reconstructability test in protocol v12 step 1 resolves Git-produced artifacts; the blanket any-non-Git-change wording no longer applies.

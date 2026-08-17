@@ -137,6 +137,11 @@ function decisionDir() {
   return process.env.DRIFTSEAL_DECISION_HOME || path.join(process.cwd(), '.decision-log');
 }
 
+// A corrupt log line must not wedge reads; a non-string head degrades to null.
+function normalizeHead(value) {
+  return typeof value === 'string' ? value : null;
+}
+
 function normalizeEvent(event, line) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) {
     fail(`invalid event object on log line ${line}`);
@@ -167,12 +172,12 @@ function normalizeEvent(event, line) {
     if (new Set(decisions).size !== decisions.length) {
       fail(`duplicate linked decision on log line ${line}`);
     }
-    return { ...event, decisions };
+    return { ...event, decisions, head: normalizeHead(event.head) };
   }
 
   if (event.type === 'end') {
     if (!END_STATUSES.includes(event.status)) fail(`invalid end event on log line ${line}`);
-    return event;
+    return { ...event, head: normalizeHead(event.head) };
   }
 
   if (event.type === 'reclaim' || event.type === 'unreclaim') {
@@ -278,6 +283,15 @@ function shouldAttachInProgress(file) {
 
 function readJsonlRecordsFromFile(file, { repairTail = false, readOnly = false } = {}) {
   if (!fs.existsSync(file)) return [];
+  if (
+    readOnly &&
+    process.env._DRIFTSEAL_TEST_UNLINK_PARK_BEFORE_READ === '1' &&
+    path.basename(file) === IN_PROGRESS_GIT_PATH
+  ) {
+    // Simulate a writer flushing and unlinking the park between the existence
+    // check and the read; the next attempt sees the park as absent.
+    fs.unlinkSync(file);
+  }
   let content = fs.readFileSync(file, 'utf8');
   const rawLines = content.split('\n');
   if (content.length > 0 && !content.endsWith('\n')) {
@@ -351,7 +365,9 @@ function reconcileInProgressRecords(
   return plan.records;
 }
 
-function readEvents({ repairTail = false, readOnly = false, file = logFile() } = {}) {
+const READ_ONLY_SNAPSHOT_ATTEMPTS = 3;
+
+function readEventsSnapshot(file, { repairTail = false, readOnly = false } = {}) {
   const records = readJsonlRecordsFromFile(file, { repairTail, readOnly });
   const events = records.map((record) => record.event);
   if (!shouldAttachInProgress(file)) return events;
@@ -362,6 +378,26 @@ function readEvents({ repairTail = false, readOnly = false, file = logFile() } =
       park: worktreeInProgressFile(),
     }).map((record) => record.event)
   );
+}
+
+function readEvents({ repairTail = false, readOnly = false, file = logFile() } = {}) {
+  if (!readOnly) return readEventsSnapshot(file, { repairTail, readOnly });
+  // Lock-free reads race with a writer flushing the park: the park can pass the
+  // existence check and be unlinked before the read. Retry the whole main+park
+  // snapshot, because the flush may have appended the park to the main log.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return readEventsSnapshot(file, { repairTail, readOnly });
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      if (attempt >= READ_ONLY_SNAPSHOT_ATTEMPTS) {
+        // The park keeps vanishing; treat it as absent and read the main log only.
+        return readJsonlRecordsFromFile(file, { repairTail, readOnly }).map(
+          (record) => record.event
+        );
+      }
+    }
+  }
 }
 
 function parseJsonlRecords(content, source = 'log') {
@@ -1623,8 +1659,8 @@ Log: \`.intent-log/events.jsonl\` (override with \`$DRIFTSEAL_HOME\`); ${localLo
 ${INTENT_PROTOCOL_END}`;
 }
 
-function previousIntentProtocolBlock(version) {
-  const v11 = intentProtocolBlock(version, DEFAULT_LOG_LANGUAGE)
+function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE) {
+  const v11 = intentProtocolBlock(version, language)
     .replace(
       '-r "<what the verification showed, written for the next agent>"',
       '-r "<verify output>"'
@@ -1654,7 +1690,7 @@ function previousIntentProtocolBlock(version) {
       'preparing a Git operation does require a new intent.'
     );
   if (version >= 11) return v11;
-  const v10 = stripIntentLogLanguage(v11);
+  const v10 = stripIntentLogLanguage(v11, language);
   if (version >= 10) return v10;
   const v9 = v10.replace(
       '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
@@ -1817,9 +1853,9 @@ When an intent declares an existing decision with \`--decision <id>\`, use
 Commit \`.decision-log/\` with the code.`;
 }
 
-function previousDecisionProtocolBlock(version) {
-  if (version >= 11) return decisionProtocolBlock(version, DEFAULT_LOG_LANGUAGE);
-  const v10 = stripDecisionLogLanguage(decisionProtocolBlock(version, DEFAULT_LOG_LANGUAGE));
+function previousDecisionProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE) {
+  if (version >= 11) return decisionProtocolBlock(version, language);
+  const v10 = stripDecisionLogLanguage(decisionProtocolBlock(version, language), language);
   if (version >= 9) return v10;
   const v8 = v10.replace(
     '\nAfter a merge, colliding decision ids are remapped with `driftseal absorb`;\n' +
@@ -2634,6 +2670,28 @@ function isGitWorkTree(cwd = process.cwd()) {
   return gitCapture(['rev-parse', '--is-inside-work-tree'], cwd) === 'true';
 }
 
+/**
+ * Warn (without mutating the index or .gitignore) when local log mode is on
+ * but the default log paths are still tracked by git.
+ */
+function warnIfDefaultLogsTracked(cwd = process.cwd()) {
+  if (!isGitWorkTree(cwd)) return;
+  const root = gitCapture(['rev-parse', '--show-toplevel'], cwd);
+  if (!root) return;
+  const listing = gitCapture(['ls-files', '--', '.intent-log', '.decision-log'], root);
+  if (!listing) return;
+  const files = listing.split('\n');
+  const tracked = ['.intent-log', '.decision-log'].filter((name) =>
+    files.some((file) => file === name || file.startsWith(`${name}/`))
+  );
+  if (tracked.length === 0) return;
+  printLine(
+    `warning: local log mode is on, but ${tracked.join(' and ')} ` +
+      `${tracked.length === 1 ? 'is' : 'are'} still tracked by git; run ` +
+      '`git rm -r --cached .intent-log .decision-log` and add them to .gitignore to keep the logs local'
+  );
+}
+
 function gitOtherHead(cwd = process.cwd()) {
   return (
     gitCapture(['rev-parse', '--verify', 'MERGE_HEAD'], cwd) ||
@@ -3055,6 +3113,7 @@ function abandonOpenIntent(records, targetId, side) {
       status: 'abandoned',
       note: `abandoned during absorb (--abandon-${side})`,
       verifyResult: null,
+      head: gitCapture(['rev-parse', 'HEAD']),
     },
   });
   return targetId;
@@ -3929,6 +3988,7 @@ const commands = {
       versionPattern: /^<!-- driftseal-version: (\d+) -->\r?$/m,
       replacement: intentBlock,
       knownManagedBlocks: [
+        protocolEol(intentProtocolBlock(PROTOCOL_VERSION, language), eol),
         protocolEol(previousIntentProtocolBlock(2), eol),
         protocolEol(previousIntentProtocolBlock(3), eol),
         protocolEol(previousIntentProtocolBlock(4), eol),
@@ -3938,7 +3998,7 @@ const commands = {
         protocolEol(previousIntentProtocolBlock(8), eol),
         protocolEol(previousIntentProtocolBlock(9), eol),
         protocolEol(previousIntentProtocolBlock(10), eol),
-        protocolEol(previousIntentProtocolBlock(11), eol),
+        protocolEol(previousIntentProtocolBlock(11, language), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyIntentProtocolBlock(), eol)],
     });
@@ -3950,6 +4010,7 @@ const commands = {
       versionPattern: /^<!-- driftseal-decisions-version: (\d+) -->\r?$/m,
       replacement: decisionBlock,
       knownManagedBlocks: [
+        protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, language), eol),
         protocolEol(previousDecisionProtocolBlock(2), eol),
         protocolEol(previousDecisionProtocolBlock(3), eol),
         protocolEol(previousDecisionProtocolBlock(4), eol),
@@ -3959,7 +4020,7 @@ const commands = {
         protocolEol(previousDecisionProtocolBlock(8), eol),
         protocolEol(previousDecisionProtocolBlock(9), eol),
         protocolEol(previousDecisionProtocolBlock(10), eol),
-        protocolEol(previousDecisionProtocolBlock(11), eol),
+        protocolEol(previousDecisionProtocolBlock(11, language), eol),
       ],
       knownLegacyBlocks: [protocolEol(legacyDecisionProtocolBlock(), eol)],
     });
@@ -3986,6 +4047,8 @@ const commands = {
     } catch (err) {
       printLine(`warning: could not configure git merge driver: ${err && err.message ? err.message : err}`);
     }
+
+    if (localLog) warnIfDefaultLogsTracked();
 
     if (updated === current && !attributes.changed && !driver.changed) {
       printLine('AGENTS.md already contains the DriftSeal protocols; nothing to do');
@@ -4073,6 +4136,43 @@ function requestedEndStatus(argv) {
   return 'completed';
 }
 
+/**
+ * Flags that consume the following token as their value, keyed by command or
+ * subcommand, mirroring the value-taking entries of each parseArgs spec.
+ */
+const VALUE_TAKING_FLAGS = {
+  begin: ['--verify', '-v', '--decision'],
+  end: ['--status', '-s', '--note', '-n', '--verify-result', '-r'],
+  log: ['--last', '-n'],
+  reclaim: ['--reason', '-r', '--older-than'],
+  unreclaim: ['--reason', '-r'],
+  absorb: ['--decisions'],
+  init: ['--lang'],
+  'decision add': ['--context', '-c', '--outcome', '-o', '--status', '-s', '--driver', '--option', '--consequence'],
+  'decision update': ['--status', '-s', '--note', '-n'],
+  'decision list': ['--last', '-n', '--status', '-s'],
+  'hook install': ['--target', '--scope', '--root'],
+  'hook prompt': ['--format'],
+  'hook stop': ['--format'],
+  'mcp install': ['--target', '--scope', '--root'],
+  'skill install': ['--target', '--scope', '--root'],
+};
+
+/**
+ * Pre-lock help probe. A bare --help/-h token is help unless it is the value of
+ * a known value-taking flag given without `=`, so a real mutation whose flag
+ * value happens to be --help still enters the locked path and fails in parseArgs.
+ */
+function wantsHelpBeforeLock(cmd, rest) {
+  const key = Object.hasOwn(VALUE_TAKING_FLAGS, `${cmd} ${rest[0]}`) ? `${cmd} ${rest[0]}` : cmd;
+  const valueFlags = VALUE_TAKING_FLAGS[key] || [];
+  return rest.some((arg, index) => {
+    if (arg !== '--help' && arg !== '-h') return false;
+    const previous = index > 0 ? rest[index - 1] : null;
+    return previous === null || !valueFlags.includes(previous);
+  });
+}
+
 function mutationResources(cmd, argv) {
   if (cmd === 'skill') return [parseSkillInstallRequest(argv).skillsDir];
   if (cmd === 'mcp') return [parseMcpInstallRequest(argv).configDir];
@@ -4101,14 +4201,10 @@ function dispatch(argv) {
   const fn = commands[cmd];
   if (!fn) fail(`unknown command: ${cmd} (run: driftseal help)`);
   try {
-    // Help must print even while another session holds the mutation lock. A bare
-    // --help/-h token that does not follow a flag token is always parsed as a flag
-    // by parseArgs, so this probe can never bypass the lock for a real mutation.
-    const wantsHelp = rest.some(
-      (arg, index) =>
-        (arg === '--help' || arg === '-h') && (index === 0 || !rest[index - 1].startsWith('-'))
-    );
-    if (wantsHelp) return { data: fn(rest), exitCode: 0 };
+    // Help must print even while another session holds the mutation lock. The
+    // probe is spec-aware so it never bypasses the lock for a real mutation: a
+    // --help token consumed as a flag value is left for parseArgs to reject.
+    if (wantsHelpBeforeLock(cmd, rest)) return { data: fn(rest), exitCode: 0 };
     const mutates =
       ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
       (cmd === 'hook' && rest[0] === 'install') ||
@@ -4116,8 +4212,20 @@ function dispatch(argv) {
     const readsIntentLog =
       ['status', 'log'].includes(cmd) || (cmd === 'hook' && ['prompt', 'stop'].includes(rest[0]));
     if (mutates || readsIntentLog) {
-      const resources = readsIntentLog ? [logDir()] : mutationResources(cmd, rest);
       if (readsIntentLog) {
+        let resources;
+        if (cmd === 'hook') {
+          // Hooks read the nearest ancestor log, not the cwd-relative one: lock
+          // the directory of the file the hook will actually read (the park a
+          // writer flushes under that same lock lives in the repo's Git metadata).
+          // With no ancestor log the hook prints nothing, so skip locking — this
+          // also avoids creating a spurious <cwd>/.intent-log.
+          const hookFile = hookLogFile();
+          if (!hookFile) return { data: fn(rest), exitCode: 0 };
+          resources = [path.dirname(hookFile)];
+        } else {
+          resources = [logDir()];
+        }
         const locked = withMutationLocks(resources, () => fn(rest), {
           tryWaitMs: READ_ONLY_LOCK_WAIT_MS,
         });
@@ -4132,8 +4240,9 @@ function dispatch(argv) {
         if (cmd === 'hook') printError(READ_ONLY_NOTICE);
         else printLine(READ_ONLY_NOTICE);
         const data = fn(rest, { readOnly: true });
-        return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0 };
+        return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0, readOnly: true };
       }
+      const resources = mutationResources(cmd, rest);
       const data = withMutationLocks(resources, () => fn(rest));
       return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0 };
     }
@@ -4172,7 +4281,7 @@ function runCommand(argv, { root = process.cwd(), isolateStorage = false, captur
   const previousCwd = process.cwd();
   const previousIntentHome = process.env.DRIFTSEAL_HOME;
   const previousDecisionHome = process.env.DRIFTSEAL_DECISION_HOME;
-  const output = { stdout: '', stderr: '', data: null, exitCode: 0 };
+  const output = { stdout: '', stderr: '', data: null, exitCode: 0, readOnly: false };
   const previousOutput = activeOutput;
 
   try {
@@ -4185,6 +4294,7 @@ function runCommand(argv, { root = process.cwd(), isolateStorage = false, captur
     const result = dispatch(argv);
     output.data = result.data;
     output.exitCode = result.exitCode;
+    output.readOnly = result.readOnly === true;
     return output;
   } catch (err) {
     if (capture) {
@@ -4208,9 +4318,18 @@ function appendFlag(argv, flag, value) {
 
 function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
   const fixedRoot = repositoryRoot(root);
-  const call = (argv) => runCommand(argv, { root: fixedRoot, isolateStorage, capture: true }).data;
+  let lastReadOnly = false;
+  const call = (argv) => {
+    const output = runCommand(argv, { root: fixedRoot, isolateStorage, capture: true });
+    lastReadOnly = output.readOnly;
+    return output.data;
+  };
   return Object.freeze({
     root: fixedRoot,
+    /** True when the most recent call fell back to a lock-free read-only snapshot. */
+    get readOnly() {
+      return lastReadOnly;
+    },
     status() {
       return call(['status']);
     },
