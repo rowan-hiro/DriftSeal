@@ -1,6 +1,6 @@
 {
   "name": "driftseal",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Seal intent, verification, and decisions into an auditable workflow for agentic coding",
   "keywords": [
     "driftseal",
