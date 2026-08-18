@@ -2202,8 +2202,8 @@ function skillInstallLocation(target, scope, root) {
       global: path.join(home, '.agents', 'skills'),
     },
     'kimi-code': {
-      project: path.join(root, '.kimi', 'skills'),
-      global: path.join(home, '.kimi', 'skills'),
+      project: path.join(root, '.kimi-code', 'skills'),
+      global: path.join(home, '.kimi-code', 'skills'),
     },
     opencode: {
       project: path.join(root, '.opencode', 'skills'),

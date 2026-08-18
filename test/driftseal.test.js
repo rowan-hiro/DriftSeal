@@ -2389,7 +2389,7 @@ test('skill install uses each platform project directory and is idempotent', () 
   );
   const cases = [
     { target: 'codex', label: 'Codex', relative: path.join('.agents', 'skills') },
-    { target: 'kimi-code', label: 'Kimi Code', relative: path.join('.kimi', 'skills') },
+    { target: 'kimi-code', label: 'Kimi Code', relative: path.join('.kimi-code', 'skills') },
     { target: 'opencode', label: 'OpenCode', relative: path.join('.opencode', 'skills') },
     { target: 'claude-code', label: 'Claude Code', relative: path.join('.claude', 'skills') },
     { target: 'cursor', label: 'Cursor', relative: path.join('.cursor', 'skills') },
@@ -2449,7 +2449,7 @@ test('skill install uses each platform global directory', () => {
   };
   const cases = [
     { target: 'codex', relative: path.join('.agents', 'skills') },
-    { target: 'kimi-code', relative: path.join('.kimi', 'skills') },
+    { target: 'kimi-code', relative: path.join('.kimi-code', 'skills') },
     { target: 'opencode', relative: path.join('.config', 'opencode', 'skills') },
     { target: 'claude-code', relative: path.join('.claude', 'skills') },
     { target: 'cursor', relative: path.join('.cursor', 'skills') },

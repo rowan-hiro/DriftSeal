@@ -65,7 +65,7 @@ driftseal skill install --target kimi-code --scope global
 | Target | 项目级 scope | 全局 scope |
 | --- | --- | --- |
 | `codex` | `.agents/skills/use-driftseal` | `~/.agents/skills/use-driftseal` |
-| `kimi-code` | `.kimi/skills/use-driftseal` | `~/.kimi/skills/use-driftseal` |
+| `kimi-code` | `.kimi-code/skills/use-driftseal` | `~/.kimi-code/skills/use-driftseal` |
 | `opencode` | `.opencode/skills/use-driftseal` | `~/.config/opencode/skills/use-driftseal` |
 | `claude-code` | `.claude/skills/use-driftseal` | `~/.claude/skills/use-driftseal` |
 | `cursor` | `.cursor/skills/use-driftseal` | `~/.cursor/skills/use-driftseal` |
