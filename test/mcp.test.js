@@ -2,12 +2,13 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
 const MCP_SERVER = path.join(__dirname, '..', 'bin', 'driftseal-mcp.js');
-const { createApi } = require('../bin/driftseal.js');
+const { createApi, runCommand } = require('../bin/driftseal.js');
 const { parseArguments } = require('../bin/driftseal-mcp.js');
 
 async function connect(root, env = process.env) {
@@ -43,7 +44,7 @@ test('programmatic API returns structured records without changing its fixed roo
   });
   assert.equal(opened.status, 'in_progress');
   assert.equal(opened.intent, 'exercise structured API');
-  const verification = api.verify();
+  const verification = api.verify({ allowTrackedCommand: true });
   assert.equal(verification.verification.passed, true);
   const closed = api.end({ status: 'completed', note: 'done', verifyResult: 'passed' });
   assert.equal(closed.status, 'completed');
@@ -51,6 +52,56 @@ test('programmatic API returns structured records without changing its fixed roo
   assert.equal(fs.existsSync(path.join(root, '.intent-log', 'events.jsonl')), true);
   assert.equal(fs.existsSync(path.join(other, '.intent-log', 'events.jsonl')), false);
   assert.throws(() => createApi({ root: path.join(root, 'missing') }), /does not exist/);
+});
+
+test('captured verification output is bounded without changing complete evidence', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-api-bounded-output-'));
+  const api = createApi({ root, isolateStorage: true });
+  const stdout =
+    'stdout-head\n' +
+    'x'.repeat(1024 * 1024) +
+    'stdout-middle-sentinel' +
+    'y'.repeat(1024 * 1024) +
+    '\nstdout-tail\n';
+  const stderr =
+    'stderr-head\n' +
+    'a'.repeat(1024 * 1024) +
+    'stderr-middle-sentinel' +
+    'b'.repeat(1024 * 1024) +
+    '\nstderr-tail\n';
+  const script =
+    "process.stdout.write('stdout-head\\n'+'x'.repeat(1048576)+'stdout-'+'middle-sentinel'" +
+    "+'y'.repeat(1048576)+'\\nstdout-tail\\n')" +
+    ";process.stderr.write('stderr-head\\n'+'a'.repeat(1048576)+'stderr-'+'middle-sentinel'" +
+    "+'b'.repeat(1048576)+'\\nstderr-tail\\n')";
+
+  api.begin({
+    intent: 'verify bounded API capture',
+    acceptance: ['complete output evidence survives bounded replay capture'],
+    verify: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+  });
+  const output = runCommand(['verify', '--allow-tracked-command'], {
+    root,
+    isolateStorage: true,
+    capture: true,
+  });
+
+  assert.ok(output.stdout.length < 100 * 1024);
+  assert.ok(output.stderr.length < 100 * 1024);
+  assert.match(output.stdout, /stdout-head/);
+  assert.match(output.stdout, /stdout-tail/);
+  assert.doesNotMatch(output.stdout, /stdout-middle-sentinel/);
+  assert.match(output.stderr, /stderr-head/);
+  assert.match(output.stderr, /stderr-tail/);
+  assert.doesNotMatch(output.stderr, /stderr-middle-sentinel/);
+  assert.match(output.stdout, /captured output truncated/);
+  assert.match(output.stderr, /captured output truncated/);
+  assert.equal(output.data.verification.stdoutBytes, Buffer.byteLength(stdout));
+  assert.equal(output.data.verification.stderrBytes, Buffer.byteLength(stderr));
+  assert.equal(
+    output.data.verification.outputHash,
+    crypto.createHash('sha256').update(stdout).update('\0').update(stderr).digest('hex')
+  );
 });
 
 test('MCP startup arguments fix one repository root', () => {
@@ -184,7 +235,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     });
     assert.equal(updated.structuredContent.decision.status, 'accepted');
 
-    const verified = await call(client, 'driftseal_verify');
+    const verified = await call(client, 'driftseal_verify', { allowTrackedCommand: true });
     assert.equal(verified.isError, undefined);
     assert.equal(verified.structuredContent.verification.passed, true);
 
@@ -360,7 +411,7 @@ test('MCP status accepts a verification record with a null exit code', async () 
     acceptance: ['the verifier result remains inspectable'],
     verify: 'true',
   });
-  api.verify();
+  api.verify({ allowTrackedCommand: true });
 
   const file = path.join(root, '.intent-log', 'events.jsonl');
   const events = fs

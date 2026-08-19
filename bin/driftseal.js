@@ -50,6 +50,8 @@ const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repa
 const READ_ONLY_LOCK_WAIT_MS = Number(process.env._DRIFTSEAL_TEST_READ_ONLY_LOCK_WAIT_MS) || 1500;
 const MAX_DECISION_SLUG_LENGTH = 180;
 const VERIFICATION_OUTPUT_CHUNK_BYTES = 64 * 1024;
+const CAPTURE_OUTPUT_EDGE_CHARACTERS = 32 * 1024;
+const CAPTURE_OUTPUT_OMISSION = '\n... [driftseal captured output truncated] ...\n';
 
 class DriftSealError extends Error {
   constructor(message) {
@@ -100,39 +102,70 @@ function usageFor(key) {
 
 let activeOutput = null;
 
+function createBoundedOutputCapture() {
+  return { head: '', tail: '', length: 0, headComplete: false };
+}
+
+function splitsSurrogatePair(text, index) {
+  if (index <= 0 || index >= text.length) return false;
+  const before = text.charCodeAt(index - 1);
+  const after = text.charCodeAt(index);
+  return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+}
+
+function appendBoundedOutput(capture, value) {
+  let text = String(value);
+  capture.length += text.length;
+
+  if (!capture.headComplete) {
+    let take = Math.min(CAPTURE_OUTPUT_EDGE_CHARACTERS - capture.head.length, text.length);
+    if (splitsSurrogatePair(text, take)) take -= 1;
+    capture.head += text.slice(0, take);
+    text = text.slice(take);
+    if (text.length > 0) capture.headComplete = true;
+  }
+
+  if (text.length === 0) return;
+  const combined = capture.tail + text;
+  let start = Math.max(0, combined.length - CAPTURE_OUTPUT_EDGE_CHARACTERS);
+  if (splitsSurrogatePair(combined, start)) start += 1;
+  capture.tail = combined.slice(start);
+}
+
+function renderBoundedOutput(capture) {
+  if (capture.length === capture.head.length + capture.tail.length) {
+    return capture.head + capture.tail;
+  }
+  return capture.head + CAPTURE_OUTPUT_OMISSION + capture.tail;
+}
+
+function captureOutput(stream, value) {
+  if (!activeOutput) return false;
+  appendBoundedOutput(activeOutput[stream], value);
+  return true;
+}
+
 function printLine(value = '') {
   const text = String(value);
-  if (activeOutput) {
-    activeOutput.stdout += text + '\n';
-    return;
-  }
+  if (captureOutput('stdout', text + '\n')) return;
   console.log(text);
 }
 
 function printError(value = '') {
   const text = String(value);
-  if (activeOutput) {
-    activeOutput.stderr += text + '\n';
-    return;
-  }
+  if (captureOutput('stderr', text + '\n')) return;
   console.error(text);
 }
 
 function writeOutput(value) {
   const text = String(value);
-  if (activeOutput) {
-    activeOutput.stdout += text;
-    return;
-  }
+  if (captureOutput('stdout', text)) return;
   process.stdout.write(text);
 }
 
 function writeErrorOutput(value) {
   const text = String(value);
-  if (activeOutput) {
-    activeOutput.stderr += text;
-    return;
-  }
+  if (captureOutput('stderr', text)) return;
   process.stderr.write(text);
 }
 
@@ -3908,11 +3941,11 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
     }
     if (!intent.verify) fail(`intent ${intent.id} has no verification command`);
     const park = inProgressFile();
-    const parked = park && fs.existsSync(park) ? parkedOpenIntent(park) : null;
+    const parked = park ? parkedOpenIntent(park) : null;
     return {
       id: intent.id,
       command: intent.verify,
-      fromTrackedLog: isParkableIntentLog() && (!parked || parked.id !== intent.id),
+      fromTrackedLog: !parked || parked.id !== intent.id,
     };
   });
 
@@ -4796,7 +4829,15 @@ function runCommand(argv, { root = process.cwd(), isolateStorage = false, captur
   const previousIntentHome = process.env.DRIFTSEAL_HOME;
   const previousDecisionHome = process.env.DRIFTSEAL_DECISION_HOME;
   const output = { stdout: '', stderr: '', data: null, exitCode: 0, readOnly: false };
+  const captures = capture
+    ? { stdout: createBoundedOutputCapture(), stderr: createBoundedOutputCapture() }
+    : null;
   const previousOutput = activeOutput;
+  const finalizeCapturedOutput = () => {
+    if (!captures) return;
+    output.stdout = renderBoundedOutput(captures.stdout);
+    output.stderr = renderBoundedOutput(captures.stderr);
+  };
 
   try {
     process.chdir(fixedRoot);
@@ -4804,14 +4845,16 @@ function runCommand(argv, { root = process.cwd(), isolateStorage = false, captur
       delete process.env.DRIFTSEAL_HOME;
       delete process.env.DRIFTSEAL_DECISION_HOME;
     }
-    if (capture) activeOutput = output;
+    if (capture) activeOutput = captures;
     const result = dispatch(argv);
     output.data = result.data;
     output.exitCode = result.exitCode;
     output.readOnly = result.readOnly === true;
+    finalizeCapturedOutput();
     return output;
   } catch (err) {
     if (capture) {
+      finalizeCapturedOutput();
       err.stdout = output.stdout;
       err.stderr = output.stderr;
     }

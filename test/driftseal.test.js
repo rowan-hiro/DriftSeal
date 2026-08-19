@@ -369,7 +369,7 @@ test('machine verification records evidence and blocks failed completion', () =>
     `${JSON.stringify(process.execPath)} -e "process.exit(7)"`,
   ]).trim();
 
-  const failure = runFail(['verify']);
+  const failure = runFail(['verify', '--allow-tracked-command']);
   assert.equal(failure.status, 7);
   const verification = events().find((event) => event.type === 'verify');
   assert.equal(verification.id, id);
@@ -405,7 +405,7 @@ test('machine verification spools output larger than 16 MiB without terminating 
     `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
   ]);
 
-  run(['verify'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  run(['verify', '--allow-tracked-command'], { stdio: ['ignore', 'ignore', 'pipe'] });
   const verification = events().find((event) => event.type === 'verify');
   assert.equal(verification.passed, true);
   assert.equal(verification.exitCode, 0);
@@ -439,7 +439,7 @@ test('machine verification hashes and counts raw non-UTF-8 output bytes', () => 
     `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
   ]);
 
-  run(['verify'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  run(['verify', '--allow-tracked-command'], { stdio: ['ignore', 'ignore', 'pipe'] });
   const verification = events().find((event) => event.type === 'verify');
   assert.equal(verification.passed, true);
   assert.equal(verification.stdoutBytes, stdout.length);
@@ -504,6 +504,11 @@ test('tracked-log verification commands require explicit opt-in before execution
     '--verify',
     command,
   ]);
+  const locallyTrusted = run(['verify']);
+  assert.match(locallyTrusted, /verification passed/);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
+  fs.unlinkSync(marker);
+
   const intentLog = path.join(cwd, '.intent-log', 'events.jsonl');
   fs.mkdirSync(path.dirname(intentLog), { recursive: true });
   fs.copyFileSync(park, intentLog);
@@ -521,6 +526,82 @@ test('tracked-log verification commands require explicit opt-in before execution
   assert.match(allowed, /verification passed/);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
   run(['end', '--status', 'abandoned']);
+});
+
+test('non-Git verification commands require explicit opt-in', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-non-git-verifier-'));
+  const env = { ...process.env };
+  delete env.DRIFTSEAL_HOME;
+  delete env.DRIFTSEAL_DECISION_HOME;
+  const run = (args) =>
+    execFileSync(process.execPath, [DRIFTSEAL, ...args], {
+      cwd,
+      env,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  const runFail = (args, opts = {}) => {
+    try {
+      run(args, opts);
+    } catch (err) {
+      return err;
+    }
+    throw new Error(`expected failure: driftseal ${args.join(' ')}`);
+  };
+  const marker = path.join(cwd, 'non-git-command-ran.txt');
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran\\n')`;
+  const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+
+  run([
+    'begin',
+    'on-disk non-Git verification command',
+    '--accept',
+    'the command runs only after explicit trust',
+    '--verify',
+    command,
+  ]);
+
+  const denied = runFail(['verify']);
+  assert.match(denied.stderr, /--allow-tracked-command/);
+  assert.equal(fs.existsSync(marker), false);
+
+  assert.match(run(['verify', '--allow-tracked-command']), /verification passed/);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
+  run(['end', '--status', 'abandoned']);
+});
+
+test('custom tracked log verification commands require explicit opt-in', () => {
+  const repo = setupGitRepository('driftseal-custom-tracked-verifier-');
+  const customHome = path.join(repo.cwd, 'logs');
+  const env = { ...repo.env, DRIFTSEAL_HOME: customHome };
+  const marker = path.join(repo.cwd, 'custom-command-ran.txt');
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran\\n')`;
+  const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+
+  repo.run(
+    [
+      'begin',
+      'tracked custom-log verification command',
+      '--accept',
+      'the command runs only after explicit trust',
+      '--verify',
+      command,
+    ],
+    { env }
+  );
+  repo.git(['add', 'logs/events.jsonl']);
+  repo.git(['commit', '-m', 'ship a custom-path open intent']);
+
+  const denied = repo.runFail(['verify'], { env });
+  assert.match(denied.stderr, /--allow-tracked-command/);
+  assert.equal(fs.existsSync(marker), false);
+
+  assert.match(
+    repo.run(['verify', '--allow-tracked-command'], { env }),
+    /verification passed/
+  );
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
+  repo.run(['end', '--status', 'abandoned'], { env });
 });
 
 test('acceptance-bound linked intents reconcile before verification and complete', () => {
