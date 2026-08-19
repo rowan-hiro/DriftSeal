@@ -423,6 +423,34 @@ test('machine verification spools output larger than 16 MiB without terminating 
   run(['end', '--status', 'completed']);
 });
 
+test('machine verification hashes and counts raw non-UTF-8 output bytes', () => {
+  const { run, events } = setup();
+  const stdout = Buffer.from([0xff, 0xfe, 0xff, 0xfe]);
+  const stderr = Buffer.from([0x80, 0x81, 0x82]);
+  const script =
+    `process.stdout.write(Buffer.from([${[...stdout].join(',')}]))` +
+    `;process.stderr.write(Buffer.from([${[...stderr].join(',')}]))`;
+  run([
+    'begin',
+    'verify raw binary output evidence',
+    '--accept',
+    'the recorded evidence matches the exact emitted bytes',
+    '--verify',
+    `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+  ]);
+
+  run(['verify'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const verification = events().find((event) => event.type === 'verify');
+  assert.equal(verification.passed, true);
+  assert.equal(verification.stdoutBytes, stdout.length);
+  assert.equal(verification.stderrBytes, stderr.length);
+  assert.equal(
+    verification.outputHash,
+    crypto.createHash('sha256').update(stdout).update('\0').update(stderr).digest('hex')
+  );
+  run(['end', '--status', 'completed']);
+});
+
 test('machine verification is opt-in and requires an open acceptance-bound intent', () => {
   const { run, runFail } = setup();
   assert.match(runFail(['verify']).stderr, /no intent in progress/);

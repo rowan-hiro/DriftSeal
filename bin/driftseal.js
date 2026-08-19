@@ -3827,11 +3827,9 @@ function digestAndReplayVerificationOutput(file, writer, hash) {
   let bytes = 0;
   let lastCharacter = null;
 
-  const consume = (text) => {
+  const display = (text) => {
     if (!text) return;
     writer(text);
-    hash.update(text, 'utf8');
-    bytes += Buffer.byteLength(text);
     lastCharacter = text.at(-1);
   };
 
@@ -3839,9 +3837,12 @@ function digestAndReplayVerificationOutput(file, writer, hash) {
     while (true) {
       const count = fs.readSync(fd, buffer, 0, buffer.length, null);
       if (count === 0) break;
-      consume(decoder.write(buffer.subarray(0, count)));
+      const chunk = buffer.subarray(0, count);
+      hash.update(chunk);
+      bytes += count;
+      display(decoder.write(chunk));
     }
-    consume(decoder.end());
+    display(decoder.end());
   } finally {
     fs.closeSync(fd);
   }
