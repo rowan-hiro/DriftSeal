@@ -369,7 +369,7 @@ test('machine verification records evidence and blocks failed completion', () =>
     `${JSON.stringify(process.execPath)} -e "process.exit(7)"`,
   ]).trim();
 
-  const failure = runFail(['verify', '--allow-tracked-command']);
+  const failure = runFail(['verify']);
   assert.equal(failure.status, 7);
   const verification = events().find((event) => event.type === 'verify');
   assert.equal(verification.id, id);
@@ -405,7 +405,7 @@ test('machine verification spools output larger than 16 MiB without terminating 
     `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
   ]);
 
-  run(['verify', '--allow-tracked-command'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  run(['verify'], { stdio: ['ignore', 'ignore', 'pipe'] });
   const verification = events().find((event) => event.type === 'verify');
   assert.equal(verification.passed, true);
   assert.equal(verification.exitCode, 0);
@@ -439,7 +439,7 @@ test('machine verification hashes and counts raw non-UTF-8 output bytes', () => 
     `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
   ]);
 
-  run(['verify', '--allow-tracked-command'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  run(['verify'], { stdio: ['ignore', 'ignore', 'pipe'] });
   const verification = events().find((event) => event.type === 'verify');
   assert.equal(verification.passed, true);
   assert.equal(verification.stdoutBytes, stdout.length);
@@ -518,7 +518,8 @@ test('tracked-log verification commands require explicit opt-in before execution
 
   const denied = runFail(['verify']);
   assert.match(denied.stderr, /verification command:/);
-  assert.match(denied.stderr, /sourced from the repository intent log/);
+  assert.match(denied.stderr, /cannot confirm was created locally/);
+  assert.match(denied.stderr, /no matching local intent provenance/);
   assert.match(denied.stderr, /--allow-tracked-command/);
   assert.equal(fs.existsSync(marker), false);
 
@@ -528,21 +529,22 @@ test('tracked-log verification commands require explicit opt-in before execution
   run(['end', '--status', 'abandoned']);
 });
 
-test('non-Git verification commands require explicit opt-in', () => {
+test('non-Git local provenance distinguishes created and shipped verification commands', () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-non-git-verifier-'));
+  const shipped = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-shipped-verifier-'));
   const env = { ...process.env };
   delete env.DRIFTSEAL_HOME;
   delete env.DRIFTSEAL_DECISION_HOME;
-  const run = (args) =>
+  const runAt = (root, args) =>
     execFileSync(process.execPath, [DRIFTSEAL, ...args], {
-      cwd,
+      cwd: root,
       env,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-  const runFail = (args, opts = {}) => {
+  const runFailAt = (root, args) => {
     try {
-      run(args, opts);
+      runAt(root, args);
     } catch (err) {
       return err;
     }
@@ -552,7 +554,7 @@ test('non-Git verification commands require explicit opt-in', () => {
   const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran\\n')`;
   const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 
-  run([
+  runAt(cwd, [
     'begin',
     'on-disk non-Git verification command',
     '--accept',
@@ -560,17 +562,30 @@ test('non-Git verification commands require explicit opt-in', () => {
     '--verify',
     command,
   ]);
+  assert.match(runAt(cwd, ['verify']), /verification passed/);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
+  fs.unlinkSync(marker);
 
-  const denied = runFail(['verify']);
+  const shippedLog = path.join(shipped, '.intent-log', 'events.jsonl');
+  fs.mkdirSync(path.dirname(shippedLog), { recursive: true });
+  fs.copyFileSync(path.join(cwd, '.intent-log', 'events.jsonl'), shippedLog);
+  fs.copyFileSync(
+    path.join(cwd, '.intent-log', '.driftseal-local-intent.json'),
+    path.join(shipped, '.intent-log', '.driftseal-local-intent.json')
+  );
+
+  const denied = runFailAt(shipped, ['verify']);
+  assert.match(denied.stderr, /cannot confirm was created locally/);
   assert.match(denied.stderr, /--allow-tracked-command/);
   assert.equal(fs.existsSync(marker), false);
 
-  assert.match(run(['verify', '--allow-tracked-command']), /verification passed/);
+  assert.match(runAt(shipped, ['verify', '--allow-tracked-command']), /verification passed/);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
-  run(['end', '--status', 'abandoned']);
+  runAt(shipped, ['end', '--status', 'abandoned']);
+  runAt(cwd, ['end', '--status', 'abandoned']);
 });
 
-test('custom tracked log verification commands require explicit opt-in', () => {
+test('custom tracked log local provenance does not travel with Git', () => {
   const repo = setupGitRepository('driftseal-custom-tracked-verifier-');
   const customHome = path.join(repo.cwd, 'logs');
   const env = { ...repo.env, DRIFTSEAL_HOME: customHome };
@@ -589,18 +604,44 @@ test('custom tracked log verification commands require explicit opt-in', () => {
     ],
     { env }
   );
+  assert.match(repo.run(['verify'], { env }), /verification passed/);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
+  fs.unlinkSync(marker);
+
   repo.git(['add', 'logs/events.jsonl']);
   repo.git(['commit', '-m', 'ship a custom-path open intent']);
 
-  const denied = repo.runFail(['verify'], { env });
+  const cloneParent = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-custom-log-clone-'));
+  const clone = path.join(cloneParent, 'repo');
+  execFileSync('git', ['clone', '--quiet', repo.cwd, clone], {
+    env: repo.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const cloneEnv = { ...repo.env, DRIFTSEAL_HOME: path.join(clone, 'logs') };
+  const runClone = (args) =>
+    execFileSync(process.execPath, [DRIFTSEAL, ...args], {
+      cwd: clone,
+      env: cloneEnv,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  const runCloneFail = (args) => {
+    try {
+      runClone(args);
+    } catch (err) {
+      return err;
+    }
+    throw new Error(`expected failure: driftseal ${args.join(' ')}`);
+  };
+
+  const denied = runCloneFail(['verify']);
+  assert.match(denied.stderr, /cannot confirm was created locally/);
   assert.match(denied.stderr, /--allow-tracked-command/);
   assert.equal(fs.existsSync(marker), false);
 
-  assert.match(
-    repo.run(['verify', '--allow-tracked-command'], { env }),
-    /verification passed/
-  );
+  assert.match(runClone(['verify', '--allow-tracked-command']), /verification passed/);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
+  runClone(['end', '--status', 'abandoned']);
   repo.run(['end', '--status', 'abandoned'], { env });
 });
 

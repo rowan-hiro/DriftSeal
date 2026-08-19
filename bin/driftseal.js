@@ -52,6 +52,7 @@ const MAX_DECISION_SLUG_LENGTH = 180;
 const VERIFICATION_OUTPUT_CHUNK_BYTES = 64 * 1024;
 const CAPTURE_OUTPUT_EDGE_CHARACTERS = 32 * 1024;
 const CAPTURE_OUTPUT_OMISSION = '\n... [driftseal captured output truncated] ...\n';
+const LOCAL_INTENT_PROVENANCE_FILE = '.driftseal-local-intent.json';
 
 class DriftSealError extends Error {
   constructor(message) {
@@ -604,7 +605,12 @@ function parkedOpenIntent(park) {
 
 function appendEvent(event) {
   const park = inProgressFile();
-  if (!park) return appendEventTo(logFile(), event);
+  if (!park) {
+    const stored = appendEventTo(logFile(), event);
+    if (event.type === 'begin') writeLocalIntentProvenance(stored);
+    if (event.type === 'end') clearLocalIntentProvenance(event.id);
+    return stored;
+  }
 
   const open = parkedOpenIntent(park);
   // A park with nothing open left in it belongs in the log; an interrupted end retries here.
@@ -626,9 +632,88 @@ function contentHash(content) {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-function atomicWriteFile(target, content) {
+function localIntentProvenanceFile() {
+  const root = gitWorktreeRoot();
+  const key = contentHash(path.resolve(logFile())).slice(0, 16);
+  if (!root) return path.join(logDir(), LOCAL_INTENT_PROVENANCE_FILE);
+  const gitPath = gitCapture(['rev-parse', '--git-path', `driftseal-local-intent-${key}.json`]);
+  return gitPath ? path.resolve(process.cwd(), gitPath) : null;
+}
+
+function localIntentLogIdentity() {
+  try {
+    const stat = fs.statSync(logFile(), { bigint: true });
+    return contentHash(JSON.stringify([String(stat.dev), String(stat.ino), String(stat.birthtimeNs)]));
+  } catch {
+    return null;
+  }
+}
+
+function localIntentProvenanceFingerprint({ id, ts, verify }) {
+  return contentHash(JSON.stringify([id, ts, verify || null]));
+}
+
+function writeLocalIntentProvenance(event) {
+  const file = localIntentProvenanceFile();
+  if (!file) return;
+  ensureDirectoryDurable(path.dirname(file));
+  atomicWriteFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      id: event.id,
+      fingerprint: localIntentProvenanceFingerprint(event),
+      logIdentity: localIntentLogIdentity(),
+    }) + '\n',
+    0o600
+  );
+}
+
+function readLocalIntentProvenance() {
+  const file = localIntentProvenanceFile();
+  if (!file || !fs.existsSync(file)) return null;
+  try {
+    const provenance = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (
+      provenance.version !== 1 ||
+      typeof provenance.id !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(provenance.fingerprint) ||
+      !/^[a-f0-9]{64}$/.test(provenance.logIdentity)
+    ) {
+      return null;
+    }
+    return provenance;
+  } catch {
+    return null;
+  }
+}
+
+function hasMatchingLocalIntentProvenance(intent) {
+  const provenance = readLocalIntentProvenance();
+  return (
+    provenance !== null &&
+    provenance.id === intent.id &&
+    provenance.logIdentity === localIntentLogIdentity() &&
+    provenance.fingerprint ===
+      localIntentProvenanceFingerprint({
+        id: intent.id,
+        ts: intent.tsBegin,
+        verify: intent.verify,
+      })
+  );
+}
+
+function clearLocalIntentProvenance(id) {
+  const file = localIntentProvenanceFile();
+  const provenance = readLocalIntentProvenance();
+  if (!file || !provenance || provenance.id !== id) return;
+  fs.unlinkSync(file);
+  fsyncDirectory(path.dirname(file));
+}
+
+function atomicWriteFile(target, content, createMode = 0o644) {
   const existed = fs.existsSync(target);
-  const mode = existed ? fs.statSync(target).mode & 0o777 : 0o644;
+  const mode = existed ? fs.statSync(target).mode & 0o777 : createMode;
   const temp = path.join(
     path.dirname(target),
     `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`
@@ -3942,18 +4027,21 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
     if (!intent.verify) fail(`intent ${intent.id} has no verification command`);
     const park = inProgressFile();
     const parked = park ? parkedOpenIntent(park) : null;
+    const locallyProvenanced = hasMatchingLocalIntentProvenance(intent);
     return {
       id: intent.id,
       command: intent.verify,
-      fromTrackedLog: !parked || parked.id !== intent.id,
+      requiresExplicitTrust:
+        (!parked || parked.id !== intent.id) && !locallyProvenanced,
     };
   });
 
   const displayedCommand = JSON.stringify(snapshot.command);
   printError(`verification command: ${displayedCommand}`);
-  if (snapshot.fromTrackedLog && !allowTrackedCommand) {
+  if (snapshot.requiresExplicitTrust && !allowTrackedCommand) {
     fail(
-      `refusing to execute a verification command sourced from the repository intent log: ${displayedCommand}\n` +
+      `refusing to execute a verification command that DriftSeal cannot confirm was created locally: ${displayedCommand}\n` +
+        'no matching local intent provenance was found; ' +
         'inspect the command, then re-run with --allow-tracked-command only if you trust it'
     );
   }

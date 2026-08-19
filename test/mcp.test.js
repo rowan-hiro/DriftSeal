@@ -44,7 +44,7 @@ test('programmatic API returns structured records without changing its fixed roo
   });
   assert.equal(opened.status, 'in_progress');
   assert.equal(opened.intent, 'exercise structured API');
-  const verification = api.verify({ allowTrackedCommand: true });
+  const verification = api.verify();
   assert.equal(verification.verification.passed, true);
   const closed = api.end({ status: 'completed', note: 'done', verifyResult: 'passed' });
   assert.equal(closed.status, 'completed');
@@ -80,7 +80,7 @@ test('captured verification output is bounded without changing complete evidence
     acceptance: ['complete output evidence survives bounded replay capture'],
     verify: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
   });
-  const output = runCommand(['verify', '--allow-tracked-command'], {
+  const output = runCommand(['verify'], {
     root,
     isolateStorage: true,
     capture: true,
@@ -235,7 +235,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     });
     assert.equal(updated.structuredContent.decision.status, 'accepted');
 
-    const verified = await call(client, 'driftseal_verify', { allowTrackedCommand: true });
+    const verified = await call(client, 'driftseal_verify');
     assert.equal(verified.isError, undefined);
     assert.equal(verified.structuredContent.verification.passed, true);
 
@@ -411,7 +411,7 @@ test('MCP status accepts a verification record with a null exit code', async () 
     acceptance: ['the verifier result remains inspectable'],
     verify: 'true',
   });
-  api.verify({ allowTrackedCommand: true });
+  api.verify();
 
   const file = path.join(root, '.intent-log', 'events.jsonl');
   const events = fs

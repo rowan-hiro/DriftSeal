@@ -199,11 +199,16 @@ driftseal verify
 
 `driftseal verify` 会把日志中保存的完整字符串交给操作系统 shell。这个命令可以
 读写文件、访问网络，也可以运行当前用户有权执行的任何程序；因此它是可执行代码，
-不是被动的日志数据。当前 worktree 本地创建的 open intent 会 park 在 Git metadata
-中，可以直接运行。如果 open intent 来自 repository 中被跟踪的 intent log，
-DriftSeal 会先把命令输出到 stderr，并拒绝执行；只有检查并信任该命令后，才能显式
-运行 `driftseal verify --allow-tracked-command`。Programmatic API 和 MCP tool 中对应的
-显式开关是 `allowTrackedCommand`。
+不是被动的日志数据。创建 intent 时，DriftSeal 会记录本地 provenance：默认 Git
+流程把 open intent park 在 Git metadata 中；非 Git 环境和自定义
+`DRIFTSEAL_HOME` 则在 intent log 之外保存一个很小的本地标记。这些本地创建的
+intent 可以直接验证。如果 open intent 只有 log 记录、没有匹配的本地 provenance，
+DriftSeal 就无法确认是谁选择了其中的命令。此时它会先把命令输出到 stderr 并拒绝
+执行；只有检查并信任该命令后，才能显式运行
+`driftseal verify --allow-tracked-command`。Programmatic API 和 MCP tool 中对应的显式
+开关是 `allowTrackedCommand`。intent 关闭时，本地 provenance 会被清理；如果它提前
+丢失，DriftSeal 会按安全方向处理，仍要求显式 opt in。非 Git marker 还会绑定本地
+log 文件的 identity，因此把 marker 和 log 一起复制到别处也不会转移信任。
 
 验证事件会记录 exit status、耗时、输出摘要及字节数、Git HEAD，以及当前所有
 tracked 和未被 ignore 的 untracked 文件的内容指纹（intent event log 除外）。
@@ -242,7 +247,7 @@ intent；会被提交且无法重建的内容改动（比如编辑 `.gitignore`�
 | Command | 用途 |
 | --- | --- |
 | `driftseal begin "<intent>" [--accept "<outcome>"] [-v "<command>"] [--decision id] [--force]` | 开启一轮工作。可重复使用 `--accept` 声明可观察的完成条件；一旦声明，就必须同时提供验证命令。 |
-| `driftseal verify [--allow-tracked-command]` | 执行 acceptance-bound intent 预先声明的命令，并把机器证据绑定到当前 Git 可见的工作区内容；来自 tracked intent log 的命令必须显式 opt in。 |
+| `driftseal verify [--allow-tracked-command]` | 执行 acceptance-bound intent 预先声明的命令，并把机器证据绑定到当前 Git 可见的工作区内容；没有匹配本地 provenance 的命令必须显式 opt in。 |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | 诚实地关闭 intent。 |
 | `driftseal status` | 查看当前进行中的 intent。 |
 | `driftseal log [-n N] [--all]` | 查看 intent 历史（`--all` 包含已回收的记录）。 |

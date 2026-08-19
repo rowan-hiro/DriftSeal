@@ -210,11 +210,19 @@ driftseal verify
 `driftseal verify` passes the exact stored string to the operating-system shell.
 The command can therefore read or modify files, access the network, or run any
 other program available to the current user. Treat it as executable code, not as
-passive log data. A locally created open intent is parked in Git metadata and runs
-normally. If the open intent came from the repository's tracked intent log,
-DriftSeal prints the command to stderr and refuses to execute it until you inspect
-it and explicitly run `driftseal verify --allow-tracked-command`. The programmatic
-API and MCP tool expose the equivalent `allowTrackedCommand` opt-in.
+passive log data. DriftSeal records local provenance when an intent is opened:
+the default Git workflow parks the intent in Git metadata, while non-Git and
+custom `DRIFTSEAL_HOME` workflows keep a small local marker outside the intent
+log. Those locally created intents run normally. If an open intent arrives only
+through an intent log, without matching local provenance, DriftSeal cannot confirm
+who chose its command. It prints the command to stderr and refuses to execute it
+until you inspect it and explicitly run
+`driftseal verify --allow-tracked-command`. The programmatic API and MCP tool
+expose the equivalent `allowTrackedCommand` opt-in. Local provenance state is
+removed when the intent closes. Non-Git markers are bound to the local log
+file's identity, so copying a marker with the log does not transfer trust. If
+local provenance is lost or no longer matches, verification fails safe and
+requires the same explicit opt-in.
 
 The verification event records the command's exit status, duration, output
 digest and byte counts, Git HEAD, and a fingerprint of every tracked or
@@ -258,7 +266,7 @@ also need no intent. Any other non-Git content change starts a new work round.
 | Command | Purpose |
 | --- | --- |
 | `driftseal begin "<intent>" [--accept "<outcome>"] [-v "<command>"] [--decision id] [--force]` | Open a work-round intent. Repeat `--accept` for observable completion criteria; acceptance requires a verification command. |
-| `driftseal verify [--allow-tracked-command]` | Execute the acceptance-bound intent's predeclared command and bind machine evidence to the current Git-visible workspace contents. Commands sourced from the tracked intent log require the explicit opt-in. |
+| `driftseal verify [--allow-tracked-command]` | Execute the acceptance-bound intent's predeclared command and bind machine evidence to the current Git-visible workspace contents. Commands without matching local provenance require the explicit opt-in. |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | Close an intent honestly. |
 | `driftseal status` | Show the intent currently in progress. |
 | `driftseal log [-n N] [--all]` | Review intent history (`--all` includes reclaimed records). |
