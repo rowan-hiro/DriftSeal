@@ -190,11 +190,20 @@ driftseal begin "add rate limiting to /api/login" \
   --verify "npm test test/rate-limit.test.js"
 ```
 
-完成工作后，让 DriftSeal 执行预先声明的命令：
+完成工作后，先 reconcile 所有关联 decision，再用 `driftseal status` 检查声明的
+命令，确认无误后才让 DriftSeal 执行：
 
 ```sh
 driftseal verify
 ```
+
+`driftseal verify` 会把日志中保存的完整字符串交给操作系统 shell。这个命令可以
+读写文件、访问网络，也可以运行当前用户有权执行的任何程序；因此它是可执行代码，
+不是被动的日志数据。当前 worktree 本地创建的 open intent 会 park 在 Git metadata
+中，可以直接运行。如果 open intent 来自 repository 中被跟踪的 intent log，
+DriftSeal 会先把命令输出到 stderr，并拒绝执行；只有检查并信任该命令后，才能显式
+运行 `driftseal verify --allow-tracked-command`。Programmatic API 和 MCP tool 中对应的
+显式开关是 `allowTrackedCommand`。
 
 验证事件会记录 exit status、耗时、输出摘要及字节数、Git HEAD，以及当前所有
 tracked 和未被 ignore 的 untracked 文件的内容指纹（intent event log 除外）。
@@ -231,7 +240,7 @@ intent；会被提交且无法重建的内容改动（比如编辑 `.gitignore`�
 | Command | 用途 |
 | --- | --- |
 | `driftseal begin "<intent>" [--accept "<outcome>"] [-v "<command>"] [--decision id] [--force]` | 开启一轮工作。可重复使用 `--accept` 声明可观察的完成条件；一旦声明，就必须同时提供验证命令。 |
-| `driftseal verify` | 执行 acceptance-bound intent 预先声明的命令，并把机器证据绑定到当前 Git 可见的工作区内容。 |
+| `driftseal verify [--allow-tracked-command]` | 执行 acceptance-bound intent 预先声明的命令，并把机器证据绑定到当前 Git 可见的工作区内容；来自 tracked intent log 的命令必须显式 opt in。 |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | 诚实地关闭 intent。 |
 | `driftseal status` | 查看当前进行中的 intent。 |
 | `driftseal log [-n N] [--all]` | 查看 intent 历史（`--all` 包含已回收的记录）。 |
@@ -254,7 +263,10 @@ intent；会被提交且无法重建的内容改动（比如编辑 `.gitignore`�
 如果 `begin` 通过一个或多个 `--decision <id>` 声明了关联，那么 intent
 以 `completed` 或 `partial` 关闭前，必须用 `driftseal decision update` reconcile
 每一条关联 decision。update 可以改变当前 status，并会追加一条包含时间和
-intent ID 的 history。没有关联 decision 的 intent 仍沿用普通流程。
+intent ID 的 history。没有关联 decision 的 intent 仍沿用普通流程。对于
+acceptance-bound linked intent，所有 decision update 都必须发生在
+`driftseal verify` 之前，因为 update 会改变 workspace fingerprint；顺序应当是
+reconcile、verify、end。
 
 ## 回收已无意义的记录
 

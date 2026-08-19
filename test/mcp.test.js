@@ -118,6 +118,10 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_status').annotations.readOnlyHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_verify').annotations.destructiveHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_verify').annotations.openWorldHint, true);
+    assert.ok(
+      tools.tools.find((tool) => tool.name === 'driftseal_verify').inputSchema.properties
+        .allowTrackedCommand
+    );
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_end').annotations.destructiveHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_absorb').annotations.destructiveHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_reclaim').annotations.destructiveHint, true);
@@ -343,6 +347,39 @@ test('MCP driftseal_log coerces a non-string head to null without a schema error
     const status = await call(client, 'driftseal_status');
     assert.equal(status.isError, undefined);
     assert.equal(status.structuredContent.intent, null);
+  } finally {
+    await client.close();
+  }
+});
+
+test('MCP status accepts a verification record with a null exit code', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-null-exit-'));
+  const api = createApi({ root, isolateStorage: true });
+  api.begin({
+    intent: 'round interrupted by a signal',
+    acceptance: ['the verifier result remains inspectable'],
+    verify: 'true',
+  });
+  api.verify();
+
+  const file = path.join(root, '.intent-log', 'events.jsonl');
+  const events = fs
+    .readFileSync(file, 'utf8')
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  const verification = events.find((event) => event.type === 'verify');
+  verification.exitCode = null;
+  verification.signal = 'SIGTERM';
+  verification.passed = false;
+  fs.writeFileSync(file, events.map((event) => JSON.stringify(event)).join('\n') + '\n');
+
+  const client = await connect(root);
+  try {
+    const status = await call(client, 'driftseal_status');
+    assert.equal(status.isError, undefined);
+    assert.equal(status.structuredContent.intent.verification.exitCode, null);
+    assert.equal(status.structuredContent.intent.verification.signal, 'SIGTERM');
   } finally {
     await client.close();
   }

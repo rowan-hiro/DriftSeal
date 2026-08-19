@@ -70,7 +70,7 @@ function usageFor(key) {
   const lines = {
     begin:
       'usage: driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"] [--decision <id>] [--force]',
-    verify: 'usage: driftseal verify',
+    verify: 'usage: driftseal verify [--allow-tracked-command]',
     end: 'usage: driftseal end [id] [options]',
     status: 'usage: driftseal status',
     log: 'usage: driftseal log [--last N] [--all]',
@@ -1772,8 +1772,13 @@ ${intentLogLanguageParagraph(language)}
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
    (\`driftseal end -s partial|abandoned -n "<why>"\`) and \`driftseal begin\` a new one.
-3. **Verify, then close**: run \`driftseal verify\` to execute the predeclared
-   command and bind its exit status to the current Git-visible workspace contents, then
+3. **Reconcile, verify, then close**: for a linked intent, first reconcile every
+   declared decision as described below. For an acceptance-bound intent, inspect the
+   exact command shown by \`driftseal status\`, then run \`driftseal verify\` to execute it
+   and bind its exit status to the current Git-visible workspace contents. A command
+   sourced from the repository intent log is untrusted and requires
+   \`--allow-tracked-command\` after inspection; locally parked commands do not.
+   An intent without \`--accept\` uses its declared check directly. Then run
    \`driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"\`.
    DriftSeal rejects \`completed\` when machine verification failed, never ran, or
    the workspace changed after it. Ignored files are outside the workspace fingerprint.
@@ -1817,8 +1822,13 @@ function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, l
       '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.'
     )
     .replace(
-      '3. **Verify, then close**: run `driftseal verify` to execute the predeclared\n' +
-        '   command and bind its exit status to the current Git-visible workspace contents, then\n' +
+      '3. **Reconcile, verify, then close**: for a linked intent, first reconcile every\n' +
+        '   declared decision as described below. For an acceptance-bound intent, inspect the\n' +
+        '   exact command shown by `driftseal status`, then run `driftseal verify` to execute it\n' +
+        '   and bind its exit status to the current Git-visible workspace contents. A command\n' +
+        '   sourced from the repository intent log is untrusted and requires\n' +
+        '   `--allow-tracked-command` after inspection; locally parked commands do not.\n' +
+        '   An intent without `--accept` uses its declared check directly. Then run\n' +
         '   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"`.\n' +
         '   DriftSeal rejects `completed` when machine verification failed, never ran, or\n' +
         '   the workspace changed after it. Ignored files are outside the workspace fingerprint.\n' +
@@ -2779,9 +2789,10 @@ function hookReminder(event, { readOnly = false } = {}) {
   }
   const open = openIntent(fold(readEvents({ file, readOnly })));
   if (open) {
+    const reconciliation = open.decisions.length > 0 ? 'reconcile every linked decision, then ' : '';
     const verification = open.acceptance.length > 0
-      ? 'run driftseal verify and close it with driftseal end'
-      : 'run the declared verification and close it with driftseal end';
+      ? `${reconciliation}inspect and run driftseal verify, then close it with driftseal end`
+      : `${reconciliation}run the declared verification, then close it with driftseal end`;
     return (
       `DriftSeal reminder: intent ${open.id} is still in_progress: "${open.intent}". ` +
       `If its work is done, ${verification}; ` +
@@ -3791,7 +3802,7 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
   });
 }
 
-function runMachineVerification() {
+function runMachineVerification({ allowTrackedCommand = false } = {}) {
   const snapshot = withMutationLocks([logDir()], () => {
     const intent = openIntent(fold(readEvents({ repairTail: true })));
     if (!intent) fail('no intent in progress; nothing to verify');
@@ -3799,8 +3810,23 @@ function runMachineVerification() {
       fail(`intent ${intent.id} has no acceptance criteria; declare them with driftseal begin --accept`);
     }
     if (!intent.verify) fail(`intent ${intent.id} has no verification command`);
-    return { id: intent.id, command: intent.verify };
+    const park = inProgressFile();
+    const parked = park && fs.existsSync(park) ? parkedOpenIntent(park) : null;
+    return {
+      id: intent.id,
+      command: intent.verify,
+      fromTrackedLog: isParkableIntentLog() && (!parked || parked.id !== intent.id),
+    };
   });
+
+  const displayedCommand = JSON.stringify(snapshot.command);
+  printError(`verification command: ${displayedCommand}`);
+  if (snapshot.fromTrackedLog && !allowTrackedCommand) {
+    fail(
+      `refusing to execute a verification command sourced from the repository intent log: ${displayedCommand}\n` +
+        'inspect the command, then re-run with --allow-tracked-command only if you trust it'
+    );
+  }
 
   const started = process.hrtime.bigint();
   const result = spawnSync(snapshot.command, {
@@ -3939,9 +3965,13 @@ const commands = {
   },
 
   verify(argv) {
-    const { positionals } = parseArgs(argv, {}, 'verify');
+    const { positionals, flags } = parseArgs(
+      argv,
+      { 'allow-tracked-command': 'boolean' },
+      'verify'
+    );
     if (positionals.length > 0) fail(usageFor('verify'));
-    return runMachineVerification();
+    return runMachineVerification({ allowTrackedCommand: flags['allow-tracked-command'] === true });
   },
 
   end(argv) {
@@ -4482,7 +4512,8 @@ Intent-level write-ahead log for agent sessions.
 usage:
   driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"]
                  [--decision <id>] [--force]
-  driftseal verify                     run the declared command and bind its result
+  driftseal verify [--allow-tracked-command]
+                                       run the declared command and bind its result
                                        to the current Git-visible workspace contents
   driftseal end [id] [--status completed|partial|failed|abandoned] [--note "..."] [--verify-result "..."]
   driftseal status                     show the intent currently in progress (re-anchor after drift)
@@ -4755,8 +4786,8 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
       if (force) argv.push('--force');
       return call(argv);
     },
-    verify() {
-      return call(['verify']);
+    verify({ allowTrackedCommand = false } = {}) {
+      return call(['verify', ...(allowTrackedCommand ? ['--allow-tracked-command'] : [])]);
     },
     end({ id, status, note, verifyResult } = {}) {
       const argv = ['end'];

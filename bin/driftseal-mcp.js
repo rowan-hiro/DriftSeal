@@ -72,7 +72,7 @@ function registerTools(server, api, z) {
   const verificationRecord = z.object({
     id: z.string(),
     passed: z.boolean(),
-    exitCode: z.number().int().nonnegative(),
+    exitCode: z.number().int().nonnegative().nullable(),
     signal: z.string().nullable(),
     durationMs: z.number().int().nonnegative(),
     outputHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -190,8 +190,15 @@ function registerTools(server, api, z) {
     {
       title: 'Run the declared DriftSeal verification',
       description:
-        'Execute the current acceptance-bound intent\'s predeclared verification command and record machine evidence bound to the resulting Git-visible workspace contents.',
-      inputSchema: {},
+        'Execute the current acceptance-bound intent\'s predeclared shell command and record machine evidence bound to the resulting Git-visible workspace contents. Inspect the command with driftseal_status first. A command sourced from the repository intent log is untrusted and requires allowTrackedCommand.',
+      inputSchema: {
+        allowTrackedCommand: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Explicitly allow a command sourced from the repository intent log after inspecting and trusting it.'
+          ),
+      },
       outputSchema: {
         root: z.string(),
         intent: intentRecord,
@@ -200,9 +207,9 @@ function registerTools(server, api, z) {
       },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
-    async () =>
+    async (input) =>
       guarded(() => {
-        const result = api.verify();
+        const result = api.verify({ allowTrackedCommand: input.allowTrackedCommand });
         return success(
           { root: api.root, ...result },
           `Machine verification ${result.verification.passed ? 'passed' : 'failed'} for intent ${result.intent.id}.`
@@ -215,7 +222,7 @@ function registerTools(server, api, z) {
     {
       title: 'Close a DriftSeal intent',
       description:
-        'Close the current work-round intent with an honest terminal status, note, and verification result. Acceptance-bound intents require fresh successful machine verification before completed closure. Linked decisions must be reconciled before completed or partial closure.',
+        'Close the current work-round intent with an honest terminal status, note, and verification result. Reconcile linked decisions before running final verification. Acceptance-bound intents require fresh successful machine verification before completed closure.',
       inputSchema: {
         id: z.string().optional().describe('Intent ID; omit to close the current open intent.'),
         status: closedStatus.default('completed'),
@@ -491,7 +498,7 @@ async function createServer({ root }) {
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       instructions:
-        'Use driftseal_status before repository changes or after context loss. Open one focused intent with driftseal_begin before changes. When the intent declares acceptance criteria, use driftseal_verify to capture machine evidence before completed closure; otherwise run the declared check directly. Close honestly with driftseal_end, and reconcile every linked decision before completed or partial closure.',
+        'Use driftseal_status before repository changes or after context loss. Open one focused intent with driftseal_begin before changes. Reconcile every linked decision before verification. When the intent declares acceptance criteria, inspect its command and use driftseal_verify to capture machine evidence before completed closure; a command sourced from the repository log requires explicit allowTrackedCommand after it is trusted. Otherwise run the declared check directly. Close honestly with driftseal_end.',
     }
   );
   registerTools(server, api, z);

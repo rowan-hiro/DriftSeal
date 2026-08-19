@@ -149,8 +149,13 @@ function protocolV12(content) {
       '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.'
     )
     .replace(
-      '3. **Verify, then close**: run `driftseal verify` to execute the predeclared\n' +
-        '   command and bind its exit status to the current Git-visible workspace contents, then\n' +
+      '3. **Reconcile, verify, then close**: for a linked intent, first reconcile every\n' +
+        '   declared decision as described below. For an acceptance-bound intent, inspect the\n' +
+        '   exact command shown by `driftseal status`, then run `driftseal verify` to execute it\n' +
+        '   and bind its exit status to the current Git-visible workspace contents. A command\n' +
+        '   sourced from the repository intent log is untrusted and requires\n' +
+        '   `--allow-tracked-command` after inspection; locally parked commands do not.\n' +
+        '   An intent without `--accept` uses its declared check directly. Then run\n' +
         '   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"`.\n' +
         '   DriftSeal rejects `completed` when machine verification failed, never ran, or\n' +
         '   the workspace changed after it. Ignored files are outside the workspace fingerprint.\n' +
@@ -411,6 +416,78 @@ test('completed acceptance-bound intents require fresh workspace-bound verificat
   const history = run(['log', '--last', '1']);
   assert.match(history, /accept: the declared check passes/);
   assert.match(history, /machine-verification: passed/);
+});
+
+test('tracked-log verification commands require explicit opt-in before execution', () => {
+  const { cwd, git, run, runFail, park } = setupParkedRepository(
+    'driftseal-tracked-verifier-'
+  );
+  const marker = path.join(cwd, 'tracked-command-ran.txt');
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran\\n')`;
+  const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+
+  run([
+    'begin',
+    'repository-supplied verification command',
+    '--accept',
+    'the command runs only after explicit trust',
+    '--verify',
+    command,
+  ]);
+  const intentLog = path.join(cwd, '.intent-log', 'events.jsonl');
+  fs.mkdirSync(path.dirname(intentLog), { recursive: true });
+  fs.copyFileSync(park, intentLog);
+  fs.unlinkSync(park);
+  git(['add', '.intent-log/events.jsonl']);
+  git(['commit', '-m', 'ship an open intent']);
+
+  const denied = runFail(['verify']);
+  assert.match(denied.stderr, /verification command:/);
+  assert.match(denied.stderr, /sourced from the repository intent log/);
+  assert.match(denied.stderr, /--allow-tracked-command/);
+  assert.equal(fs.existsSync(marker), false);
+
+  const allowed = run(['verify', '--allow-tracked-command']);
+  assert.match(allowed, /verification passed/);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran\n');
+  run(['end', '--status', 'abandoned']);
+});
+
+test('acceptance-bound linked intents reconcile before verification and complete', () => {
+  const { run } = setupParkedRepository('driftseal-acceptance-decision-order-');
+  run([
+    'decision',
+    'add',
+    'Confirm the linked acceptance decision',
+    '--context',
+    'The acceptance-bound workflow links a decision.',
+    '--outcome',
+    'Reconcile it before machine verification.',
+    '--status',
+    'proposed',
+  ]);
+  const id = run([
+    'begin',
+    'complete linked acceptance work',
+    '--accept',
+    'the linked decision and declared check are current',
+    '--verify',
+    'true',
+    '--decision',
+    '1',
+  ]).trim();
+
+  run([
+    'decision',
+    'update',
+    '1',
+    '--status',
+    'accepted',
+    '--note',
+    'Confirmed before running the final machine verification.',
+  ]);
+  run(['verify']);
+  assert.equal(run(['end', '--status', 'completed']).trim(), `${id} completed`);
 });
 
 test('begin is rejected while another intent is open', () => {
@@ -1715,6 +1792,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /driftseal-version: 13/);
   assert.match(first, /--accept "<observable outcome>"/);
   assert.match(first, /run `driftseal verify`/);
+  assert.match(first, /first reconcile every\s+declared decision/);
+  assert.match(first, /--allow-tracked-command/);
   assert.match(first, /workspace changed after it/);
   assert.match(first, /reconstructed from Git state/);
   assert.match(first, /Size an intent to the smallest unit/);

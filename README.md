@@ -200,11 +200,21 @@ driftseal begin "add rate limiting to /api/login" \
   --verify "npm test test/rate-limit.test.js"
 ```
 
-Do the work, let DriftSeal run the predeclared command, then reconcile the result:
+Do the work, reconcile any linked decisions, inspect the declared command with
+`driftseal status`, and only then let DriftSeal run it:
 
 ```sh
 driftseal verify
 ```
+
+`driftseal verify` passes the exact stored string to the operating-system shell.
+The command can therefore read or modify files, access the network, or run any
+other program available to the current user. Treat it as executable code, not as
+passive log data. A locally created open intent is parked in Git metadata and runs
+normally. If the open intent came from the repository's tracked intent log,
+DriftSeal prints the command to stderr and refuses to execute it until you inspect
+it and explicitly run `driftseal verify --allow-tracked-command`. The programmatic
+API and MCP tool expose the equivalent `allowTrackedCommand` opt-in.
 
 The verification event records the command's exit status, duration, output
 digest and byte counts, Git HEAD, and a fingerprint of every tracked or
@@ -245,7 +255,7 @@ also need no intent. Any other non-Git content change starts a new work round.
 | Command | Purpose |
 | --- | --- |
 | `driftseal begin "<intent>" [--accept "<outcome>"] [-v "<command>"] [--decision id] [--force]` | Open a work-round intent. Repeat `--accept` for observable completion criteria; acceptance requires a verification command. |
-| `driftseal verify` | Execute the acceptance-bound intent's predeclared command and bind machine evidence to the current Git-visible workspace contents. |
+| `driftseal verify [--allow-tracked-command]` | Execute the acceptance-bound intent's predeclared command and bind machine evidence to the current Git-visible workspace contents. Commands sourced from the tracked intent log require the explicit opt-in. |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | Close an intent honestly. |
 | `driftseal status` | Show the intent currently in progress. |
 | `driftseal log [-n N] [--all]` | Review intent history (`--all` includes reclaimed records). |
@@ -269,7 +279,9 @@ When `begin` declares one or more `--decision <id>` links, every linked
 decision must be reconciled with `driftseal decision update` before that intent can
 close as `completed` or `partial`. The update changes the current status when
 requested and appends a timestamped history entry tied to the intent. Intents
-without decision links keep the ordinary workflow.
+without decision links keep the ordinary workflow. For acceptance-bound linked
+intents, perform every decision update before `driftseal verify`, because a decision
+update changes the workspace fingerprint: reconcile, verify, then end.
 
 ## Reclaiming noise records
 

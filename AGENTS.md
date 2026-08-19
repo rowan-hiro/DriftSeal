@@ -40,8 +40,13 @@ names, flags, status tokens, and ids in English.
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
    (`driftseal end -s partial|abandoned -n "<why>"`) and `driftseal begin` a new one.
-3. **Verify, then close**: run `driftseal verify` to execute the predeclared
-   command and bind its exit status to the current Git-visible workspace contents, then
+3. **Reconcile, verify, then close**: for a linked intent, first reconcile every
+   declared decision as described below. For an acceptance-bound intent, inspect the
+   exact command shown by `driftseal status`, then run `driftseal verify` to execute it
+   and bind its exit status to the current Git-visible workspace contents. A command
+   sourced from the repository intent log is untrusted and requires
+   `--allow-tracked-command` after inspection; locally parked commands do not.
+   An intent without `--accept` uses its declared check directly. Then run
    `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"`.
    DriftSeal rejects `completed` when machine verification failed, never ran, or
    the workspace changed after it. Ignored files are outside the workspace fingerprint.
