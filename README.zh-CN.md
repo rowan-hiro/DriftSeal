@@ -208,7 +208,9 @@ DriftSeal 会先把命令输出到 stderr，并拒绝执行；只有检查并信
 验证事件会记录 exit status、耗时、输出摘要及字节数、Git HEAD，以及当前所有
 tracked 和未被 ignore 的 untracked 文件的内容指纹（intent event log 除外）。
 验证后只要这些内容发生变化，成功证据就会过期，必须重新运行；否则 DriftSeal
-会拒绝把 intent 关闭为 `completed`。被 ignore 的文件不在指纹范围内。
+会拒绝把 intent 关闭为 `completed`。命令输出会先写入临时 spool 文件，而不是
+受固定大小的内存 buffer 限制；命令退出后再回放并删除。因此 DriftSeal 不再限制
+输出大小，但实际容量仍受可用磁盘空间约束。被 ignore 的文件不在指纹范围内。
 如果当前目录不是 Git worktree，指纹不可用；此时 gate 只能证明记录到的 exit
 status，无法发现之后发生的内容变化。
 

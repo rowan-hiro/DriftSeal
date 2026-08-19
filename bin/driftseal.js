@@ -27,6 +27,7 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { isDeepStrictEqual } = require('util');
+const { StringDecoder } = require('string_decoder');
 const { execFileSync, spawnSync } = require('child_process');
 const { version: PACKAGE_VERSION } = require('../package.json');
 
@@ -48,6 +49,7 @@ const LOCK_INIT_STALE_MS = 5 * 1000;
 const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repair skipped)';
 const READ_ONLY_LOCK_WAIT_MS = Number(process.env._DRIFTSEAL_TEST_READ_ONLY_LOCK_WAIT_MS) || 1500;
 const MAX_DECISION_SLUG_LENGTH = 180;
+const VERIFICATION_OUTPUT_CHUNK_BYTES = 64 * 1024;
 
 class DriftSealError extends Error {
   constructor(message) {
@@ -3802,6 +3804,100 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
   });
 }
 
+function appendVerificationSpawnError(file, error) {
+  const stat = fs.statSync(file);
+  let prefix = '';
+  if (stat.size > 0) {
+    const fd = fs.openSync(file, 'r');
+    const lastByte = Buffer.alloc(1);
+    try {
+      fs.readSync(fd, lastByte, 0, 1, stat.size - 1);
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (lastByte[0] !== 0x0a) prefix = '\n';
+  }
+  fs.appendFileSync(file, `${prefix}${error.message}\n`, 'utf8');
+}
+
+function digestAndReplayVerificationOutput(file, writer, hash) {
+  const fd = fs.openSync(file, 'r');
+  const decoder = new StringDecoder('utf8');
+  const buffer = Buffer.allocUnsafe(VERIFICATION_OUTPUT_CHUNK_BYTES);
+  let bytes = 0;
+  let lastCharacter = null;
+
+  const consume = (text) => {
+    if (!text) return;
+    writer(text);
+    hash.update(text, 'utf8');
+    bytes += Buffer.byteLength(text);
+    lastCharacter = text.at(-1);
+  };
+
+  try {
+    while (true) {
+      const count = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (count === 0) break;
+      consume(decoder.write(buffer.subarray(0, count)));
+    }
+    consume(decoder.end());
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  return { bytes, endsWithNewline: lastCharacter === '\n' };
+}
+
+function executeVerificationCommand(command) {
+  const spool = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-verify-'));
+  const stdoutFile = path.join(spool, 'stdout');
+  const stderrFile = path.join(spool, 'stderr');
+  let stdoutFd;
+  let stderrFd;
+
+  try {
+    stdoutFd = fs.openSync(stdoutFile, 'wx', 0o600);
+    stderrFd = fs.openSync(stderrFile, 'wx', 0o600);
+    const started = process.hrtime.bigint();
+    let result;
+    try {
+      result = spawnSync(command, {
+        cwd: process.cwd(),
+        env: process.env,
+        shell: true,
+        stdio: ['ignore', stdoutFd, stderrFd],
+      });
+    } finally {
+      fs.closeSync(stdoutFd);
+      stdoutFd = undefined;
+      fs.closeSync(stderrFd);
+      stderrFd = undefined;
+    }
+    const durationMs = Number((process.hrtime.bigint() - started) / 1000000n);
+    if (result.error) appendVerificationSpawnError(stderrFile, result.error);
+
+    const hash = crypto.createHash('sha256');
+    const stdout = digestAndReplayVerificationOutput(stdoutFile, writeOutput, hash);
+    if (stdout.bytes > 0 && !stdout.endsWithNewline) printLine();
+    hash.update('\0');
+    const stderr = digestAndReplayVerificationOutput(stderrFile, writeErrorOutput, hash);
+    if (stderr.bytes > 0 && !stderr.endsWithNewline) printError();
+
+    return {
+      result,
+      durationMs,
+      outputHash: hash.digest('hex'),
+      stdoutBytes: stdout.bytes,
+      stderrBytes: stderr.bytes,
+    };
+  } finally {
+    if (stdoutFd !== undefined) fs.closeSync(stdoutFd);
+    if (stderrFd !== undefined) fs.closeSync(stderrFd);
+    fs.rmSync(spool, { recursive: true, force: true });
+  }
+}
+
 function runMachineVerification({ allowTrackedCommand = false } = {}) {
   const snapshot = withMutationLocks([logDir()], () => {
     const intent = openIntent(fold(readEvents({ repairTail: true })));
@@ -3828,39 +3924,11 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
     );
   }
 
-  const started = process.hrtime.bigint();
-  const result = spawnSync(snapshot.command, {
-    cwd: process.cwd(),
-    env: process.env,
-    shell: true,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  const durationMs = Number((process.hrtime.bigint() - started) / 1000000n);
-  const stdout = result.stdout || '';
-  let stderr = result.stderr || '';
-  if (result.error) {
-    stderr += `${stderr && !stderr.endsWith('\n') ? '\n' : ''}${result.error.message}\n`;
-  }
-  if (stdout) {
-    writeOutput(stdout);
-    if (!stdout.endsWith('\n')) printLine();
-  }
-  if (stderr) {
-    writeErrorOutput(stderr);
-    if (!stderr.endsWith('\n')) printError();
-  }
-
+  const execution = executeVerificationCommand(snapshot.command);
+  const { result, durationMs, outputHash, stdoutBytes, stderrBytes } = execution;
   const exitCode = Number.isInteger(result.status) ? result.status : 1;
   const signal = typeof result.signal === 'string' ? result.signal : null;
   const passed = exitCode === 0 && signal === null;
-  const outputHash = crypto
-    .createHash('sha256')
-    .update(stdout, 'utf8')
-    .update('\0')
-    .update(stderr, 'utf8')
-    .digest('hex');
   const verificationEvent = {
     type: 'verify',
     id: snapshot.id,
@@ -3872,8 +3940,8 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
     signal,
     durationMs,
     outputHash,
-    stdoutBytes: Buffer.byteLength(stdout),
-    stderrBytes: Buffer.byteLength(stderr),
+    stdoutBytes,
+    stderrBytes,
     workspace: workspaceFingerprint(),
     head: gitCapture(['rev-parse', 'HEAD']),
   };

@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync, execSync, spawn } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -379,6 +380,47 @@ test('machine verification records evidence and blocks failed completion', () =>
   assert.match(run(['status']), /machine-verification: failed/);
   assert.match(runFail(['end', '--status', 'completed']).stderr, /without successful machine verification/);
   assert.equal(run(['end', '--status', 'failed']).trim(), `${id} failed`);
+});
+
+test('machine verification spools output larger than 16 MiB without terminating the command', () => {
+  const { run, events } = setup();
+  const stdoutBytes = 16 * 1024 * 1024 + 4096;
+  const utf8Boundary = 64 * 1024 - 1;
+  const stdout = Buffer.concat([
+    Buffer.alloc(utf8Boundary, 120),
+    Buffer.from('€'),
+    Buffer.alloc(stdoutBytes - utf8Boundary - Buffer.byteLength('€'), 120),
+  ]);
+  const stderr = 'verification warning';
+  const script =
+    `process.stdout.write(Buffer.concat([Buffer.alloc(${utf8Boundary},120),` +
+    `Buffer.from('€'),Buffer.alloc(${stdoutBytes - utf8Boundary - Buffer.byteLength('€')},120)]));` +
+    `process.stderr.write(${JSON.stringify(stderr)})`;
+  run([
+    'begin',
+    'verify a command with large output',
+    '--accept',
+    'the command is not terminated because its output exceeds 16 MiB',
+    '--verify',
+    `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+  ]);
+
+  run(['verify'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const verification = events().find((event) => event.type === 'verify');
+  assert.equal(verification.passed, true);
+  assert.equal(verification.exitCode, 0);
+  assert.equal(verification.stdoutBytes, stdoutBytes);
+  assert.equal(verification.stderrBytes, Buffer.byteLength(stderr));
+  assert.equal(
+    verification.outputHash,
+    crypto
+      .createHash('sha256')
+      .update(stdout)
+      .update('\0')
+      .update(stderr)
+      .digest('hex')
+  );
+  run(['end', '--status', 'completed']);
 });
 
 test('machine verification is opt-in and requires an open acceptance-bound intent', () => {

@@ -221,6 +221,9 @@ digest and byte counts, Git HEAD, and a fingerprint of every tracked or
 untracked non-ignored workspace file except the intent event log. A successful
 result becomes stale if those workspace contents change. DriftSeal therefore
 rejects `completed` until the command passes again on the current workspace.
+Command output is spooled to temporary files instead of a fixed in-memory
+buffer, then replayed after the command exits and removed. Output size therefore
+has no DriftSeal-defined limit, though it remains bounded by available disk space.
 Ignored files are deliberately outside this fingerprint. Outside a Git
 worktree the fingerprint is unavailable, so the gate proves only the command's
 recorded exit status and cannot detect later content changes.
