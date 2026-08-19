@@ -7,7 +7,7 @@ and decision records in `.decision-log/` (override with
 `$DRIFTSEAL_DECISION_HOME`); both are meant to be committed.
 
 <!-- driftseal -->
-<!-- driftseal-version: 12 -->
+<!-- driftseal-version: 13 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: intent write-ahead log
@@ -24,7 +24,8 @@ names, flags, status tokens, and ids in English.
 
 1. **Write intent first**, before modifying, creating, or deleting files, or
    making any other non-Git change that may need a rollback:
-   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.
+   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.
+   Repeat `--accept` when completion has multiple independently observable criteria.
    Add one `--decision <id>` for each existing decision this round may change.
    Git operations never need an intent and are not included in the intent log;
    Git maintains their history. This includes inspection, branch and worktree
@@ -39,8 +40,12 @@ names, flags, status tokens, and ids in English.
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
    (`driftseal end -s partial|abandoned -n "<why>"`) and `driftseal begin` a new one.
-3. **Verify, then close**: run the declared verification, then
-   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<what the verification showed, written for the next agent>"`.
+3. **Verify, then close**: run `driftseal verify` to execute the predeclared
+   command and bind its exit status to the current Git-visible workspace contents, then
+   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"`.
+   DriftSeal rejects `completed` when machine verification failed, never ran, or
+   the workspace changed after it. Ignored files are outside the workspace fingerprint.
+   Outside a Git worktree, only the recorded exit status is available.
    Never report success without closing the intent.
    Before closing a linked intent as `completed` or `partial`, reconcile every
    declared decision with `driftseal decision update <id> --status <status> --note "<why>"`.
@@ -72,7 +77,7 @@ Log: `.intent-log/events.jsonl` (override with `$DRIFTSEAL_HOME`); commit it wit
 <!-- /driftseal -->
 
 <!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 12 -->
+<!-- driftseal-decisions-version: 13 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: decision log

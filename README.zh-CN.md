@@ -132,7 +132,7 @@ v1 server 提供：
 | MCP capability | 用途 |
 | --- | --- |
 | `driftseal_status`, `driftseal_log` | 读取当前 intent 和 intent 历史。 |
-| `driftseal_begin`, `driftseal_end` | 开启并诚实关闭一轮工作。 |
+| `driftseal_begin`, `driftseal_verify`, `driftseal_end` | 开启一轮工作、采集机器验证证据，并诚实关闭。 |
 | `driftseal_absorb` | 修复 merge 撞号，或吸收另一条 worktree 日志并重编号冲突 ID。 |
 | `driftseal_reclaim`, `driftseal_unreclaim` | 用 append-only 标记隐藏已无意义的已关闭记录，或将其恢复。 |
 | `driftseal_decision_list`, `driftseal_decision_show` | 查找并读取 MADR record。 |
@@ -186,10 +186,29 @@ Kimi Code 只在全局 `config.toml` 中记录 hook，因此该 target 必须指
 
 ```sh
 driftseal begin "add rate limiting to /api/login" \
+  --accept "the sixth login attempt within one minute receives HTTP 429" \
   --verify "npm test test/rate-limit.test.js"
 ```
 
-完成工作并运行约定的 check 后，记录实际结果：
+完成工作后，让 DriftSeal 执行预先声明的命令：
+
+```sh
+driftseal verify
+```
+
+验证事件会记录 exit status、耗时、输出摘要及字节数、Git HEAD，以及当前所有
+tracked 和未被 ignore 的 untracked 文件的内容指纹（intent event log 除外）。
+验证后只要这些内容发生变化，成功证据就会过期，必须重新运行；否则 DriftSeal
+会拒绝把 intent 关闭为 `completed`。被 ignore 的文件不在指纹范围内。
+如果当前目录不是 Git worktree，指纹不可用；此时 gate 只能证明记录到的 exit
+status，无法发现之后发生的内容变化。
+
+这只能证明预先声明的命令在记录的内容上通过，不能证明 acceptance criterion
+或测试本身足够可靠。为兼容旧记录，没有 `--accept` 的 intent 仍沿用手动验证流程。
+如果验证器也由同一个 agent 编写、结果带有主观判断，或改动风险较高，应再使用
+受保护的 CI、独立 review 或人工确认。
+
+最后记录实际结果：
 
 ```sh
 driftseal end \
@@ -211,7 +230,8 @@ intent；会被提交且无法重建的内容改动（比如编辑 `.gitignore`�
 
 | Command | 用途 |
 | --- | --- |
-| `driftseal begin "<intent>" [-v "<verify>"] [--decision id] [--force]` | 开启一轮工作，并可关联已有 decision。 |
+| `driftseal begin "<intent>" [--accept "<outcome>"] [-v "<command>"] [--decision id] [--force]` | 开启一轮工作。可重复使用 `--accept` 声明可观察的完成条件；一旦声明，就必须同时提供验证命令。 |
+| `driftseal verify` | 执行 acceptance-bound intent 预先声明的命令，并把机器证据绑定到当前 Git 可见的工作区内容。 |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | 诚实地关闭 intent。 |
 | `driftseal status` | 查看当前进行中的 intent。 |
 | `driftseal log [-n N] [--all]` | 查看 intent 历史（`--all` 包含已回收的记录）。 |

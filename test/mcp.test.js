@@ -36,9 +36,15 @@ test('programmatic API returns structured records without changing its fixed roo
 
   assert.equal(api.root, fs.realpathSync(root));
   assert.equal(api.status(), null);
-  const opened = api.begin({ intent: 'exercise structured API', verify: 'true' });
+  const opened = api.begin({
+    intent: 'exercise structured API',
+    acceptance: ['the declared command exits successfully'],
+    verify: 'true',
+  });
   assert.equal(opened.status, 'in_progress');
   assert.equal(opened.intent, 'exercise structured API');
+  const verification = api.verify();
+  assert.equal(verification.verification.passed, true);
   const closed = api.end({ status: 'completed', note: 'done', verifyResult: 'passed' });
   assert.equal(closed.status, 'completed');
   assert.equal(api.log().length, 1);
@@ -97,6 +103,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
       [
         'driftseal_status',
         'driftseal_begin',
+        'driftseal_verify',
         'driftseal_end',
         'driftseal_log',
         'driftseal_absorb',
@@ -109,6 +116,8 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
       ]
     );
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_status').annotations.readOnlyHint, true);
+    assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_verify').annotations.destructiveHint, true);
+    assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_verify').annotations.openWorldHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_end').annotations.destructiveHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_absorb').annotations.destructiveHint, true);
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_reclaim').annotations.destructiveHint, true);
@@ -158,6 +167,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
 
     const linked = await call(client, 'driftseal_begin', {
       intent: 'reconcile MCP boundary decision',
+      acceptance: ['the fixed-root workflow passes its declared check'],
       verify: 'true',
       decisions: ['1'],
     });
@@ -169,6 +179,10 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
       note: 'The fixed-root boundary passed the MCP integration test.',
     });
     assert.equal(updated.structuredContent.decision.status, 'accepted');
+
+    const verified = await call(client, 'driftseal_verify');
+    assert.equal(verified.isError, undefined);
+    assert.equal(verified.structuredContent.verification.passed, true);
 
     const completed = await call(client, 'driftseal_end', {
       status: 'completed',

@@ -88,6 +88,14 @@ function setupGitRepository(prefix = 'driftseal-git-test-') {
       stdio: ['ignore', 'pipe', 'pipe'],
       ...opts,
     });
+  const runFail = (args, opts = {}) => {
+    try {
+      run(args, opts);
+    } catch (err) {
+      return err;
+    }
+    throw new Error(`expected failure: driftseal ${args.join(' ')}`);
+  };
   git(['init', '-b', 'main']);
   git(['config', 'user.email', 'test@example.com']);
   git(['config', 'user.name', 'Test']);
@@ -98,7 +106,7 @@ function setupGitRepository(prefix = 'driftseal-git-test-') {
     'merge.driftseal.driver',
     `${process.execPath} ${DRIFTSEAL} absorb --git %O %A %B`,
   ]);
-  return { cwd, env, git, gitFail, run };
+  return { cwd, env, git, gitFail, run, runFail };
 }
 
 /** The remediation command a warning tells the user to run, verbatim. */
@@ -129,6 +137,27 @@ function readJsonl(file) {
     .split('\n')
     .filter((line) => line.length > 0)
     .map(JSON.parse);
+}
+
+function protocolV12(content) {
+  return content
+    .replace('driftseal-version: 13', 'driftseal-version: 12')
+    .replace('driftseal-decisions-version: 13', 'driftseal-decisions-version: 12')
+    .replace(
+      '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
+        '   Repeat `--accept` when completion has multiple independently observable criteria.',
+      '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.'
+    )
+    .replace(
+      '3. **Verify, then close**: run `driftseal verify` to execute the predeclared\n' +
+        '   command and bind its exit status to the current Git-visible workspace contents, then\n' +
+        '   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"`.\n' +
+        '   DriftSeal rejects `completed` when machine verification failed, never ran, or\n' +
+        '   the workspace changed after it. Ignored files are outside the workspace fingerprint.\n' +
+        '   Outside a Git worktree, only the recorded exit status is available.',
+      '3. **Verify, then close**: run the declared verification, then\n' +
+        '   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<what the verification showed, written for the next agent>"`.'
+    );
 }
 
 /** A committed repository whose open intents are parked in Git metadata. */
@@ -188,6 +217,7 @@ test('--version and -V print the package version', () => {
   assert.equal(run(['-V']), `${metadata.version}\n`);
   assert.match(run(['help']), /driftseal --version \| -V/);
   assert.match(run(['help']), /driftseal init \[--lang <tag>\] \[--local-log\]/);
+  assert.match(run(['help']), /driftseal verify/);
   assert.match(run(['help']), /parks an open intent in Git metadata until end/);
   assert.match(runFail(['--version', 'extra']).stderr, /usage: driftseal --version \| -V/);
 });
@@ -201,6 +231,7 @@ test('subcommand --help prints its usage and exits 0', () => {
     [['decision', 'list', '--help'], /usage: driftseal decision list/],
     [['decision', 'show', '--help'], /usage: driftseal decision show/],
     [['begin', '--help'], /usage: driftseal begin/],
+    [['verify', '--help'], /usage: driftseal verify/],
     [['end', '--help'], /usage: driftseal end/],
     [['status', '--help'], /usage: driftseal status/],
     [['log', '--help'], /usage: driftseal log/],
@@ -288,9 +319,98 @@ test('begin creates an in_progress intent and prints its id', () => {
   assert.match(id, /^\d{4}-\d{2}-\d{2}-001$/);
   const [ev] = events();
   assert.equal(ev.type, 'begin');
-  assert.equal(ev.schemaVersion, 3);
+  assert.equal(ev.schemaVersion, 4);
   assert.equal(ev.intent, 'add login form');
+  assert.deepEqual(ev.acceptance, []);
   assert.equal(ev.verify, 'npm test');
+});
+
+test('begin records acceptance criteria and requires a machine verification command', () => {
+  const { run, runFail, events } = setup();
+  assert.match(
+    runFail(['begin', 'missing command', '--accept', 'observable result']).stderr,
+    /--accept requires --verify/
+  );
+  assert.match(
+    runFail(['begin', 'blank criterion', '--accept', '   ', '--verify', 'true']).stderr,
+    /non-empty observable outcome/
+  );
+
+  run([
+    'begin',
+    'acceptance-bound work',
+    '--accept',
+    'first observable result',
+    '--accept',
+    'second observable result',
+    '--verify',
+    'true',
+  ]);
+  assert.deepEqual(events()[0].acceptance, [
+    'first observable result',
+    'second observable result',
+  ]);
+});
+
+test('machine verification records evidence and blocks failed completion', () => {
+  const { run, runFail, events } = setup();
+  const id = run([
+    'begin',
+    'prove a failing command',
+    '--accept',
+    'the command exits successfully',
+    '--verify',
+    `${JSON.stringify(process.execPath)} -e "process.exit(7)"`,
+  ]).trim();
+
+  const failure = runFail(['verify']);
+  assert.equal(failure.status, 7);
+  const verification = events().find((event) => event.type === 'verify');
+  assert.equal(verification.id, id);
+  assert.equal(verification.passed, false);
+  assert.equal(verification.exitCode, 7);
+  assert.match(verification.outputHash, /^[a-f0-9]{64}$/);
+  assert.equal(verification.workspace, null);
+  assert.match(run(['status']), /machine-verification: failed/);
+  assert.match(runFail(['end', '--status', 'completed']).stderr, /without successful machine verification/);
+  assert.equal(run(['end', '--status', 'failed']).trim(), `${id} failed`);
+});
+
+test('machine verification is opt-in and requires an open acceptance-bound intent', () => {
+  const { run, runFail } = setup();
+  assert.match(runFail(['verify']).stderr, /no intent in progress/);
+  run(['begin', 'manual compatibility round', '--verify', 'true']);
+  assert.match(runFail(['verify']).stderr, /has no acceptance criteria/);
+  run(['end', '--status', 'completed']);
+});
+
+test('completed acceptance-bound intents require fresh workspace-bound verification', () => {
+  const { cwd, git, run, runFail } = setupGitRepository('driftseal-machine-proof-');
+  fs.writeFileSync(path.join(cwd, 'work.txt'), 'before\n');
+  git(['add', '.gitattributes', 'AGENTS.md', 'work.txt']);
+  git(['commit', '-m', 'base']);
+
+  const id = run([
+    'begin',
+    'change tracked content',
+    '--accept',
+    'the declared check passes for the resulting workspace',
+    '--verify',
+    `${JSON.stringify(process.execPath)} -e "process.stdout.write('verified')"`,
+  ]).trim();
+  const verified = run(['verify']);
+  assert.match(verified, /verified/);
+  assert.match(verified, /verification passed/);
+
+  fs.writeFileSync(path.join(cwd, 'work.txt'), 'after\n');
+  assert.match(runFail(['end', '--status', 'completed']).stderr, /workspace changed/);
+
+  run(['verify']);
+  assert.equal(run(['end', '--status', 'completed']).trim(), `${id} completed`);
+
+  const history = run(['log', '--last', '1']);
+  assert.match(history, /accept: the declared check passes/);
+  assert.match(history, /machine-verification: passed/);
 });
 
 test('begin is rejected while another intent is open', () => {
@@ -926,6 +1046,29 @@ test('event schema fails closed on newer clients and unreconciled legacy closure
   fs.writeFileSync(
     eventFile,
     [
+      {
+        schemaVersion: 4,
+        type: 'begin',
+        id: '2026-01-01-001',
+        ts: 'now',
+        intent: 'acceptance-bound',
+        acceptance: ['observable outcome'],
+        verify: 'true',
+      },
+      {
+        schemaVersion: 4,
+        type: 'end',
+        id: '2026-01-01-001',
+        ts: 'later',
+        status: 'completed',
+      },
+    ].map(JSON.stringify).join('\n') + '\n'
+  );
+  assert.match(runFail(['log']).stderr, /without successful machine verification/);
+
+  fs.writeFileSync(
+    eventFile,
+    [
       { type: 'begin', id: '2026-01-01-001', ts: 'now', intent: 'linked', decisions: ['0001'] },
       { type: 'end', id: '2026-01-01-001', ts: 'later', status: 'completed' },
     ].map(JSON.stringify).join('\n') + '\n'
@@ -1446,7 +1589,7 @@ test('reclaim hides a failed record behind a marker without deleting it', () => 
   const evs = events();
   const marker = evs.at(-1);
   assert.equal(marker.type, 'reclaim');
-  assert.equal(marker.schemaVersion, 3);
+  assert.equal(marker.schemaVersion, 4);
   assert.equal(marker.id, id);
   assert.equal(marker.reason, 'harness sandbox noise, not project signal');
   assert.ok(evs.some((ev) => ev.type === 'end' && ev.id === id)); // original lines kept
@@ -1569,8 +1712,10 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /AGENTS\.md` protocol is the source of truth/);
   assert.match(first, /Use the `driftseal` CLI by\s+default/);
   assert.match(first, /MCP and lifecycle hooks are optional adapters/);
-  assert.match(first, /driftseal-version: 12/);
-  assert.match(first, /what the verification showed, written for the next agent/);
+  assert.match(first, /driftseal-version: 13/);
+  assert.match(first, /--accept "<observable outcome>"/);
+  assert.match(first, /run `driftseal verify`/);
+  assert.match(first, /workspace changed after it/);
   assert.match(first, /reconstructed from Git state/);
   assert.match(first, /Size an intent to the smallest unit/);
   assert.match(first, /To revise a decision's prose/);
@@ -1596,7 +1741,14 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
-  const versionEleven = first
+  const versionTwelve = protocolV12(first);
+  const upgradeTwelveCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v12-'));
+  const upgradeTwelveFile = path.join(upgradeTwelveCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeTwelveFile, versionTwelve);
+  run(['init'], { cwd: upgradeTwelveCwd });
+  assert.equal(fs.readFileSync(upgradeTwelveFile, 'utf8'), first);
+
+  const versionEleven = versionTwelve
     .replace('driftseal-version: 12', 'driftseal-version: 11')
     .replace('driftseal-decisions-version: 12', 'driftseal-decisions-version: 11')
     .replace(
@@ -1743,8 +1895,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 12/);
-  assert.match(upgraded, /driftseal-decisions-version: 12/);
+  assert.match(upgraded, /driftseal-version: 13/);
+  assert.match(upgraded, /driftseal-decisions-version: 13/);
   assert.match(upgraded, /driftseal-log-language: en/);
   assert.match(upgraded, /# trailing user instructions/);
 
@@ -1753,7 +1905,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeNineFile, versionNine.trimEnd() + '\n');
   run(['init'], { cwd: upgradeNineCwd });
   const upgradedNine = fs.readFileSync(upgradeNineFile, 'utf8');
-  assert.match(upgradedNine, /driftseal-version: 12/);
+  assert.match(upgradedNine, /driftseal-version: 13/);
   assert.match(upgradedNine, /Git operations never need an intent/);
   assert.match(upgradedNine, /merges, rebases, cherry-picks, tags, and pushes/);
 
@@ -1762,7 +1914,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeTenFile, versionTen.trimEnd() + '\n');
   run(['init'], { cwd: upgradeTenCwd });
   const upgradedTen = fs.readFileSync(upgradeTenFile, 'utf8');
-  assert.match(upgradedTen, /driftseal-version: 12/);
+  assert.match(upgradedTen, /driftseal-version: 13/);
   assert.match(upgradedTen, /driftseal-log-language: en/);
   assert.match(upgradedTen, /Write intent-log prose/);
 
@@ -1771,9 +1923,9 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeElevenFile, versionEleven.trimEnd() + '\n');
   run(['init'], { cwd: upgradeElevenCwd });
   const upgradedEleven = fs.readFileSync(upgradeElevenFile, 'utf8');
-  assert.match(upgradedEleven, /driftseal-version: 12/);
-  assert.match(upgradedEleven, /driftseal-decisions-version: 12/);
-  assert.match(upgradedEleven, /what the verification showed, written for the next agent/);
+  assert.match(upgradedEleven, /driftseal-version: 13/);
+  assert.match(upgradedEleven, /driftseal-decisions-version: 13/);
+  assert.match(upgradedEleven, /run `driftseal verify`/);
   assert.match(upgradedEleven, /reconstructed from Git state/);
   assert.match(upgradedEleven, /Size an intent to the smallest unit/);
   assert.doesNotMatch(upgradedEleven, /<verify output>/);
@@ -1783,7 +1935,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeEightFile, versionEight.trimEnd() + '\n');
   run(['init'], { cwd: upgradeEightCwd });
   const upgradedEight = fs.readFileSync(upgradeEightFile, 'utf8');
-  assert.match(upgradedEight, /driftseal-version: 12/);
+  assert.match(upgradedEight, /driftseal-version: 13/);
   assert.match(upgradedEight, /driftseal absorb/);
   assert.match(upgradedEight, /colliding decision ids are remapped/);
 
@@ -1792,7 +1944,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSevenFile, versionSeven.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSevenCwd });
   const upgradedSeven = fs.readFileSync(upgradeSevenFile, 'utf8');
-  assert.match(upgradedSeven, /driftseal-version: 12/);
+  assert.match(upgradedSeven, /driftseal-version: 13/);
   assert.match(upgradedSeven, /source of truth/);
   assert.match(upgradedSeven, /--driver "<decision driver>"/);
 
@@ -1801,7 +1953,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSixFile, versionSix.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSixCwd });
   const upgradedSix = fs.readFileSync(upgradeSixFile, 'utf8');
-  assert.match(upgradedSix, /driftseal-version: 12/);
+  assert.match(upgradedSix, /driftseal-version: 13/);
   assert.match(upgradedSix, /resume it when its\s+objective still matches/);
   assert.match(upgradedSix, /--driver "<decision driver>"/);
 
@@ -1810,7 +1962,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFiveFile, versionFive.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFiveCwd });
   const upgradedFive = fs.readFileSync(upgradeFiveFile, 'utf8');
-  assert.match(upgradedFive, /driftseal-version: 12/);
+  assert.match(upgradedFive, /driftseal-version: 13/);
   assert.match(upgradedFive, /Log access goes only through DriftSeal/);
 
   const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
@@ -1818,8 +1970,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFourCwd });
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
-  assert.match(upgradedFour, /driftseal-version: 12/);
-  assert.match(upgradedFour, /driftseal-decisions-version: 12/);
+  assert.match(upgradedFour, /driftseal-version: 13/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 13/);
   assert.match(upgradedFour, /need no intent/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
@@ -1834,7 +1986,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 12/);
+  assert.match(upgradedCrLf, /driftseal-version: 13/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -1865,7 +2017,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 12', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 13', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -1895,7 +2047,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 12 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 13 -->\n', '')
     .replace('<!-- driftseal-log-language: en -->\n', '')
     .replace(
       '\n**Log language:** `en`. Write decision-log prose (title, context,\n' +
@@ -1914,8 +2066,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 12/);
-  assert.match(migratedLegacy, /driftseal-version: 12/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 13/);
+  assert.match(migratedLegacy, /driftseal-version: 13/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
 });
@@ -2005,7 +2157,7 @@ test('init upgrades a v11 protocol block written in a non-English log language',
 
   run(['init', '--lang', 'zh-CN'], { cwd });
   const current = fs.readFileSync(agentsFile, 'utf8');
-  const versionElevenChinese = current
+  const versionElevenChinese = protocolV12(current)
     .replace('driftseal-version: 12', 'driftseal-version: 11')
     .replace('driftseal-decisions-version: 12', 'driftseal-decisions-version: 11')
     .replace(
@@ -2050,7 +2202,7 @@ test('init --local-log persists the local, untracked log mode', () => {
   run(['init', '--local-log'], { cwd });
   const local = fs.readFileSync(agentsFile, 'utf8');
   assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
-  assert.match(local, /driftseal-version: 12/);
+  assert.match(local, /driftseal-version: 13/);
   assert.match(local, /keeps the log local and untracked; do not add it to commits\./);
   assert.match(local, /Keep `\.decision-log\/` local and untracked; do not add it to commits\./);
   assert.doesNotMatch(local, /commit it with the code/);
@@ -2093,7 +2245,7 @@ test('init --local-log enables local mode on an already-current repository', () 
   run(['init', '--local-log'], { cwd }); // same-version default -> local is an upgrade, not a customization
   const local = fs.readFileSync(agentsFile, 'utf8');
   assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
-  assert.match(local, /driftseal-version: 12/);
+  assert.match(local, /driftseal-version: 13/);
   assert.match(local, /keeps the log local and untracked; do not add it to commits\./);
   assert.match(local, /Keep `\.decision-log\/` local and untracked; do not add it to commits\./);
 
@@ -2135,7 +2287,7 @@ test('init --local-log --lang upgrades a v11 English protocol to local mode in o
 
   run(['init'], { cwd });
   const current = fs.readFileSync(agentsFile, 'utf8');
-  const versionEleven = current
+  const versionEleven = protocolV12(current)
     .replace('driftseal-version: 12', 'driftseal-version: 11')
     .replace('driftseal-decisions-version: 12', 'driftseal-decisions-version: 11')
     .replace(
@@ -2170,8 +2322,8 @@ test('init --local-log --lang upgrades a v11 English protocol to local mode in o
 
   run(['init', '--local-log', '--lang', 'zh-CN'], { cwd });
   const upgraded = fs.readFileSync(agentsFile, 'utf8');
-  assert.match(upgraded, /driftseal-version: 12/);
-  assert.match(upgraded, /driftseal-decisions-version: 12/);
+  assert.match(upgraded, /driftseal-version: 13/);
+  assert.match(upgraded, /driftseal-decisions-version: 13/);
   assert.match(upgraded, /driftseal-log-language: zh-CN/);
   assert.equal((upgraded.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
   assert.match(upgraded, /local and untracked/);

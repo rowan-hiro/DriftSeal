@@ -7,12 +7,14 @@
  * Intent-level write-ahead log and MADR decision log for agentic coding sessions.
  *
  * Protocol per work round:
- *   1. driftseal begin "<intent>" [--verify "<how to verify>"]   (before changes that may need a rollback)
+ *   1. driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"]
  *   2. execute the intent
- *   3. driftseal end [--status ...] [--note ...] [--verify-result ...]  (reconcile against intent)
+ *   3. driftseal verify   (for acceptance-bound machine evidence)
+ *   4. driftseal end [--status ...] [--note ...] [--verify-result ...]  (reconcile against intent)
  *
  * Events are appended to an append-only JSONL log (WAL semantics):
- *   { "type": "begin", "id", "ts", "intent", "verify" }
+ *   { "type": "begin", "id", "ts", "intent", "acceptance", "verify" }
+ *   { "type": "verify", "id", "ts", "command", "passed", "workspace" }
  *   { "type": "end",   "id", "ts", "status", "note", "verifyResult" }
  *
  * Intent log: $DRIFTSEAL_HOME/events.jsonl, or .intent-log/events.jsonl in cwd.
@@ -25,7 +27,7 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { isDeepStrictEqual } = require('util');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const { version: PACKAGE_VERSION } = require('../package.json');
 
 const END_STATUSES = ['completed', 'partial', 'failed', 'abandoned'];
@@ -37,8 +39,8 @@ const DECISION_STATUSES = [
   'deprecated',
   'superseded',
 ];
-const EVENT_SCHEMA_VERSION = 3;
-const PROTOCOL_VERSION = 12;
+const EVENT_SCHEMA_VERSION = 4;
+const PROTOCOL_VERSION = 13;
 const DEFAULT_LOG_LANGUAGE = 'en';
 const IN_PROGRESS_GIT_PATH = 'driftseal-in-progress.jsonl';
 const LOCK_STALE_MS = 30 * 60 * 1000;
@@ -66,7 +68,9 @@ class HelpRequested extends DriftSealError {
 /** Single source of truth for per-command usage lines. */
 function usageFor(key) {
   const lines = {
-    begin: 'usage: driftseal begin "<intent>" [--verify "<how to verify>"] [--decision <id>] [--force]',
+    begin:
+      'usage: driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"] [--decision <id>] [--force]',
+    verify: 'usage: driftseal verify',
     end: 'usage: driftseal end [id] [options]',
     status: 'usage: driftseal status',
     log: 'usage: driftseal log [--last N] [--all]',
@@ -121,6 +125,15 @@ function writeOutput(value) {
   process.stdout.write(text);
 }
 
+function writeErrorOutput(value) {
+  const text = String(value);
+  if (activeOutput) {
+    activeOutput.stderr += text;
+    return;
+  }
+  process.stderr.write(text);
+}
+
 if (process.env._DRIFTSEAL_TEST_UMASK) {
   process.umask(Number.parseInt(process.env._DRIFTSEAL_TEST_UMASK, 8));
 }
@@ -168,15 +181,65 @@ function normalizeEvent(event, line) {
     if (!Array.isArray(event.decisions) && event.decisions !== undefined) {
       fail(`invalid decisions list on log line ${line}`);
     }
+    if (!Array.isArray(event.acceptance) && event.acceptance !== undefined) {
+      fail(`invalid acceptance list on log line ${line}`);
+    }
+    const acceptance = event.acceptance || [];
+    if (acceptance.some((criterion) => typeof criterion !== 'string' || criterion.trim().length === 0)) {
+      fail(`invalid acceptance criterion on log line ${line}`);
+    }
+    if (acceptance.length > 0 && (typeof event.verify !== 'string' || event.verify.trim().length === 0)) {
+      fail(`acceptance-bound intent has no verification command on log line ${line}`);
+    }
     const decisions = (event.decisions || []).map(normalizeDecisionId);
     if (new Set(decisions).size !== decisions.length) {
       fail(`duplicate linked decision on log line ${line}`);
     }
-    return { ...event, decisions, head: normalizeHead(event.head) };
+    return { ...event, acceptance, decisions, head: normalizeHead(event.head) };
+  }
+
+  if (event.type === 'verify') {
+    if (
+      typeof event.verificationId !== 'string' ||
+      event.verificationId.length === 0 ||
+      typeof event.command !== 'string' ||
+      event.command.trim().length === 0 ||
+      typeof event.passed !== 'boolean' ||
+      (event.exitCode !== null && (!Number.isInteger(event.exitCode) || event.exitCode < 0)) ||
+      (event.signal !== null && typeof event.signal !== 'string') ||
+      !Number.isSafeInteger(event.durationMs) ||
+      event.durationMs < 0 ||
+      !Number.isSafeInteger(event.stdoutBytes) ||
+      event.stdoutBytes < 0 ||
+      !Number.isSafeInteger(event.stderrBytes) ||
+      event.stderrBytes < 0 ||
+      typeof event.outputHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(event.outputHash) ||
+      (event.workspace !== null &&
+        (typeof event.workspace !== 'string' || !/^[a-f0-9]{64}$/.test(event.workspace))) ||
+      event.passed !== (event.exitCode === 0 && event.signal === null)
+    ) {
+      fail(`invalid verification event on log line ${line}`);
+    }
+    return { ...event, head: normalizeHead(event.head) };
   }
 
   if (event.type === 'end') {
     if (!END_STATUSES.includes(event.status)) fail(`invalid end event on log line ${line}`);
+    if (
+      event.verificationId !== undefined &&
+      event.verificationId !== null &&
+      (typeof event.verificationId !== 'string' || event.verificationId.length === 0)
+    ) {
+      fail(`invalid end verification id on log line ${line}`);
+    }
+    if (
+      event.workspace !== undefined &&
+      event.workspace !== null &&
+      (typeof event.workspace !== 'string' || !/^[a-f0-9]{64}$/.test(event.workspace))
+    ) {
+      fail(`invalid end workspace on log line ${line}`);
+    }
     return { ...event, head: normalizeHead(event.head) };
   }
 
@@ -817,6 +880,7 @@ function fold(events) {
         id: ev.id,
         tsBegin: ev.ts,
         intent: ev.intent,
+        acceptance: Array.isArray(ev.acceptance) ? ev.acceptance : [],
         verify: ev.verify || null,
         beginHead: ev.head || null,
         decisions: Array.isArray(ev.decisions) ? ev.decisions : [],
@@ -824,6 +888,8 @@ function fold(events) {
         decisionPrepares: [],
         decisionTerminals: [],
         decisionUpdates: [],
+        verificationAttempts: [],
+        verification: null,
         status: 'in_progress',
         tsEnd: null,
         note: null,
@@ -834,6 +900,20 @@ function fold(events) {
         reclaimedAt: null,
       });
       order.push(ev.id);
+    } else if (ev.type === 'verify') {
+      const rec = records.get(ev.id);
+      if (!rec) fail(`verification event references unknown intent id: ${ev.id}`);
+      if (rec.status !== 'in_progress') {
+        fail(`verification occurred after intent ${ev.id} was closed`);
+      }
+      if (rec.acceptance.length === 0 || !rec.verify) {
+        fail(`verification event references intent ${ev.id} without acceptance criteria`);
+      }
+      if (ev.command !== rec.verify) {
+        fail(`verification command does not match intent ${ev.id}`);
+      }
+      rec.verificationAttempts.push(ev);
+      rec.verification = ev;
     } else if (ev.type === 'reclaim' || ev.type === 'unreclaim') {
       const rec = records.get(ev.id);
       if (!rec) fail(`${ev.type} event references unknown intent id: ${ev.id}`);
@@ -876,6 +956,18 @@ function fold(events) {
           ))
       ) {
         fail(`linked intent ${ev.id} was closed without reconciling every declared decision`);
+      }
+      if (ev.status === 'completed' && rec.acceptance.length > 0) {
+        if (!rec.verification || !rec.verification.passed) {
+          fail(`acceptance-bound intent ${ev.id} was completed without successful machine verification`);
+        }
+        if (
+          (ev.schemaVersion || 1) < 4 ||
+          ev.verificationId !== rec.verification.verificationId ||
+          (ev.workspace ?? null) !== rec.verification.workspace
+        ) {
+          fail(`acceptance-bound intent ${ev.id} was completed with stale machine verification`);
+        }
       }
       rec.status = ev.status;
       rec.tsEnd = ev.ts;
@@ -1335,8 +1427,19 @@ function parseArgs(argv, spec, usageKey) {
 function render(rec) {
   const lines = [`[${rec.id}] ${rec.status}`];
   lines.push(`  intent: ${rec.intent}`);
+  for (const criterion of rec.acceptance) lines.push(`  accept: ${criterion}`);
   if (rec.decisions.length > 0) lines.push(`  decisions: ${rec.decisions.join(', ')}`);
   if (rec.verify) lines.push(`  verify: ${rec.verify}`);
+  if (rec.verification) {
+    const state = rec.verification.passed ? 'passed' : 'failed';
+    const workspace = rec.verification.workspace
+      ? `, workspace ${rec.verification.workspace.slice(0, 12)}`
+      : ', workspace unavailable';
+    lines.push(
+      `  machine-verification: ${state} (exit ${rec.verification.exitCode ?? '-'}, ` +
+        `${rec.verification.durationMs} ms${workspace})`
+    );
+  }
   if (rec.verifyResult) lines.push(`  verify-result: ${rec.verifyResult}`);
   if (rec.note) lines.push(`  note: ${rec.note}`);
   if (rec.beginHead || rec.endHead) {
@@ -1347,12 +1450,31 @@ function render(rec) {
   return lines.join('\n');
 }
 
+function publicVerification(verification) {
+  if (!verification) return null;
+  return {
+    id: verification.verificationId,
+    passed: verification.passed,
+    exitCode: verification.exitCode,
+    signal: verification.signal,
+    durationMs: verification.durationMs,
+    outputHash: verification.outputHash,
+    stdoutBytes: verification.stdoutBytes,
+    stderrBytes: verification.stderrBytes,
+    workspace: verification.workspace,
+    head: verification.head,
+    ranAt: verification.ts,
+  };
+}
+
 function publicIntent(rec) {
   if (!rec) return null;
   return {
     id: rec.id,
     intent: rec.intent,
+    acceptance: [...rec.acceptance],
     verify: rec.verify,
+    verification: publicVerification(rec.verification),
     decisions: [...rec.decisions],
     status: rec.status,
     note: rec.note,
@@ -1634,7 +1756,8 @@ ${intentLogLanguageParagraph(language)}
 
 1. **Write intent first**, before modifying, creating, or deleting files, or
    making any other non-Git change that may need a rollback:
-   \`driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"\`.
+   \`driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"\`.
+   Repeat \`--accept\` when completion has multiple independently observable criteria.
    Add one \`--decision <id>\` for each existing decision this round may change.
    Git operations never need an intent and are not included in the intent log;
    Git maintains their history. This includes inspection, branch and worktree
@@ -1649,8 +1772,12 @@ ${intentLogLanguageParagraph(language)}
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
    (\`driftseal end -s partial|abandoned -n "<why>"\`) and \`driftseal begin\` a new one.
-3. **Verify, then close**: run the declared verification, then
-   \`driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<what the verification showed, written for the next agent>"\`.
+3. **Verify, then close**: run \`driftseal verify\` to execute the predeclared
+   command and bind its exit status to the current Git-visible workspace contents, then
+   \`driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"\`.
+   DriftSeal rejects \`completed\` when machine verification failed, never ran, or
+   the workspace changed after it. Ignored files are outside the workspace fingerprint.
+   Outside a Git worktree, only the recorded exit status is available.
    Never report success without closing the intent.
    Before closing a linked intent as \`completed\` or \`partial\`, reconcile every
    declared decision with \`driftseal decision update <id> --status <status> --note "<why>"\`.
@@ -1682,8 +1809,25 @@ Log: \`.intent-log/events.jsonl\` (override with \`$DRIFTSEAL_HOME\`); ${localLo
 ${INTENT_PROTOCOL_END}`;
 }
 
-function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE) {
-  const v11 = intentProtocolBlock(version, language)
+function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  const v12 = intentProtocolBlock(version, language, localLog)
+    .replace(
+      '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
+        '   Repeat `--accept` when completion has multiple independently observable criteria.',
+      '   `driftseal begin "<what this round will accomplish>" --verify "<command or check that proves it>"`.'
+    )
+    .replace(
+      '3. **Verify, then close**: run `driftseal verify` to execute the predeclared\n' +
+        '   command and bind its exit status to the current Git-visible workspace contents, then\n' +
+        '   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<optional context for the next agent>"`.\n' +
+        '   DriftSeal rejects `completed` when machine verification failed, never ran, or\n' +
+        '   the workspace changed after it. Ignored files are outside the workspace fingerprint.\n' +
+        '   Outside a Git worktree, only the recorded exit status is available.',
+      '3. **Verify, then close**: run the declared verification, then\n' +
+        '   `driftseal end -s completed|partial|failed|abandoned -n "<what happened>" -r "<what the verification showed, written for the next agent>"`.'
+    );
+  if (version >= 12) return v12;
+  const v11 = v12
     .replace(
       '-r "<what the verification showed, written for the next agent>"',
       '-r "<verify output>"'
@@ -1876,9 +2020,9 @@ When an intent declares an existing decision with \`--decision <id>\`, use
 Commit \`.decision-log/\` with the code.`;
 }
 
-function previousDecisionProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE) {
-  if (version >= 11) return decisionProtocolBlock(version, language);
-  const v10 = stripDecisionLogLanguage(decisionProtocolBlock(version, language), language);
+function previousDecisionProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  if (version >= 11) return decisionProtocolBlock(version, language, localLog);
+  const v10 = stripDecisionLogLanguage(decisionProtocolBlock(version, language, localLog), language);
   if (version >= 9) return v10;
   const v8 = v10.replace(
     '\nAfter a merge, colliding decision ids are remapped with `driftseal absorb`;\n' +
@@ -2627,16 +2771,20 @@ function hookReminder(event, { readOnly = false } = {}) {
   if (event === 'prompt') {
     return (
       'DriftSeal reminder: if this round will modify files or anything else that may need a ' +
-      'rollback, begin an intent first: driftseal begin "<intent>" --verify "<check>". ' +
+      'rollback, begin an intent first: driftseal begin "<intent>" --accept "<observable outcome>" ' +
+      '--verify "<command>". ' +
       'Questions, read-only exploration, and single-step checks need no intent — skip this ' +
       'reminder when it does not apply.'
     );
   }
   const open = openIntent(fold(readEvents({ file, readOnly })));
   if (open) {
+    const verification = open.acceptance.length > 0
+      ? 'run driftseal verify and close it with driftseal end'
+      : 'run the declared verification and close it with driftseal end';
     return (
       `DriftSeal reminder: intent ${open.id} is still in_progress: "${open.intent}". ` +
-      'If its work is done, run the declared verification and close it with driftseal end; ' +
+      `If its work is done, ${verification}; ` +
       'if this turn was unrelated, ignore this reminder.'
     );
   }
@@ -2709,6 +2857,72 @@ function gitCaptureLine(args, cwd = process.cwd()) {
 
 function isGitWorkTree(cwd = process.cwd()) {
   return gitCapture(['rev-parse', '--is-inside-work-tree'], cwd) === 'true';
+}
+
+/**
+ * Hash the material Git-visible workspace contents rather than trusting the
+ * current commit alone. Any tracked or untracked (non-ignored) content change
+ * makes the verification stale.
+ * The intent event log is excluded because recording verification and closure
+ * necessarily appends to it.
+ */
+function workspaceFingerprint(cwd = process.cwd()) {
+  if (!isGitWorkTree(cwd)) return null;
+  const root = gitCaptureLine(['rev-parse', '--show-toplevel'], cwd);
+  if (!root) return null;
+  const listing = gitCaptureRaw(
+    ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+    root
+  );
+  if (listing === null) return null;
+
+  const excludedFile = path.resolve(logFile());
+  const excludedLockPrefixes = [logDir(), decisionDir()].map((directory) =>
+    path.resolve(directory, '.driftseal.lock')
+  );
+  const files = [...new Set(listing.split('\0').filter(Boolean))].sort();
+  const hash = crypto.createHash('sha256');
+  for (const relative of files) {
+    const target = path.resolve(root, relative);
+    if (
+      target === excludedFile ||
+      excludedLockPrefixes.some(
+        (prefix) => target === prefix || target.startsWith(`${prefix}${path.sep}`) || target.startsWith(`${prefix}.stale.`)
+      )
+    ) {
+      continue;
+    }
+    hash.update(relative, 'utf8');
+    hash.update('\0');
+    let stat;
+    try {
+      stat = fs.lstatSync(target);
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        hash.update('missing\0');
+        continue;
+      }
+      throw err;
+    }
+    hash.update(String(stat.mode & 0o111));
+    hash.update('\0');
+    if (stat.isSymbolicLink()) {
+      hash.update('symlink\0');
+      hash.update(fs.readlinkSync(target));
+    } else if (stat.isFile()) {
+      hash.update('file\0');
+      hash.update(fs.readFileSync(target));
+    } else if (stat.isDirectory()) {
+      hash.update('directory\0');
+      hash.update(gitCapture(['rev-parse', 'HEAD'], target) || 'no-head');
+      hash.update('\0');
+      hash.update(gitCaptureRaw(['status', '--porcelain=v1', '-z'], target) || '');
+    } else {
+      hash.update('other\0');
+    }
+    hash.update('\0');
+  }
+  return hash.digest('hex');
 }
 
 /**
@@ -3577,9 +3791,88 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
   });
 }
 
+function runMachineVerification() {
+  const snapshot = withMutationLocks([logDir()], () => {
+    const intent = openIntent(fold(readEvents({ repairTail: true })));
+    if (!intent) fail('no intent in progress; nothing to verify');
+    if (intent.acceptance.length === 0) {
+      fail(`intent ${intent.id} has no acceptance criteria; declare them with driftseal begin --accept`);
+    }
+    if (!intent.verify) fail(`intent ${intent.id} has no verification command`);
+    return { id: intent.id, command: intent.verify };
+  });
+
+  const started = process.hrtime.bigint();
+  const result = spawnSync(snapshot.command, {
+    cwd: process.cwd(),
+    env: process.env,
+    shell: true,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const durationMs = Number((process.hrtime.bigint() - started) / 1000000n);
+  const stdout = result.stdout || '';
+  let stderr = result.stderr || '';
+  if (result.error) {
+    stderr += `${stderr && !stderr.endsWith('\n') ? '\n' : ''}${result.error.message}\n`;
+  }
+  if (stdout) {
+    writeOutput(stdout);
+    if (!stdout.endsWith('\n')) printLine();
+  }
+  if (stderr) {
+    writeErrorOutput(stderr);
+    if (!stderr.endsWith('\n')) printError();
+  }
+
+  const exitCode = Number.isInteger(result.status) ? result.status : 1;
+  const signal = typeof result.signal === 'string' ? result.signal : null;
+  const passed = exitCode === 0 && signal === null;
+  const outputHash = crypto
+    .createHash('sha256')
+    .update(stdout, 'utf8')
+    .update('\0')
+    .update(stderr, 'utf8')
+    .digest('hex');
+  const verificationEvent = {
+    type: 'verify',
+    id: snapshot.id,
+    verificationId: crypto.randomUUID(),
+    ts: new Date().toISOString(),
+    command: snapshot.command,
+    passed,
+    exitCode,
+    signal,
+    durationMs,
+    outputHash,
+    stdoutBytes: Buffer.byteLength(stdout),
+    stderrBytes: Buffer.byteLength(stderr),
+    workspace: workspaceFingerprint(),
+    head: gitCapture(['rev-parse', 'HEAD']),
+  };
+
+  const intent = withMutationLocks([logDir()], () => {
+    const events = readEvents({ repairTail: true });
+    const current = openIntent(fold(events));
+    if (!current || current.id !== snapshot.id || current.verify !== snapshot.command) {
+      fail(`intent ${snapshot.id} changed while its verification command was running`);
+    }
+    events.push(appendEvent(verificationEvent));
+    return fold(events).find((candidate) => candidate.id === snapshot.id);
+  });
+  printLine(`${snapshot.id} verification ${passed ? 'passed' : 'failed'} (exit ${exitCode})`);
+  return {
+    intent: publicIntent(intent),
+    verification: publicVerification(intent.verification),
+    exitCode,
+  };
+}
+
 const commands = {
   begin(argv) {
     const { positionals, flags } = parseArgs(argv, {
+      accept: 'multiple',
       verify: '-v',
       decision: 'multiple',
       force: 'boolean',
@@ -3587,6 +3880,13 @@ const commands = {
     const intent = positionals.join(' ').trim();
     if (!intent) {
       fail(usageFor('begin'));
+    }
+    const acceptance = [...new Set((flags.accept || []).map((criterion) => criterion.trim()))];
+    if (acceptance.some((criterion) => criterion.length === 0)) {
+      fail('--accept requires a non-empty observable outcome');
+    }
+    if (acceptance.length > 0 && (!flags.verify || flags.verify.trim().length === 0)) {
+      fail('--accept requires --verify with the exact machine verification command');
     }
     const requestedDecisions = flags.decision || [];
     const index = requestedDecisions.length > 0 ? decisionIndex() : [];
@@ -3628,6 +3928,7 @@ const commands = {
       id,
       ts: new Date().toISOString(),
       intent,
+      acceptance,
       verify: flags.verify || null,
       decisions,
       head: gitCapture(['rev-parse', 'HEAD']),
@@ -3635,6 +3936,12 @@ const commands = {
     const record = fold(events).find((candidate) => candidate.id === id);
     printLine(id);
     return publicIntent(record);
+  },
+
+  verify(argv) {
+    const { positionals } = parseArgs(argv, {}, 'verify');
+    if (positionals.length > 0) fail(usageFor('verify'));
+    return runMachineVerification();
   },
 
   end(argv) {
@@ -3659,6 +3966,25 @@ const commands = {
     } else {
       target = openIntent(records);
       if (!target) fail('no intent in progress; nothing to end');
+    }
+
+    let completionWorkspace = null;
+    let completionVerificationId = null;
+    if (status === 'completed' && target.acceptance.length > 0) {
+      if (!target.verification || !target.verification.passed) {
+        fail(
+          `cannot complete acceptance-bound intent ${target.id} without successful machine verification; ` +
+            'run: driftseal verify'
+        );
+      }
+      completionWorkspace = workspaceFingerprint();
+      if (completionWorkspace !== target.verification.workspace) {
+        fail(
+          `cannot complete acceptance-bound intent ${target.id}: workspace changed after machine verification; ` +
+            'run: driftseal verify'
+        );
+      }
+      completionVerificationId = target.verification.verificationId;
     }
 
     if (['failed', 'abandoned'].includes(status)) {
@@ -3715,6 +4041,8 @@ const commands = {
       status,
       note: flags.note || null,
       verifyResult: flags['verify-result'] || null,
+      verificationId: completionVerificationId,
+      workspace: completionWorkspace,
       head: gitCapture(['rev-parse', 'HEAD']),
     }));
     const record = fold(events).find((candidate) => candidate.id === target.id);
@@ -4059,7 +4387,10 @@ const commands = {
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(previousIntentProtocolBlock(12, source), eol),
+          protocolEol(previousIntentProtocolBlock(12, source, true), eol),
           protocolEol(previousIntentProtocolBlock(11, source), eol),
+          protocolEol(previousIntentProtocolBlock(11, source, true), eol),
         ]),
         protocolEol(previousIntentProtocolBlock(2), eol),
         protocolEol(previousIntentProtocolBlock(3), eol),
@@ -4083,7 +4414,10 @@ const commands = {
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(previousDecisionProtocolBlock(12, source), eol),
+          protocolEol(previousDecisionProtocolBlock(12, source, true), eol),
           protocolEol(previousDecisionProtocolBlock(11, source), eol),
+          protocolEol(previousDecisionProtocolBlock(11, source, true), eol),
         ]),
         protocolEol(previousDecisionProtocolBlock(2), eol),
         protocolEol(previousDecisionProtocolBlock(3), eol),
@@ -4146,7 +4480,10 @@ const commands = {
 Intent-level write-ahead log for agent sessions.
 
 usage:
-  driftseal begin "<intent>" [--verify "<how to verify>"] [--decision <id>] [--force]
+  driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"]
+                 [--decision <id>] [--force]
+  driftseal verify                     run the declared command and bind its result
+                                       to the current Git-visible workspace contents
   driftseal end [id] [--status completed|partial|failed|abandoned] [--note "..."] [--verify-result "..."]
   driftseal status                     show the intent currently in progress (re-anchor after drift)
   driftseal log [--last N] [--all]     show intent history (--all includes reclaimed records)
@@ -4214,7 +4551,7 @@ function requestedEndStatus(argv) {
  * subcommand, mirroring the value-taking entries of each parseArgs spec.
  */
 const VALUE_TAKING_FLAGS = {
-  begin: ['--verify', '-v', '--decision'],
+  begin: ['--accept', '--verify', '-v', '--decision'],
   end: ['--status', '-s', '--note', '-n', '--verify-result', '-r'],
   log: ['--last', '-n'],
   reclaim: ['--reason', '-r', '--older-than'],
@@ -4319,7 +4656,11 @@ function dispatch(argv) {
       const data = withMutationLocks(resources, () => fn(rest));
       return { data, exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0 };
     }
-    return { data: fn(rest), exitCode: 0 };
+    const data = fn(rest);
+    return {
+      data,
+      exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0,
+    };
   } catch (err) {
     if (err instanceof HelpRequested) {
       printLine(usageFor(err.usageKey) || usageFor(cmd) || 'run: driftseal help');
@@ -4406,12 +4747,16 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
     status() {
       return call(['status']);
     },
-    begin({ intent, verify, decisions = [], force = false }) {
+    begin({ intent, acceptance = [], verify, decisions = [], force = false }) {
       const argv = ['begin', intent];
+      for (const criterion of acceptance) appendFlag(argv, '--accept', criterion);
       appendFlag(argv, '--verify', verify);
       for (const decision of decisions) appendFlag(argv, '--decision', decision);
       if (force) argv.push('--force');
       return call(argv);
+    },
+    verify() {
+      return call(['verify']);
     },
     end({ id, status, note, verifyResult } = {}) {
       const argv = ['end'];

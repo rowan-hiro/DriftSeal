@@ -69,10 +69,25 @@ function guarded(action) {
 }
 
 function registerTools(server, api, z) {
+  const verificationRecord = z.object({
+    id: z.string(),
+    passed: z.boolean(),
+    exitCode: z.number().int().nonnegative(),
+    signal: z.string().nullable(),
+    durationMs: z.number().int().nonnegative(),
+    outputHash: z.string().regex(/^[a-f0-9]{64}$/),
+    stdoutBytes: z.number().int().nonnegative(),
+    stderrBytes: z.number().int().nonnegative(),
+    workspace: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    head: z.string().nullable(),
+    ranAt: z.string(),
+  });
   const intentRecord = z.object({
     id: z.string(),
     intent: z.string(),
+    acceptance: z.array(z.string()),
     verify: z.string().nullable(),
+    verification: verificationRecord.nullable(),
     decisions: z.array(z.string()),
     status: z.enum(END_STATUSES).or(z.literal('in_progress')),
     note: z.string().nullable(),
@@ -150,6 +165,10 @@ function registerTools(server, api, z) {
         'Open one focused work-round intent before making repository changes. Fails if another intent is already open; close it explicitly first.',
       inputSchema: {
         intent: nonEmpty.describe('Outcome this work round will accomplish.'),
+        acceptance: z
+          .array(nonEmpty)
+          .default([])
+          .describe('Observable outcomes that make machine-verified completion meaningful.'),
         verify: nonEmpty.optional().describe('Exact command or outcome check that will prove completion.'),
         decisions: z
           .array(decisionId)
@@ -167,11 +186,36 @@ function registerTools(server, api, z) {
   );
 
   server.registerTool(
+    'driftseal_verify',
+    {
+      title: 'Run the declared DriftSeal verification',
+      description:
+        'Execute the current acceptance-bound intent\'s predeclared verification command and record machine evidence bound to the resulting Git-visible workspace contents.',
+      inputSchema: {},
+      outputSchema: {
+        root: z.string(),
+        intent: intentRecord,
+        verification: verificationRecord,
+        exitCode: z.number().int().nonnegative(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    },
+    async () =>
+      guarded(() => {
+        const result = api.verify();
+        return success(
+          { root: api.root, ...result },
+          `Machine verification ${result.verification.passed ? 'passed' : 'failed'} for intent ${result.intent.id}.`
+        );
+      })
+  );
+
+  server.registerTool(
     'driftseal_end',
     {
       title: 'Close a DriftSeal intent',
       description:
-        'Close the current work-round intent with an honest terminal status, note, and verification result. Linked decisions must be reconciled before completed or partial closure.',
+        'Close the current work-round intent with an honest terminal status, note, and verification result. Acceptance-bound intents require fresh successful machine verification before completed closure. Linked decisions must be reconciled before completed or partial closure.',
       inputSchema: {
         id: z.string().optional().describe('Intent ID; omit to close the current open intent.'),
         status: closedStatus.default('completed'),
@@ -447,7 +491,7 @@ async function createServer({ root }) {
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       instructions:
-        'Use driftseal_status before repository changes or after context loss. Open one focused intent with driftseal_begin before changes, then run the declared verification and close it honestly with driftseal_end. Reconcile every linked decision before completed or partial closure.',
+        'Use driftseal_status before repository changes or after context loss. Open one focused intent with driftseal_begin before changes. When the intent declares acceptance criteria, use driftseal_verify to capture machine evidence before completed closure; otherwise run the declared check directly. Close honestly with driftseal_end, and reconcile every linked decision before completed or partial closure.',
     }
   );
   registerTools(server, api, z);

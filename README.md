@@ -137,7 +137,7 @@ The v1 server provides:
 | MCP capability | Purpose |
 | --- | --- |
 | `driftseal_status`, `driftseal_log` | Read the current intent and intent history. |
-| `driftseal_begin`, `driftseal_end` | Open and honestly close a work round. |
+| `driftseal_begin`, `driftseal_verify`, `driftseal_end` | Open a work round, capture machine verification evidence, and honestly close it. |
 | `driftseal_absorb` | Repair merge collisions or absorb another worktree's logs while remapping colliding IDs. |
 | `driftseal_reclaim`, `driftseal_unreclaim` | Hide meaningless closed records behind append-only markers, or restore them. |
 | `driftseal_decision_list`, `driftseal_decision_show` | Find and read MADR records. |
@@ -196,10 +196,30 @@ Declare the round before making non-Git changes:
 
 ```sh
 driftseal begin "add rate limiting to /api/login" \
+  --accept "the sixth login attempt within one minute receives HTTP 429" \
   --verify "npm test test/rate-limit.test.js"
 ```
 
-Do the work, run the declared check, then reconcile the result:
+Do the work, let DriftSeal run the predeclared command, then reconcile the result:
+
+```sh
+driftseal verify
+```
+
+The verification event records the command's exit status, duration, output
+digest and byte counts, Git HEAD, and a fingerprint of every tracked or
+untracked non-ignored workspace file except the intent event log. A successful
+result becomes stale if those workspace contents change. DriftSeal therefore
+rejects `completed` until the command passes again on the current workspace.
+Ignored files are deliberately outside this fingerprint. Outside a Git
+worktree the fingerprint is unavailable, so the gate proves only the command's
+recorded exit status and cannot detect later content changes.
+
+This proves that the declared command passed on recorded contents; it does not
+prove that the acceptance criterion or test is adequate. Existing intents
+without `--accept` retain the manual verification workflow for compatibility.
+Use protected CI, independent review, or human approval when the verifier was
+written by the same agent, the outcome is subjective, or the change is high risk.
 
 ```sh
 driftseal end \
@@ -224,7 +244,8 @@ also need no intent. Any other non-Git content change starts a new work round.
 
 | Command | Purpose |
 | --- | --- |
-| `driftseal begin "<intent>" [-v "<verify>"] [--decision id] [--force]` | Open a work-round intent and optionally link existing decisions. |
+| `driftseal begin "<intent>" [--accept "<outcome>"] [-v "<command>"] [--decision id] [--force]` | Open a work-round intent. Repeat `--accept` for observable completion criteria; acceptance requires a verification command. |
+| `driftseal verify` | Execute the acceptance-bound intent's predeclared command and bind machine evidence to the current Git-visible workspace contents. |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | Close an intent honestly. |
 | `driftseal status` | Show the intent currently in progress. |
 | `driftseal log [-n N] [--all]` | Review intent history (`--all` includes reclaimed records). |
