@@ -1,4 +1,4 @@
-# 15. Require opt-in without local verification provenance
+# 16. Require opt-in without local verification provenance
 
 Date: 2026-08-19
 
@@ -8,7 +8,7 @@ Accepted
 
 ## Context and Problem Statement
 
-Acceptance-bound verification executes a shell command stored in the intent log. A repository, archive, or copied log can contain an open intent whose command was not chosen by the current operator or agent. Git tracking alone cannot describe this boundary because DriftSeal also supports non-Git directories and custom log locations.
+Acceptance-bound verification executes a shell command stored in the intent log. A repository, archive, or copied log can contain an open intent whose command was not chosen by the current operator or agent. Git tracking alone cannot describe this boundary because DriftSeal also supports non-Git directories and custom log locations. This decision supersedes 0015 by replacing its Git-log-specific trust test with local provenance that works across every supported storage mode.
 
 ## Decision Drivers
 
