@@ -39,3 +39,10 @@ Keep a single WAL. Tag each outcome with one named lane (default main). Store th
 Status: Proposed → Accepted
 
 Named lanes, a derived local index, protocol 2.1, and package 2.1.0 are implemented.
+
+<!-- driftseal-reconciliation: 7df36fcf-0b2d-4a8b-8153-66ca8f04a292 -->
+### 2026-08-21T15:47:05.039Z — Outcome `2026-08-21-013`
+
+Status: Accepted → Accepted
+
+Unknown lane names are inferred from the WAL so re-anchor commands stay readable; a stale current-lane pointer falls back to main on status, log, and lane; begin still refuses. Open outcomes remain visible in log across lanes.
