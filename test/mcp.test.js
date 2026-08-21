@@ -157,6 +157,10 @@ test('stdio MCP exposes the complete v2 workflow, resources, and repository boun
         'driftseal_verify',
         'driftseal_end',
         'driftseal_log',
+        'driftseal_lane',
+        'driftseal_lane_add',
+        'driftseal_lane_switch',
+        'driftseal_lane_assign',
         'driftseal_absorb',
         'driftseal_reclaim',
         'driftseal_unreclaim',
@@ -183,7 +187,7 @@ test('stdio MCP exposes the complete v2 workflow, resources, and repository boun
     const resources = await client.listResources();
     assert.deepEqual(
       resources.resources.map((resource) => resource.uri),
-      ['driftseal://outcome/current', 'driftseal://outcomes/recent', 'driftseal://madr']
+      ['driftseal://outcome/current', 'driftseal://outcomes/recent', 'driftseal://lanes', 'driftseal://madr']
     );
 
     const initial = await call(client, 'driftseal_status', { root: outside });

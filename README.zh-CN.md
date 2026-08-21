@@ -23,8 +23,11 @@ DriftSeal v2 从“按步骤记录 intent”改为“按交付记录 outcome”�
   目录；migration 时需要显式传入旧位置，之后再 unset 或替换这个变量。
 - `driftseal extend` 可以向当前 outcome 追加步骤、acceptance、verifier 或 decision link。
 - 每次 extend 都会改变 contract hash，并让之前的 verification 与 MADR reconciliation 失效。
-- event 使用 `logVersion: 2`、`schemaVersion: 1`。
-- `AGENTS.md` 的新协议版本从 `2.0` 开始，兼容改进依次使用 `2.1`、`2.2`。
+- event 使用 `logVersion: 2`。兼容客户端接受 `schemaVersion` `1` 或 `2`；lane
+  事件以及非默认的 `begin.lane` 使用 `schemaVersion: 2`。
+- `AGENTS.md` 的新协议版本是 `2.1`。`driftseal init` 会升级可识别的 `2.0` block。
+- 具名 lane 在同一条 WAL 上切分 outcome 历史。默认 lane 是 `main`；`driftseal log`
+  跟随当前 lane。
 - CLI、Node API、MCP tool 与 resource 全部使用 outcome 命名；v1 名称和路径不会作为
   runtime alias 保留。
 
@@ -109,6 +112,25 @@ driftseal log --last 3
 作用域属于 worktree，而不是某一个 agent process。同一 worktree 内的 agent 与
 subagent 重新锚定并继续匹配的 open outcome；不同 worktree 各自持有 outcome。
 
+## Lane
+
+彼此正交、会长期回来接着做的能力，可以共用一条 append-only log，而不共用叙事上下文。
+每个 outcome 只属于一条具名 lane。未打标签的历史在 `main` 上。`status` 与
+`log --last 3` 跟随当前 lane，指针是 worktree 本地的。
+
+```sh
+driftseal lane add index --desc "On-disk inverted index"
+driftseal lane switch index
+driftseal begin "Ship the inverted index" --accept "lookups return stored postings" --verify "npm test"
+```
+
+有 open outcome 时不能切 lane。以后回到同一能力，是切回去再 `begin` 新的 outcome，
+而不是重开已关闭的记录。`driftseal lane assign <id> <name>` 可以把已关闭的 outcome
+移过去。跨切工作留在 `main`。
+
+派生的 lane index 保存每条 lane 的 head、反向链接和 WAL byte range，放在 Git
+metadata（或自定义 seal 旁边）。它可以重建，不会随 log 一起提交。
+
 ## Decision 与 MADR
 
 只有当 outcome log 与 Git 无法还原重要上下文时才建立 MADR，例如值得以后重访的
@@ -139,8 +161,9 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 | `driftseal extend "<addition>" [--accept "..."] [--verify "..."] [--decision id]` | 向同一 outcome 追加内容，并让旧 verification 失效。 |
 | `driftseal verify [--allow-tracked-command]` | 执行累计 verifier 并绑定证据。 |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | 诚实关闭 outcome。 |
-| `driftseal status` | 查看进行中的 outcome。 |
-| `driftseal log [--last N] [--all]` | 查看 outcome 历史。 |
+| `driftseal status` | 查看进行中的 outcome 和当前 lane。 |
+| `driftseal log [--last N] [--all] [--all-lanes]` | 查看 outcome 历史（默认当前 lane）。 |
+| `driftseal lane add\|switch\|assign\|show` | 按长期能力切分历史。 |
 | `driftseal reclaim [id ...] --reason "..." [--force]` | 通过 append-only marker 隐藏无意义的已关闭记录。 |
 | `driftseal unreclaim <id> --reason "..."` | 恢复 reclaimed record。 |
 | `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | 合并另一条 lineage 并处理撞号。 |
@@ -243,23 +266,28 @@ seal.begin({
 seal.extend({ extension: 'Document token expiry' });
 ```
 
-API 还提供 `status`、`verify`、`end`、`log`、`absorb`、reclaim、decision、init 与
-migration 方法。
+API 还提供 `status`、`verify`、`end`、`log`、`lane`、`laneAdd`、`laneSwitch`、
+`laneAssign`、`absorb`、reclaim、decision、init 与 migration 方法。
 
 stdio MCP server 会把所有操作固定在一个 repo root。v2 tools 包括
 `driftseal_status`、`driftseal_begin`、`driftseal_extend`、`driftseal_verify`、
-`driftseal_end`、outcome history/absorb、MADR，以及三个 migration tools。resources 为：
+`driftseal_end`、outcome history、lane、absorb、MADR，以及三个 migration tools。
+resources 为：
 
 - `driftseal://outcome/current`
 - `driftseal://outcomes/recent`
+- `driftseal://lanes`
 - `driftseal://madr`
 
 ## 存储与信任边界
 
 - `.seal/outcomes/events.jsonl` 是 append-only outcome log。通过 DriftSeal 访问它；
-  需要调整可见性或处理 merge 时使用 `reclaim`、`unreclaim`、`absorb`，不要手改。
+  需要调整可见性、切分 lane 或处理 merge 时使用 `reclaim`、`unreclaim`、`lane`、
+  `absorb`，不要手改。
 - `.seal/madr/` 保存编号化 MADR。
 - `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
+- 当前 lane 与派生 lane index 对默认 repo seal 存在 Git metadata 里，对自定义 seal
+  则放在旁边。它们可以重建，不是 committed WAL 的一部分。
 - advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
 
 DriftSeal 不会替你判断 verification command 是否安全，也不会判断测试本身是否充分。
