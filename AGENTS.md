@@ -83,3 +83,29 @@ merge, `driftseal absorb` remaps colliding ids; it never auto-merges concurrent
 edits of a shared MADR.
 Commit `.seal/madr/` with the code.
 <!-- /driftseal-decisions -->
+
+## Cursor Cloud specific instructions
+
+DriftSeal is a dependency-light Node.js (CommonJS, `>=18`) CLI with **no build
+step** and **no linter/formatter config**. The startup update script runs
+`npm install`; nothing else is required to develop.
+
+- **Test:** `npm test` (runs `node --test test/*.test.js`). The suite spawns the
+  real CLI and MCP server as subprocesses, so it takes a while — wait for it
+  rather than assuming a hang.
+- **Static checks:** there is no ESLint/Prettier. Reuse the same static gate the
+  repo's own DriftSeal verifiers use: `node --check bin/driftseal.js`,
+  `node --check bin/driftseal-mcp.js`, and `git diff --check`.
+- **Run the CLI:** `node bin/driftseal.js <command>` always works from the repo
+  root. `npm link` is also wired up so `driftseal` and `driftseal-mcp` are on
+  `PATH` in this environment.
+- **MCP server:** `driftseal-mcp --root <abs-path>` is a **stdio** server. It
+  exits immediately on stdin EOF, so a naive backgrounded start (`... &`) looks
+  like it "exited early"; that is expected, not a crash. Its behavior is covered
+  by `test/mcp.test.js`.
+- **This repo dogfoods its own protocol.** The DriftSeal outcome/decision
+  protocol above is mandatory: before changing durable project content, open an
+  outcome with `driftseal begin`, then `driftseal verify` and `driftseal end`.
+  The v2 seal state under `.seal/` (`.seal/outcomes/events.jsonl` and
+  `.seal/madr/`) is committed with the code — never edit it by hand; go through
+  the `driftseal` CLI.
