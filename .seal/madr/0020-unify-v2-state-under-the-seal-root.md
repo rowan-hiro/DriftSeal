@@ -38,3 +38,10 @@ Use .seal as the unified root, with outcome events in .seal/outcomes/events.json
 Status: Accepted → Accepted
 
 Confirmed the unified v2 seal root while adding explicit migration source and destination paths for legacy custom storage.
+
+<!-- driftseal-reconciliation: 25cbb390-a4b6-4f40-91c1-4dfff0613f7e -->
+### 2026-08-21T06:09:28.742Z — Outcome `2026-08-21-005`
+
+Status: Accepted → Accepted
+
+Kept CLI and API destination overrides while fixing MCP migration to the server repository seal root and making in-repository source identities portable.

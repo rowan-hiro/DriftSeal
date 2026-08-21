@@ -171,8 +171,10 @@ installation targets.
 Migration is deliberately model-assisted because grouping step-sized intents
 into delivered outcomes is semantic work.
 
-When an unmigrated default v1 log is present, normal v2 repository commands
-fail closed instead of silently starting an unrelated `.seal` lineage.
+When an unmigrated v1 intent log or MADR directory is present, normal v2
+repository commands fail closed instead of silently starting an unrelated
+`.seal` lineage. A MADR-only v1 repository may migrate without creating an
+empty intent log first.
 
 1. Close every v1 intent. A parked v1 intent blocks migration.
 2. Inspect the normalized source:
@@ -196,14 +198,16 @@ fail closed instead of silently starting an unrelated `.seal` lineage.
 `apply` fingerprints the source, validates the partition, validates the staged
 v2 log, copies every v1 MADR byte-for-byte, and records a name, size, and hash
 manifest so `check` can still verify them after v1 is removed. Later MADR content
-is accepted only when a v2 reconciliation event attests its current hash. `apply`
+is accepted only when the latest valid v2 reconciliation attests its current hash. `apply`
 creates `.seal/` beside `.intent-log/` and `.decision-log/`; it never deletes v1
 data. After the user has reviewed and approved the result, remove the old tracked
 paths manually. Running `check` afterward reports migration complete.
 
-If v1 used custom storage, keep the source and destination explicit for every
-phase. In particular, an inherited v1 `DRIFTSEAL_HOME` must not also be used as
-the v2 destination:
+If v1 used custom storage, keep the source and destination explicit for inspect
+and apply. The migration marker records their canonical identity, so later
+checks recover the source paths from the destination. Source and destination
+must not contain one another. In particular, an inherited v1 `DRIFTSEAL_HOME`
+must not also be used as the v2 destination:
 
 ```sh
 driftseal migrate v1-to-v2 inspect --json \
@@ -214,11 +218,15 @@ driftseal migrate v1-to-v2 apply --plan /tmp/driftseal-plan.json \
   --source-log /path/to/v1-intents/events.jsonl \
   --source-decisions /path/to/v1-decisions \
   --destination /path/to/repository/.seal
+driftseal migrate v1-to-v2 check \
+  --destination /path/to/repository/.seal
 ```
 
 After applying, unset the v1 `DRIFTSEAL_HOME` or point it at the new seal root.
-The Node API and MCP migration tools expose the same `sourceLog`,
-`sourceDecisions`, and `destination` fields.
+The Node API exposes `sourceLog`, `sourceDecisions`, and `destination`. MCP
+migration tools accept custom v1 sources but always stage into the server's
+fixed repository `.seal`, so ordinary MCP workflow tools immediately see the
+migrated state.
 
 ## Git and merge behavior
 

@@ -496,17 +496,16 @@ function registerTools(server, api, z) {
     })),
     excluded: z.array(z.object({ sourceId: z.string(), reason: nonEmpty })).default([]),
   });
-  const migrationLocations = {
+  const migrationSources = {
     sourceLog: nonEmpty.optional().describe('Path to the v1 events.jsonl source.'),
     sourceDecisions: nonEmpty.optional().describe('Path to the v1 MADR directory.'),
-    destination: nonEmpty.optional().describe('Path to the v2 seal root to create or check.'),
   };
   server.registerTool(
     'driftseal_migration_inspect',
     {
       title: 'Inspect a DriftSeal v1 repository for v2 migration',
-      description: 'Read and normalize v1 logs for model-assisted grouping. Custom v1 storage and a distinct v2 destination may be supplied. Makes no changes.',
-      inputSchema: migrationLocations,
+      description: 'Read and normalize custom or repository-default v1 logs for model-assisted grouping. The v2 destination is the fixed repository .seal root. Makes no changes.',
+      inputSchema: migrationSources,
       outputSchema: { root: z.string(), inspection: z.unknown() },
       annotations: readOnly,
     },
@@ -520,7 +519,7 @@ function registerTools(server, api, z) {
     {
       title: 'Stage a validated DriftSeal v1-to-v2 migration',
       description: 'Validate a model-generated ordered grouping plan, create .seal side-by-side, copy MADRs byte-for-byte, and never delete v1 data.',
-      inputSchema: { plan: migrationPlan, ...migrationLocations },
+      inputSchema: { plan: migrationPlan, ...migrationSources },
       outputSchema: { root: z.string(), result: z.unknown() },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
@@ -534,7 +533,7 @@ function registerTools(server, api, z) {
     {
       title: 'Check a staged DriftSeal v1-to-v2 migration',
       description: 'Validate the staged outcome log and manifest-backed MADRs, then report whether v1 still awaits manual removal.',
-      inputSchema: migrationLocations,
+      inputSchema: migrationSources,
       outputSchema: { root: z.string(), result: z.unknown() },
       annotations: readOnly,
     },

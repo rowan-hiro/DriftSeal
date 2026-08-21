@@ -2260,7 +2260,7 @@ test('unmigrated v1 repositories fail closed before normal commands create v2 st
     { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: 'end', status: 'completed' },
   ].map(JSON.stringify).join('\n') + '\n');
 
-  assert.match(runFail(['status']).stderr, /unmigrated v1 intent log detected/);
+  assert.match(runFail(['status']).stderr, /unmigrated v1 state detected/);
   assert.match(runFail(['begin', 'accidentally start v2']).stderr, /migration is staged/);
   assert.equal(fs.existsSync(path.join(cwd, '.seal')), false);
   const inspection = JSON.parse(run(['migrate', 'v1-to-v2', 'inspect', '--json']));
@@ -2321,11 +2321,11 @@ test('migration check validates the MADR manifest after v1 source removal', () =
   assert.match(runFail(['migrate', 'v1-to-v2', 'check']).stderr, /migrated MADR is missing/);
 });
 
-test('migration supports custom v1 storage and a distinct destination path', () => {
+test('migration source identity preserves custom v1 storage for later checks', () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-custom-v1-storage-'));
   const legacyHome = path.join(cwd, 'legacy-intents');
   const legacyDecisions = path.join(cwd, 'legacy-decisions');
-  const destination = path.join(cwd, 'v2-seal');
+  const destination = path.join(fs.realpathSync(cwd), 'v2-seal');
   fs.mkdirSync(legacyHome, { recursive: true });
   fs.mkdirSync(legacyDecisions, { recursive: true });
   const sourceLog = path.join(legacyHome, 'events.jsonl');
@@ -2339,7 +2339,7 @@ test('migration supports custom v1 storage and a distinct destination path', () 
     DRIFTSEAL_DECISION_HOME: legacyDecisions,
   });
 
-  assert.match(inherited.runFail(['status']).stderr, /unmigrated v1 intent log detected/);
+  assert.match(inherited.runFail(['status']).stderr, /unmigrated v1 state detected/);
   const locations = [
     '--source-log', sourceLog,
     '--source-decisions', legacyDecisions,
@@ -2358,7 +2358,25 @@ test('migration supports custom v1 storage and a distinct destination path', () 
     excluded: [],
   };
   inherited.run(['migrate', 'v1-to-v2', 'apply', '--plan-json', JSON.stringify(plan), ...locations]);
-  assert.match(inherited.run(['migrate', 'v1-to-v2', 'check', ...locations]), /valid and staged/);
+  assert.match(
+    inherited.run(['migrate', 'v1-to-v2', 'check', '--destination', destination]),
+    /valid and staged/
+  );
+  const migration = readJsonl(path.join(destination, 'outcomes', 'events.jsonl')).at(-1);
+  assert.deepEqual(migration.source, {
+    log: { base: 'repository', path: 'legacy-intents/events.jsonl' },
+    decisions: { base: 'repository', path: 'legacy-decisions' },
+    logPresent: true,
+  });
+  assert.match(
+    inherited.runFail([
+      'migrate', 'v1-to-v2', 'check',
+      '--source-log', path.join(cwd, 'wrong-source', 'events.jsonl'),
+      '--source-decisions', path.join(cwd, 'wrong-decisions'),
+      '--destination', destination,
+    ]).stderr,
+    /source identity does not match/
+  );
   assert.equal(fs.existsSync(path.join(destination, 'madr', '0001-custom-storage.md')), true);
 
   const v2 = cliHarness(cwd, {
@@ -2366,6 +2384,12 @@ test('migration supports custom v1 storage and a distinct destination path', () 
     DRIFTSEAL_DECISION_HOME: undefined,
   });
   assert.equal(v2.run(['status']), 'no outcome in progress\n');
+  fs.rmSync(legacyHome, { recursive: true });
+  fs.rmSync(legacyDecisions, { recursive: true });
+  assert.match(
+    inherited.run(['migrate', 'v1-to-v2', 'check', '--destination', destination]),
+    /migration complete/
+  );
 });
 
 test('migration accepts an empty visible partition and still copies MADRs', () => {
@@ -2399,6 +2423,111 @@ test('migration accepts an empty visible partition and still copies MADRs', () =
   );
   assert.equal(fs.existsSync(path.join(cwd, '.seal', 'madr', '0001-retained-context.md')), true);
   assert.match(run(['migrate', 'v1-to-v2', 'check']), /valid and staged/);
+});
+
+test('MADR-only v1 repositories fail closed and migrate without an intent log', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-madr-only-v1-'));
+  const { run, runFail } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const sourceMadr = path.join(cwd, '.decision-log');
+  fs.mkdirSync(sourceMadr, { recursive: true });
+  fs.writeFileSync(path.join(sourceMadr, '0001-madr-only.md'), 'MADR-only v1 context\n');
+
+  assert.match(runFail(['status']).stderr, /unmigrated v1 state detected/);
+  assert.match(runFail(['begin', 'must migrate first']).stderr, /migration is staged/);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal')), false);
+
+  const inspection = JSON.parse(run(['migrate', 'v1-to-v2', 'inspect', '--json']));
+  assert.equal(inspection.records.length, 0);
+  assert.equal(inspection.source.logPresent, false);
+  const plan = {
+    format: 'driftseal-v1-to-v2-plan',
+    sourceFingerprint: inspection.sourceFingerprint,
+    groups: [],
+    excluded: [],
+  };
+  run(['migrate', 'v1-to-v2', 'apply', '--plan-json', JSON.stringify(plan)]);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal', 'madr', '0001-madr-only.md')), true);
+  assert.match(run(['migrate', 'v1-to-v2', 'check']), /valid and staged/);
+  fs.rmSync(sourceMadr, { recursive: true });
+  assert.match(run(['migrate', 'v1-to-v2', 'check']), /migration complete/);
+});
+
+test('migration manifest rejects a historical reconciliation rollback', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-reconciliation-rollback-'));
+  const { run, runFail } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const sourceLog = path.join(cwd, '.intent-log', 'events.jsonl');
+  const sourceMadr = path.join(cwd, '.decision-log');
+  fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
+  fs.mkdirSync(sourceMadr, { recursive: true });
+  fs.writeFileSync(sourceLog, [
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: 'begin', intent: 'establish decision history' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: 'end', status: 'completed' },
+  ].map(JSON.stringify).join('\n') + '\n');
+  fs.writeFileSync(
+    path.join(sourceMadr, '0001-latest-reconciliation.md'),
+    '# 1. Latest reconciliation\n\n## Status\n\nAccepted\n\n' +
+      '## Context and Problem Statement\n\nKeep the latest state.\n\n' +
+      '## Decision Outcome\n\nReject historical rollback.\n'
+  );
+  const inspection = JSON.parse(run(['migrate', 'v1-to-v2', 'inspect', '--json']));
+  const plan = {
+    format: 'driftseal-v1-to-v2-plan',
+    sourceFingerprint: inspection.sourceFingerprint,
+    groups: [{
+      outcome: 'Establish decision history',
+      summary: 'The migrated decision remains current.',
+      sourceIds: ['2026-01-01-001'],
+    }],
+    excluded: [],
+  };
+  run(['migrate', 'v1-to-v2', 'apply', '--plan-json', JSON.stringify(plan)]);
+  const migratedMadr = path.join(cwd, '.seal', 'madr', '0001-latest-reconciliation.md');
+
+  run(['begin', 'First decision confirmation', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'First migrated confirmation.']);
+  run(['end', '--status', 'completed']);
+  const firstReconciliation = fs.readFileSync(migratedMadr);
+  run(['begin', 'Second decision confirmation', '--decision', '1']);
+  run(['decision', 'update', '1', '--note', 'Second and current migrated confirmation.']);
+  run(['end', '--status', 'completed']);
+  const latestReconciliation = fs.readFileSync(migratedMadr);
+
+  fs.rmSync(path.join(cwd, '.intent-log'), { recursive: true });
+  fs.rmSync(path.join(cwd, '.decision-log'), { recursive: true });
+  fs.writeFileSync(migratedMadr, firstReconciliation);
+  assert.match(runFail(['migrate', 'v1-to-v2', 'check']).stderr, /does not match the migration manifest/);
+  fs.writeFileSync(migratedMadr, latestReconciliation);
+  assert.match(run(['migrate', 'v1-to-v2', 'check']), /migration complete/);
+});
+
+test('migration rejects a nested migration destination inside removable v1 sources', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-nested-migration-destination-'));
+  const { runFail } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const sourceLog = path.join(cwd, 'legacy-intents', 'events.jsonl');
+  const sourceDecisions = path.join(cwd, 'legacy-decisions');
+  fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
+  fs.mkdirSync(sourceDecisions, { recursive: true });
+  fs.writeFileSync(sourceLog, '');
+  fs.writeFileSync(path.join(sourceDecisions, '0001-context.md'), 'context\n');
+
+  assert.match(
+    runFail([
+      'migrate', 'v1-to-v2', 'inspect', '--json',
+      '--source-log', sourceLog,
+      '--source-decisions', sourceDecisions,
+      '--destination', path.join(sourceDecisions, 'v2-seal'),
+    ]).stderr,
+    /destination overlaps v1 source path/
+  );
 });
 
 test('init injects the protocol into AGENTS.md, idempotently', () => {

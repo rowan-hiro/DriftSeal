@@ -157,8 +157,9 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 把按步骤记录的 intent 合并为真正交付的 outcome 需要语义判断，因此 migration 特意
 采用 model-assisted 流程。
 
-如果发现尚未 migration 的默认 v1 log，普通 v2 repo 命令会 fail closed，避免悄悄
-创建一条与 v1 历史无关的 `.seal` lineage。
+如果发现尚未 migration 的 v1 intent log 或 MADR 目录，普通 v2 repo 命令会 fail
+closed，避免悄悄创建一条与 v1 历史无关的 `.seal` lineage。只有 MADR、没有 intent
+log 的 v1 repo 也可以直接 migration，不必先创建空 log。
 
 1. 先关闭所有 v1 intent；只要还有 parked v1 intent，migration 就会拒绝继续。
 2. 读取规范化后的源数据：
@@ -179,13 +180,15 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 
 `apply` 会为 source 计算 fingerprint，校验 partition 与 staged v2 log，逐字节复制
 所有 v1 MADR，并记录文件名、大小与 hash manifest，使 v1 删除后 `check` 仍能验证
-完整性。后续 MADR 内容只有在 v2 reconciliation event 已记录其当前 hash 时才会被接受。
+完整性。后续 MADR 内容只有在最新的有效 v2 reconciliation 已记录其当前 hash 时才会被接受。
 `apply` 只会在 `.intent-log/`、`.decision-log/` 旁边新建 `.seal/`，绝不删除 v1 数据。
 用户审阅并明确认可后，再手动移除旧 tracked paths；随后执行 `check` 会报告 migration
 已完成。
 
-如果 v1 使用自定义存储，每个阶段都要明确给出 source 与 destination。尤其不能把从
-v1 继承的 `DRIFTSEAL_HOME` 同时当成 v2 destination：
+如果 v1 使用自定义存储，inspect 与 apply 都要明确给出 source 和 destination。
+migration marker 会保存这些路径的规范 identity，之后 `check` 可以从 destination 找回
+source。source 与 destination 不能互相包含，尤其不能把从 v1 继承的
+`DRIFTSEAL_HOME` 同时当成 v2 destination：
 
 ```sh
 driftseal migrate v1-to-v2 inspect --json \
@@ -196,10 +199,14 @@ driftseal migrate v1-to-v2 apply --plan /tmp/driftseal-plan.json \
   --source-log /path/to/v1-intents/events.jsonl \
   --source-decisions /path/to/v1-decisions \
   --destination /path/to/repository/.seal
+driftseal migrate v1-to-v2 check \
+  --destination /path/to/repository/.seal
 ```
 
-apply 后应 unset v1 的 `DRIFTSEAL_HOME`，或让它指向新的 seal root。Node API 与 MCP
-migration tools 也提供相同的 `sourceLog`、`sourceDecisions`、`destination` 字段。
+apply 后应 unset v1 的 `DRIFTSEAL_HOME`，或让它指向新的 seal root。Node API 提供
+`sourceLog`、`sourceDecisions`、`destination`；MCP migration tools 可指定自定义 v1
+source，但 destination 固定为 server 所属 repo 的 `.seal`，因此普通 MCP workflow
+tools 可以立刻看到 migration 后的状态。
 
 ## Git 与 merge
 

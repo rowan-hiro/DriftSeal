@@ -222,6 +222,38 @@ function normalizeMadrManifest(value, line) {
   });
 }
 
+function normalizeMigrationSource(value, line) {
+  if (value === undefined) return undefined;
+  const normalizeLocation = (location) => {
+    if (typeof location === 'string' && location.length > 0 && !location.includes('\0')) {
+      return location;
+    }
+    if (
+      !location || typeof location !== 'object' || Array.isArray(location) ||
+      !['repository', 'absolute'].includes(location.base) ||
+      typeof location.path !== 'string' || location.path.length === 0 || location.path.includes('\0') ||
+      (location.base === 'repository' && path.isAbsolute(location.path))
+    ) {
+      fail(`invalid migration source identity on log line ${line}`);
+    }
+    if (location.base === 'repository' && !pathContains(process.cwd(), path.resolve(process.cwd(), location.path))) {
+      fail(`invalid migration source identity on log line ${line}`);
+    }
+    return { base: location.base, path: location.path };
+  };
+  if (
+    !value || typeof value !== 'object' || Array.isArray(value) ||
+    typeof value.logPresent !== 'boolean'
+  ) {
+    fail(`invalid migration source identity on log line ${line}`);
+  }
+  return {
+    log: normalizeLocation(value.log),
+    decisions: normalizeLocation(value.decisions),
+    logPresent: value.logPresent,
+  };
+}
+
 function normalizeEvent(event, line) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) {
     fail(`invalid event object on log line ${line}`);
@@ -385,6 +417,7 @@ function normalizeEvent(event, line) {
       ...event,
       logVersion,
       madrManifest: normalizeMadrManifest(event.madrManifest, line),
+      source: normalizeMigrationSource(event.source, line),
     };
   }
 
@@ -4478,16 +4511,63 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
 
 const MIGRATION_PLAN_FORMAT = 'driftseal-v1-to-v2-plan';
 
-function migrationPaths(flags = {}) {
-  const sourceLog = path.resolve(
-    flags['source-log'] || path.join(process.cwd(), '.intent-log', 'events.jsonl')
+function canonicalPath(file) {
+  const resolved = path.resolve(file);
+  const missing = [];
+  let cursor = resolved;
+  while (!fs.existsSync(cursor)) {
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    missing.push(path.basename(cursor));
+    cursor = parent;
+  }
+  const existing = fs.existsSync(cursor) ? fs.realpathSync(cursor) : cursor;
+  return path.join(existing, ...missing.reverse());
+}
+
+function pathContains(parent, candidate) {
+  const relative = path.relative(canonicalPath(parent), canonicalPath(candidate));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function resolveMigrationIdentityPath(location) {
+  if (typeof location === 'string') return canonicalPath(location);
+  if (location?.base === 'repository') return canonicalPath(path.resolve(process.cwd(), location.path));
+  if (location?.base === 'absolute') return canonicalPath(location.path);
+  return null;
+}
+
+function encodeMigrationIdentityPath(file) {
+  const resolved = canonicalPath(file);
+  const root = canonicalPath(process.cwd());
+  const relative = path.relative(root, resolved);
+  if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
+    return {
+      base: 'repository',
+      path: (relative || '.').split(path.sep).join('/'),
+    };
+  }
+  return { base: 'absolute', path: resolved };
+}
+
+function migrationPaths(flags = {}, { storedSource } = {}) {
+  const sourceLog = canonicalPath(
+    flags['source-log'] ||
+      resolveMigrationIdentityPath(storedSource?.log) ||
+      path.join(process.cwd(), '.intent-log', 'events.jsonl')
   );
-  const sourceDecisions = path.resolve(
+  const sourceDecisions = canonicalPath(
     flags['source-decisions'] ||
+      resolveMigrationIdentityPath(storedSource?.decisions) ||
       process.env.DRIFTSEAL_DECISION_HOME ||
       path.join(process.cwd(), '.decision-log')
   );
-  const destination = path.resolve(flags.destination || sealRoot());
+  const destination = canonicalPath(flags.destination || sealRoot());
+  for (const sourceRoot of [path.dirname(sourceLog), sourceDecisions]) {
+    if (pathContains(sourceRoot, destination) || pathContains(destination, sourceRoot)) {
+      fail(`migration destination overlaps v1 source path: ${destination} and ${sourceRoot}`);
+    }
+  }
   return { sourceLog, sourceDecisions, destination };
 }
 
@@ -4516,6 +4596,22 @@ function migrationMadrManifest(decisions) {
   }));
 }
 
+function migrationSourceIdentity(snapshot) {
+  return {
+    log: encodeMigrationIdentityPath(snapshot.sourceLog),
+    decisions: encodeMigrationIdentityPath(snapshot.sourceDecisions),
+    logPresent: snapshot.sourceLogPresent,
+  };
+}
+
+function migrationSourceMatchesSnapshot(source, snapshot) {
+  return (
+    source.logPresent === snapshot.sourceLogPresent &&
+    sameResolvedPath(resolveMigrationIdentityPath(source.log), snapshot.sourceLog) &&
+    sameResolvedPath(resolveMigrationIdentityPath(source.decisions), snapshot.sourceDecisions)
+  );
+}
+
 function manifestDecisionId(name) {
   const match = name.match(/^(\d+)-/);
   if (!match) return null;
@@ -4527,11 +4623,13 @@ function manifestDecisionId(name) {
 }
 
 function validateMigrationMadrManifest(directory, manifest, events = []) {
-  const reconciledHashes = new Map();
-  for (const event of events) {
-    if (event.type !== 'decision_reconcile_commit' || typeof event.fileHash !== 'string') continue;
-    if (!reconciledHashes.has(event.decisionId)) reconciledHashes.set(event.decisionId, new Set());
-    reconciledHashes.get(event.decisionId).add(event.fileHash);
+  const latestReconciledHash = new Map();
+  for (const record of fold(events)) {
+    for (const update of record.decisionUpdates) {
+      if (update.type === 'decision_reconcile_commit' && typeof update.fileHash === 'string') {
+        latestReconciledHash.set(update.decisionId, update.fileHash);
+      }
+    }
   }
   for (const entry of manifest) {
     const file = path.join(directory, entry.name);
@@ -4539,21 +4637,26 @@ function validateMigrationMadrManifest(directory, manifest, events = []) {
     const bytes = fs.readFileSync(file);
     const hash = crypto.createHash('sha256').update(bytes).digest('hex');
     const decisionId = manifestDecisionId(entry.name);
-    const reconciled = decisionId && reconciledHashes.get(decisionId)?.has(hash);
-    if ((bytes.length !== entry.bytes || hash !== entry.sha256) && !reconciled) {
+    const reconciledHash = decisionId ? latestReconciledHash.get(decisionId) : null;
+    const expected = reconciledHash || entry.sha256;
+    if (hash !== expected || (!reconciledHash && bytes.length !== entry.bytes)) {
       fail(`migrated MADR does not match the migration manifest: ${entry.name}`);
     }
   }
 }
 
-function migrationSourceSnapshot(flags = {}) {
-  const paths = migrationPaths(flags);
-  if (!fs.existsSync(paths.sourceLog)) fail(`v1 intent log not found: ${paths.sourceLog}`);
+function migrationSourceSnapshot(flags = {}, { storedSource } = {}) {
+  const paths = migrationPaths(flags, { storedSource });
+  const decisions = migrationDecisionFiles(paths.sourceDecisions);
+  const sourceLogPresent = fs.existsSync(paths.sourceLog);
+  if (!sourceLogPresent && decisions.length === 0) {
+    fail(`v1 source not found: ${paths.sourceLog} or ${paths.sourceDecisions}`);
+  }
   const park = legacyParkFile();
   if (park && fs.existsSync(park)) {
     fail('v1 migration requires no open intent; close the parked v1 intent first');
   }
-  const rawLog = fs.readFileSync(paths.sourceLog, 'utf8');
+  const rawLog = sourceLogPresent ? fs.readFileSync(paths.sourceLog, 'utf8') : '';
   const records = fold(
     parseJsonlRecords(rawLog, paths.sourceLog, { allowLegacy: true })
       .map((record) => record.event)
@@ -4565,7 +4668,6 @@ function migrationSourceSnapshot(flags = {}) {
   if (open.length > 0) {
     fail(`v1 migration requires every intent to be closed; still open: ${open.map((record) => record.id).join(', ')}`);
   }
-  const decisions = migrationDecisionFiles(paths.sourceDecisions);
   const hash = crypto.createHash('sha256');
   hash.update(paths.sourceLog);
   hash.update('\0');
@@ -4581,6 +4683,7 @@ function migrationSourceSnapshot(flags = {}) {
     rawLog,
     records,
     decisions,
+    sourceLogPresent,
     sourceFingerprint: hash.digest('hex'),
   };
 }
@@ -4592,6 +4695,7 @@ function migrationInspection(snapshot) {
     source: {
       log: snapshot.sourceLog,
       decisions: snapshot.sourceDecisions,
+      logPresent: snapshot.sourceLogPresent,
     },
     destination: snapshot.destination,
     records: snapshot.records.map(publicOutcome),
@@ -4720,6 +4824,7 @@ function migrationEvents(snapshot, validated) {
     ts: new Date().toISOString(),
     sourceFingerprint: snapshot.sourceFingerprint,
     planDigest: validated.planDigest,
+    source: migrationSourceIdentity(snapshot),
     madrManifest: migrationMadrManifest(snapshot.decisions),
     excluded: validated.excluded.map((item) => ({
       ...item,
@@ -4768,17 +4873,26 @@ function applyMigration(snapshot, validated) {
       existing.planDigest === validated.planDigest) {
       validateStagedMigration(destination, snapshot, { allowReconciled: true });
       const manifest = migrationMadrManifest(snapshot.decisions);
-      if (existing.madrManifest === undefined) {
+      const source = migrationSourceIdentity(snapshot);
+      if (existing.source !== undefined && !migrationSourceMatchesSnapshot(existing.source, snapshot)) {
+        fail('staged migration source identity does not match the current v1 source paths');
+      }
+      if (
+        existing.madrManifest === undefined ||
+        existing.source === undefined ||
+        !isDeepStrictEqual(existing.source, source)
+      ) {
         appendEventTo(destinationLog, {
           type: 'migration',
           id: 'v1-to-v2',
           ts: new Date().toISOString(),
           sourceFingerprint: existing.sourceFingerprint,
           planDigest: existing.planDigest,
+          source,
           madrManifest: manifest,
           excluded: existing.excluded,
         });
-        printLine('upgraded the staged v1-to-v2 migration with a MADR integrity manifest');
+        printLine('upgraded the staged v1-to-v2 migration with source identity and a MADR integrity manifest');
         return {
           changed: true,
           upgraded: true,
@@ -4835,6 +4949,11 @@ function checkMigration(snapshot, { sourceMissing = false } = {}) {
   fold(destinationEvents);
   const migratedMadr = path.join(snapshot.destination, 'madr');
   if (sourceMissing) {
+    if (migration.source === undefined) {
+      fail(
+        'staged migration has no source path identity; restore the v1 source and re-run apply with the approved plan before deleting it'
+      );
+    }
     if (migration.madrManifest === undefined) {
       fail(
         'staged migration has no MADR integrity manifest; restore the v1 source and re-run apply with the approved plan before deleting it'
@@ -4850,6 +4969,9 @@ function checkMigration(snapshot, { sourceMissing = false } = {}) {
       }
       validateMigrationMadrManifest(migratedMadr, migration.madrManifest, destinationEvents);
     }
+  }
+  if (migration.source !== undefined && !migrationSourceMatchesSnapshot(migration.source, snapshot)) {
+    fail('staged migration source identity does not match the v1 source paths used for check');
   }
   if (!sourceMissing && migration.sourceFingerprint !== snapshot.sourceFingerprint) {
     fail('staged migration no longer matches the v1 source fingerprint');
@@ -5436,20 +5558,25 @@ const commands = {
     }
     if (action === 'apply') {
       if (flags.json) fail('--json is only valid with migration inspect or check');
-      const snapshot = migrationSourceSnapshot(flags);
+      const destination = canonicalPath(flags.destination || sealRoot());
+      const existing = findMigrationEvent(path.join(destination, 'outcomes', 'events.jsonl'));
+      const snapshot = migrationSourceSnapshot(flags, { storedSource: existing?.source });
       const validated = validateMigrationPlan(readMigrationPlan(flags.plan, flags['plan-json']), snapshot);
       return applyMigration(snapshot, validated);
     }
     if (flags.plan || flags['plan-json']) fail('--plan is only valid with migration apply');
-    const paths = migrationPaths(flags);
+    const destination = canonicalPath(flags.destination || sealRoot());
+    const existing = findMigrationEvent(path.join(destination, 'outcomes', 'events.jsonl'));
+    const paths = migrationPaths(flags, { storedSource: existing?.source });
     let result;
-    if (fs.existsSync(paths.sourceLog)) {
-      result = checkMigration(migrationSourceSnapshot(flags));
+    if (fs.existsSync(paths.sourceLog) || migrationDecisionFiles(paths.sourceDecisions).length > 0) {
+      result = checkMigration(migrationSourceSnapshot(flags, { storedSource: existing?.source }));
     } else {
-      if (fs.existsSync(paths.sourceDecisions)) {
-        fail('v1 intent log is absent but the v1 decision directory still exists');
-      }
-      result = checkMigration({ ...paths, decisions: [] }, { sourceMissing: true });
+      result = checkMigration({
+        ...paths,
+        decisions: [],
+        sourceLogPresent: existing?.source?.logPresent ?? false,
+      }, { sourceMissing: true });
     }
     if (flags.json) printLine(JSON.stringify(result, null, 2));
     return result;
@@ -5730,13 +5857,34 @@ function usesV2RepositoryState(cmd, rest) {
 }
 
 function unmigratedV1Source() {
-  const candidates = [path.resolve(process.cwd(), '.intent-log', 'events.jsonl')];
+  const defaultDecisions = path.resolve(
+    process.env.DRIFTSEAL_DECISION_HOME || path.join(process.cwd(), '.decision-log')
+  );
+  const candidates = [{
+    sourceLog: path.resolve(process.cwd(), '.intent-log', 'events.jsonl'),
+    sourceDecisions: defaultDecisions,
+  }];
   if (process.env.DRIFTSEAL_HOME) {
-    candidates.push(path.resolve(process.env.DRIFTSEAL_HOME, 'events.jsonl'));
+    candidates.push({
+      sourceLog: path.resolve(process.env.DRIFTSEAL_HOME, 'events.jsonl'),
+      sourceDecisions: defaultDecisions,
+    });
   }
   const migration = findMigrationEvent(logFile());
   if (migration) return null;
-  return [...new Set(candidates)].find((candidate) => fs.existsSync(candidate)) || null;
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = `${candidate.sourceLog}\0${candidate.sourceDecisions}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (
+      fs.existsSync(candidate.sourceLog) ||
+      migrationDecisionFiles(candidate.sourceDecisions).length > 0
+    ) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function assertV2RepositoryReady(cmd, rest) {
@@ -5744,12 +5892,17 @@ function assertV2RepositoryReady(cmd, rest) {
   const source = unmigratedV1Source();
   if (!source) return;
   let destination = path.resolve(sealRoot());
-  if (sameResolvedPath(path.dirname(source), destination)) {
+  if (
+    pathContains(path.dirname(source.sourceLog), destination) ||
+    pathContains(source.sourceDecisions, destination)
+  ) {
     destination = path.resolve(process.cwd(), '.seal');
   }
   fail(
-    `unmigrated v1 intent log detected at ${source}; v2 repository commands are disabled until migration is staged\n` +
-      `run: driftseal migrate v1-to-v2 inspect --source-log ${JSON.stringify(source)} --destination ${JSON.stringify(destination)}\n` +
+    `unmigrated v1 state detected at ${source.sourceLog} or ${source.sourceDecisions}; ` +
+      'v2 repository commands are disabled until migration is staged\n' +
+      `run: driftseal migrate v1-to-v2 inspect --source-log ${JSON.stringify(source.sourceLog)} ` +
+      `--source-decisions ${JSON.stringify(source.sourceDecisions)} --destination ${JSON.stringify(destination)}\n` +
       'if DRIFTSEAL_HOME points to v1 storage, unset or update it after migration'
   );
 }

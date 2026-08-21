@@ -451,12 +451,12 @@ test('MCP status accepts a verification record with a null exit code', async () 
   }
 });
 
-test('MCP migration supports custom v1 storage and destination paths', async () => {
+test('MCP migration destination remains visible to ordinary workflow tools', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-custom-v1-storage-'));
   const legacy = path.join(root, 'legacy');
   const sourceLog = path.join(legacy, 'intents', 'events.jsonl');
   const sourceDecisions = path.join(legacy, 'decisions');
-  const destination = path.join(root, 'custom-v2-seal');
+  const destination = path.join(fs.realpathSync(root), '.seal');
   fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
   fs.mkdirSync(sourceDecisions, { recursive: true });
   fs.writeFileSync(sourceLog, [
@@ -466,7 +466,7 @@ test('MCP migration supports custom v1 storage and destination paths', async () 
   fs.writeFileSync(path.join(sourceDecisions, '0001-mcp-migration.md'), 'MCP migration bytes\n');
 
   const client = await connect(root);
-  const locations = { sourceLog, sourceDecisions, destination };
+  const locations = { sourceLog, sourceDecisions };
   try {
     const inspected = await call(client, 'driftseal_migration_inspect', locations);
     assert.equal(inspected.isError, undefined);
@@ -488,6 +488,13 @@ test('MCP migration supports custom v1 storage and destination paths', async () 
     assert.equal(checked.isError, undefined);
     assert.equal(checked.structuredContent.result.valid, true);
     assert.equal(fs.existsSync(path.join(destination, 'madr', '0001-mcp-migration.md')), true);
+    const history = await call(client, 'driftseal_log', { last: 10 });
+    assert.equal(history.isError, undefined);
+    assert.equal(history.structuredContent.outcomes.length, 1);
+    assert.equal(
+      history.structuredContent.outcomes[0].outcome,
+      'Migrate custom v1 storage through MCP'
+    );
   } finally {
     await client.close();
   }
