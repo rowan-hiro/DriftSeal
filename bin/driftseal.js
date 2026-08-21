@@ -4622,7 +4622,7 @@ function manifestDecisionId(name) {
   }
 }
 
-function validateMigrationMadrManifest(directory, manifest, events = []) {
+function latestMigrationReconciledHashes(events) {
   const latestReconciledHash = new Map();
   for (const record of fold(events)) {
     for (const update of record.decisionUpdates) {
@@ -4631,6 +4631,11 @@ function validateMigrationMadrManifest(directory, manifest, events = []) {
       }
     }
   }
+  return latestReconciledHash;
+}
+
+function validateMigrationMadrManifest(directory, manifest, events = []) {
+  const latestReconciledHash = latestMigrationReconciledHashes(events);
   for (const entry of manifest) {
     const file = path.join(directory, entry.name);
     if (!fs.existsSync(file)) fail(`migrated MADR is missing: ${entry.name}`);
@@ -4645,38 +4650,31 @@ function validateMigrationMadrManifest(directory, manifest, events = []) {
   }
 }
 
-function migrationSourceSnapshot(flags = {}, { storedSource } = {}) {
-  const paths = migrationPaths(flags, { storedSource });
-  const decisions = migrationDecisionFiles(paths.sourceDecisions);
-  const sourceLogPresent = fs.existsSync(paths.sourceLog);
-  if (!sourceLogPresent && decisions.length === 0) {
-    fail(`v1 source not found: ${paths.sourceLog} or ${paths.sourceDecisions}`);
-  }
-  const park = legacyParkFile();
-  if (park && fs.existsSync(park)) {
-    fail('v1 migration requires no open intent; close the parked v1 intent first');
-  }
-  const rawLog = sourceLogPresent ? fs.readFileSync(paths.sourceLog, 'utf8') : '';
-  const records = fold(
-    parseJsonlRecords(rawLog, paths.sourceLog, { allowLegacy: true })
-      .map((record) => record.event)
-  );
-  if (records.some((record) => record.logVersion !== 1)) {
-    fail('migration source is not a v1 intent log');
-  }
-  const open = records.filter((record) => record.status === 'in_progress');
-  if (open.length > 0) {
-    fail(`v1 migration requires every intent to be closed; still open: ${open.map((record) => record.id).join(', ')}`);
-  }
+function migrationSourceContent(sourceLog, sourceDecisions) {
+  const resolvedLog = canonicalPath(sourceLog);
+  const resolvedDecisions = canonicalPath(sourceDecisions);
+  const decisions = migrationDecisionFiles(resolvedDecisions);
+  const sourceLogPresent = fs.existsSync(resolvedLog);
+  const rawLog = sourceLogPresent ? fs.readFileSync(resolvedLog, 'utf8') : '';
+  return {
+    sourceLog: resolvedLog,
+    sourceDecisions: resolvedDecisions,
+    decisions,
+    sourceLogPresent,
+    rawLog,
+  };
+}
+
+function hashMigrationSourceContent(content) {
   const hash = crypto.createHash('sha256');
-  hash.update(JSON.stringify(migrationSourceIdentity({ ...paths, sourceLogPresent })));
+  hash.update(JSON.stringify(migrationSourceIdentity(content)));
   hash.update('\0');
-  hash.update(rawLog);
+  hash.update(content.rawLog);
   const legacyHash = crypto.createHash('sha256');
-  legacyHash.update(paths.sourceLog);
+  legacyHash.update(content.sourceLog);
   legacyHash.update('\0');
-  legacyHash.update(rawLog);
-  for (const decision of decisions) {
+  legacyHash.update(content.rawLog);
+  for (const decision of content.decisions) {
     hash.update('\0');
     hash.update(decision.name);
     hash.update('\0');
@@ -4687,13 +4685,37 @@ function migrationSourceSnapshot(flags = {}, { storedSource } = {}) {
     legacyHash.update(decision.bytes);
   }
   return {
-    ...paths,
-    rawLog,
-    records,
-    decisions,
-    sourceLogPresent,
     sourceFingerprint: hash.digest('hex'),
     legacySourceFingerprint: legacyHash.digest('hex'),
+  };
+}
+
+function migrationSourceSnapshot(flags = {}, { storedSource } = {}) {
+  const paths = migrationPaths(flags, { storedSource });
+  const content = migrationSourceContent(paths.sourceLog, paths.sourceDecisions);
+  if (!content.sourceLogPresent && content.decisions.length === 0) {
+    fail(`v1 source not found: ${paths.sourceLog} or ${paths.sourceDecisions}`);
+  }
+  const park = legacyParkFile();
+  if (park && fs.existsSync(park)) {
+    fail('v1 migration requires no open intent; close the parked v1 intent first');
+  }
+  const records = fold(
+    parseJsonlRecords(content.rawLog, content.sourceLog, { allowLegacy: true })
+      .map((record) => record.event)
+  );
+  if (records.some((record) => record.logVersion !== 1)) {
+    fail('migration source is not a v1 intent log');
+  }
+  const open = records.filter((record) => record.status === 'in_progress');
+  if (open.length > 0) {
+    fail(`v1 migration requires every intent to be closed; still open: ${open.map((record) => record.id).join(', ')}`);
+  }
+  return {
+    ...paths,
+    ...content,
+    records,
+    ...hashMigrationSourceContent(content),
   };
 }
 
@@ -4742,9 +4764,32 @@ function readMigrationPlan(file, inline) {
   return plan;
 }
 
+function migrationFingerprints(snapshot) {
+  return [snapshot.sourceFingerprint, snapshot.legacySourceFingerprint];
+}
+
+function migrationPlanDigest(sourceFingerprint, groups, excluded) {
+  return contentHash(JSON.stringify({
+    format: MIGRATION_PLAN_FORMAT,
+    sourceFingerprint,
+    groups,
+    excluded,
+  }));
+}
+
+function existingMigrationMatchesPlan(existing, validated, snapshot) {
+  if (!migrationFingerprints(snapshot).includes(existing.sourceFingerprint)) return false;
+  if (existing.planDigest === validated.planDigest) return true;
+  return existing.planDigest === migrationPlanDigest(
+    snapshot.legacySourceFingerprint,
+    validated.groups,
+    validated.excluded
+  );
+}
+
 function validateMigrationPlan(plan, snapshot) {
   if (plan.format !== MIGRATION_PLAN_FORMAT) fail(`migration plan format must be ${MIGRATION_PLAN_FORMAT}`);
-  if (![snapshot.sourceFingerprint, snapshot.legacySourceFingerprint].includes(plan.sourceFingerprint)) {
+  if (!migrationFingerprints(snapshot).includes(plan.sourceFingerprint)) {
     fail('migration plan source fingerprint does not match the current v1 source');
   }
   if (!Array.isArray(plan.groups)) fail('migration plan groups must be an array');
@@ -4781,16 +4826,12 @@ function validateMigrationPlan(plan, snapshot) {
   if (!isDeepStrictEqual(actual, expected)) {
     fail('migration groups must form an ordered, complete partition of all non-excluded v1 intents');
   }
+  const excludedItems = [...excluded].map(([sourceId, reason]) => ({ sourceId, reason }));
   return {
     groups,
-    excluded: [...excluded].map(([sourceId, reason]) => ({ sourceId, reason })),
-    sourceFingerprint: plan.sourceFingerprint,
-    planDigest: contentHash(JSON.stringify({
-      format: plan.format,
-      sourceFingerprint: plan.sourceFingerprint,
-      groups,
-      excluded: [...excluded].map(([sourceId, reason]) => ({ sourceId, reason })),
-    })),
+    excluded: excludedItems,
+    sourceFingerprint: snapshot.sourceFingerprint,
+    planDigest: migrationPlanDigest(snapshot.sourceFingerprint, groups, excludedItems),
   };
 }
 
@@ -4798,37 +4839,37 @@ function storedV2Event(event) {
   return { logVersion: LOG_VERSION, schemaVersion: EVENT_SCHEMA_VERSION, ...event };
 }
 
-function migrationEvents(snapshot, validated) {
+function migrationImportEvent(snapshot, validated, group, events) {
   const byId = new Map(snapshot.records.map((record) => [record.id, record]));
-  const events = [];
-  for (const group of validated.groups) {
-    const sources = group.sourceIds.map((id) => byId.get(id));
-    const first = sources[0];
-    const last = sources.at(-1);
-    const date = /^\d{4}-\d{2}-\d{2}/.test(first.tsBegin) ? first.tsBegin.slice(0, 10) : new Date().toISOString().slice(0, 10);
-    const id = nextIdForDate(date, events);
-    const decisions = [...new Set(sources.flatMap((source) => source.decisions))];
-    events.push(storedV2Event({
-      type: 'import',
-      id,
-      ts: new Date().toISOString(),
-      outcome: group.outcome,
-      summary: group.summary,
-      status: last.status,
-      beganAt: first.tsBegin,
-      endedAt: last.tsEnd,
-      decisions,
-      sources: sources.map(publicOutcome),
-      sourceFingerprint: validated.sourceFingerprint,
-      reclaimed: sources.every((source) => source.reclaimed),
-      reclaimReason: sources.every((source) => source.reclaimed)
-        ? sources.map((source) => source.reclaimReason).filter(Boolean).join('; ') || 'reclaimed in v1'
-        : null,
-      reclaimedAt: sources.every((source) => source.reclaimed) ? last.reclaimedAt : null,
-      head: last.endHead || first.beginHead || null,
-    }));
-  }
-  events.push(storedV2Event({
+  const sources = group.sourceIds.map((id) => byId.get(id));
+  const first = sources[0];
+  const last = sources.at(-1);
+  const date = /^\d{4}-\d{2}-\d{2}/.test(first.tsBegin) ? first.tsBegin.slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const decisions = [...new Set(sources.flatMap((source) => source.decisions))];
+  return storedV2Event({
+    type: 'import',
+    id: nextIdForDate(date, events),
+    ts: new Date().toISOString(),
+    outcome: group.outcome,
+    summary: group.summary,
+    status: last.status,
+    beganAt: first.tsBegin,
+    endedAt: last.tsEnd,
+    decisions,
+    sources: sources.map(publicOutcome),
+    sourceFingerprint: validated.sourceFingerprint,
+    reclaimed: sources.every((source) => source.reclaimed),
+    reclaimReason: sources.every((source) => source.reclaimed)
+      ? sources.map((source) => source.reclaimReason).filter(Boolean).join('; ') || 'reclaimed in v1'
+      : null,
+    reclaimedAt: sources.every((source) => source.reclaimed) ? last.reclaimedAt : null,
+    head: last.endHead || first.beginHead || null,
+  });
+}
+
+function migrationMarkerEvent(snapshot, validated) {
+  const byId = new Map(snapshot.records.map((record) => [record.id, record]));
+  return storedV2Event({
     type: 'migration',
     id: 'v1-to-v2',
     ts: new Date().toISOString(),
@@ -4840,7 +4881,15 @@ function migrationEvents(snapshot, validated) {
       ...item,
       source: publicOutcome(byId.get(item.sourceId)),
     })),
-  }));
+  });
+}
+
+function migrationEvents(snapshot, validated) {
+  const events = [];
+  for (const group of validated.groups) {
+    events.push(migrationImportEvent(snapshot, validated, group, events));
+  }
+  events.push(migrationMarkerEvent(snapshot, validated));
   fold(events);
   return events;
 }
@@ -4874,13 +4923,108 @@ function validateStagedMigration(directory, snapshot, { allowReconciled = false 
   }
 }
 
+function migrationRefreshPlan(destination, snapshot, validated, events) {
+  const records = fold(events);
+  const existingImports = records.filter((record) => record.imported);
+  const sourceRecords = new Map(snapshot.records.map((record) => [record.id, record]));
+  const importedBySource = new Map();
+  const importedByGroup = new Map();
+  for (const record of existingImports) {
+    const key = JSON.stringify(record.imported.sourceIds);
+    if (importedByGroup.has(key)) fail(`duplicate migrated v1 source group: ${record.imported.sourceIds.join(', ')}`);
+    importedByGroup.set(key, record);
+    for (const sourceId of record.imported.sourceIds) {
+      if (importedBySource.has(sourceId)) fail(`v1 source was imported more than once: ${sourceId}`);
+      importedBySource.set(sourceId, record);
+    }
+  }
+
+  const newGroups = [];
+  for (const group of validated.groups) {
+    const key = JSON.stringify(group.sourceIds);
+    const existing = importedByGroup.get(key);
+    const overlap = group.sourceIds.filter((sourceId) => importedBySource.has(sourceId));
+    if (!existing) {
+      if (overlap.length > 0) {
+        fail(`refreshed migration plan regroups already imported v1 sources: ${overlap.join(', ')}`);
+      }
+      newGroups.push(group);
+      continue;
+    }
+    const sources = group.sourceIds.map((sourceId) => sourceRecords.get(sourceId));
+    if (
+      existing.outcome !== group.outcome ||
+      existing.note !== group.summary ||
+      !isDeepStrictEqual(existing.imported.sources, sources.map(publicOutcome))
+    ) {
+      fail(`refreshed migration plan changes an already imported v1 source group: ${group.sourceIds.join(', ')}`);
+    }
+  }
+  for (const record of existingImports) {
+    if (!validated.groups.some((group) => isDeepStrictEqual(group.sourceIds, record.imported.sourceIds))) {
+      fail(`refreshed migration plan omits an already imported v1 source group: ${record.imported.sourceIds.join(', ')}`);
+    }
+  }
+
+  const latestReconciledHash = latestMigrationReconciledHashes(events);
+  const missingDecisions = [];
+  for (const decision of snapshot.decisions) {
+    const file = path.join(destination, 'madr', decision.name);
+    if (!fs.existsSync(file)) {
+      missingDecisions.push(decision);
+      continue;
+    }
+    const bytes = fs.readFileSync(file);
+    if (bytes.equals(decision.bytes)) continue;
+    const decisionId = manifestDecisionId(decision.name);
+    const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+    if (!decisionId || latestReconciledHash.get(decisionId) !== hash) {
+      fail(`migrated MADR conflicts with the current v1 source: ${decision.name}`);
+    }
+  }
+  return { newGroups, missingDecisions };
+}
+
+function refreshMigration(destination, snapshot, validated, existing) {
+  if (existing.source !== undefined && !migrationSourceMatchesSnapshot(existing.source, snapshot)) {
+    fail('staged migration source identity does not match the current v1 source paths');
+  }
+  const destinationLog = path.join(destination, 'outcomes', 'events.jsonl');
+  const events = readEvents({ file: destinationLog, readOnly: true });
+  const refresh = migrationRefreshPlan(destination, snapshot, validated, events);
+  const madrDirectory = path.join(destination, 'madr');
+  ensureDirectoryDurable(madrDirectory);
+  for (const decision of refresh.missingDecisions) {
+    atomicWriteFile(path.join(madrDirectory, decision.name), decision.bytes);
+  }
+  for (const group of refresh.newGroups) {
+    const event = migrationImportEvent(snapshot, validated, group, events);
+    events.push(appendEventTo(destinationLog, event));
+  }
+  fold(events);
+  appendEventTo(destinationLog, migrationMarkerEvent(snapshot, validated));
+  validateStagedMigration(destination, snapshot, { allowReconciled: true });
+  printLine(
+    `refreshed staged v1-to-v2 migration with ${refresh.newGroups.length} additional outcome(s) ` +
+    `and ${refresh.missingDecisions.length} MADR file(s)`
+  );
+  return {
+    changed: true,
+    refreshed: true,
+    destination,
+    sourceFingerprint: snapshot.sourceFingerprint,
+    planDigest: validated.planDigest,
+    importedOutcomes: refresh.newGroups.length,
+    copiedDecisions: refresh.missingDecisions.length,
+  };
+}
+
 function applyMigration(snapshot, validated) {
   const destination = snapshot.destination;
   const destinationLog = path.join(destination, 'outcomes', 'events.jsonl');
   if (fs.existsSync(destination)) {
     const existing = findMigrationEvent(destinationLog);
-    if (existing && existing.sourceFingerprint === validated.sourceFingerprint &&
-      existing.planDigest === validated.planDigest) {
+    if (existing && existingMigrationMatchesPlan(existing, validated, snapshot)) {
       validateStagedMigration(destination, snapshot, { allowReconciled: true });
       const manifest = migrationMadrManifest(snapshot.decisions);
       const source = migrationSourceIdentity(snapshot);
@@ -4890,14 +5034,16 @@ function applyMigration(snapshot, validated) {
       if (
         existing.madrManifest === undefined ||
         existing.source === undefined ||
-        !isDeepStrictEqual(existing.source, source)
+        !isDeepStrictEqual(existing.source, source) ||
+        existing.sourceFingerprint !== snapshot.sourceFingerprint ||
+        existing.planDigest !== validated.planDigest
       ) {
         appendEventTo(destinationLog, {
           type: 'migration',
           id: 'v1-to-v2',
           ts: new Date().toISOString(),
-          sourceFingerprint: existing.sourceFingerprint,
-          planDigest: existing.planDigest,
+          sourceFingerprint: snapshot.sourceFingerprint,
+          planDigest: validated.planDigest,
           source,
           madrManifest: manifest,
           excluded: existing.excluded,
@@ -4907,7 +5053,7 @@ function applyMigration(snapshot, validated) {
           changed: true,
           upgraded: true,
           destination,
-          sourceFingerprint: existing.sourceFingerprint,
+          sourceFingerprint: snapshot.sourceFingerprint,
           planDigest: validated.planDigest,
         };
       }
@@ -4915,8 +5061,9 @@ function applyMigration(snapshot, validated) {
         fail('staged migration MADR manifest does not match the current v1 source');
       }
       printLine('v1-to-v2 migration is already staged with the same source and plan');
-      return { changed: false, destination, sourceFingerprint: existing.sourceFingerprint, planDigest: validated.planDigest };
+      return { changed: false, destination, sourceFingerprint: snapshot.sourceFingerprint, planDigest: validated.planDigest };
     }
+    if (existing) return refreshMigration(destination, snapshot, validated, existing);
     fail(`migration destination already exists with different content: ${destination}`);
   }
   ensureDirectoryDurable(path.dirname(destination));
@@ -5400,6 +5547,7 @@ const commands = {
         options: flags.option || [],
         consequences: flags.consequence || [],
       });
+      ensureDirectoryDurable(logDir());
       ensureDirectoryDurable(decisionDir());
       atomicCreateFile(path.join(decisionDir(), file), content);
       const decision = findDecision(String(id));
@@ -5869,59 +6017,226 @@ function usesV2RepositoryState(cmd, rest) {
   return cmd === 'hook' && ['prompt', 'stop'].includes(rest[0]);
 }
 
-function unmigratedV1Source() {
-  const configuredDecisions = path.resolve(
-    process.env.DRIFTSEAL_DECISION_HOME || path.join(process.cwd(), '.decision-log')
-  );
-  const defaultDecisions = canonicalPath(configuredDecisions) === canonicalPath(decisionDir())
-    ? path.resolve(process.cwd(), '.decision-log')
-    : configuredDecisions;
-  const candidates = [{
-    sourceLog: path.resolve(process.cwd(), '.intent-log', 'events.jsonl'),
-    sourceDecisions: defaultDecisions,
-  }];
-  if (process.env.DRIFTSEAL_HOME) {
-    candidates.push({
-      sourceLog: path.resolve(process.env.DRIFTSEAL_HOME, 'events.jsonl'),
-      sourceDecisions: defaultDecisions,
-    });
-  }
-  const migration = findMigrationEvent(logFile());
-  if (migration) return null;
+function looksLikeV2SealRoot(root) {
+  const resolved = canonicalPath(root);
+  if (fs.existsSync(path.join(resolved, 'outcomes', 'events.jsonl'))) return true;
+  const outcomeDir = path.join(resolved, 'outcomes');
+  try {
+    if (fs.statSync(outcomeDir).isDirectory()) return true;
+  } catch {}
+  return resolved === canonicalPath(path.join(process.cwd(), '.seal'));
+}
+
+function isV2OutcomeLog(file) {
+  const resolved = canonicalPath(file);
+  if (resolved === canonicalPath(logFile()) && looksLikeV2SealRoot(sealRoot())) return true;
+  const directory = path.dirname(resolved);
+  return path.basename(resolved) === 'events.jsonl' &&
+    path.basename(directory) === 'outcomes' &&
+    looksLikeV2SealRoot(path.dirname(directory));
+}
+
+function isV2MadrDirectory(directory) {
+  const resolved = canonicalPath(directory);
+  if (resolved === canonicalPath(decisionDir()) && looksLikeV2SealRoot(sealRoot())) return true;
+  return path.basename(resolved) === 'madr' && looksLikeV2SealRoot(path.dirname(resolved));
+}
+
+function existingV2SealRoots() {
+  const roots = [];
   const seen = new Set();
-  for (const candidate of candidates) {
-    const key = `${candidate.sourceLog}\0${candidate.sourceDecisions}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if (
-      fs.existsSync(candidate.sourceLog) ||
-      migrationDecisionFiles(candidate.sourceDecisions).length > 0
-    ) {
-      return candidate;
+  const consider = (root) => {
+    const resolved = canonicalPath(root);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    if (fs.existsSync(path.join(resolved, 'outcomes', 'events.jsonl'))) roots.push(resolved);
+  };
+  consider(path.join(process.cwd(), '.seal'));
+  consider(sealRoot());
+  const cwd = canonicalPath(process.cwd());
+  // setup() tests use cwd=os.tmpdir() with DRIFTSEAL_HOME in a child directory.
+  // Never scan the system temp root: sibling test dirs would look like extra lineages.
+  if (cwd !== canonicalPath(os.tmpdir())) {
+    let names = [];
+    try {
+      names = fs.readdirSync(process.cwd());
+    } catch {
+      names = [];
+    }
+    for (const name of names) {
+      if (name === '.git' || name === 'node_modules') continue;
+      consider(path.join(process.cwd(), name));
+    }
+  }
+  return roots;
+}
+
+function repositoryOutcomeLogFiles() {
+  const files = [];
+  const seen = new Set();
+  const add = (file) => {
+    const resolved = canonicalPath(file);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    files.push(file);
+  };
+  add(logFile());
+  add(path.join(process.cwd(), '.seal', 'outcomes', 'events.jsonl'));
+  for (const root of existingV2SealRoots()) {
+    add(path.join(root, 'outcomes', 'events.jsonl'));
+  }
+  return files;
+}
+
+function repositoryMigrationEvent() {
+  for (const file of repositoryOutcomeLogFiles()) {
+    try {
+      const migration = findMigrationEvent(file);
+      if (migration) return migration;
+    } catch {
+      // Conflicted or corrupt v2 logs are handled by the command, not by v1 detection.
     }
   }
   return null;
 }
 
+function v2KnownRecordIds() {
+  const ids = new Set();
+  for (const file of repositoryOutcomeLogFiles()) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      for (const event of readEvents({ file, repairTail: false, readOnly: true })) {
+        if (event.type === 'import' && Array.isArray(event.sources)) {
+          for (const source of event.sources) {
+            if (source && typeof source.id === 'string') ids.add(source.id);
+          }
+        }
+        if (event.type === 'migration' && Array.isArray(event.excluded)) {
+          for (const item of event.excluded) {
+            if (item && typeof item.sourceId === 'string') ids.add(item.sourceId);
+          }
+        }
+      }
+    } catch {
+      // Unreadable v2 logs cannot attest that leftover v1 records are already present.
+    }
+  }
+  return ids;
+}
+
+function migrationCoversCandidate(candidate, migration) {
+  if (!migration || typeof migration.sourceFingerprint !== 'string') return false;
+  try {
+    const content = migrationSourceContent(candidate.sourceLog, candidate.sourceDecisions);
+    const hashes = hashMigrationSourceContent(content);
+    if ([hashes.sourceFingerprint, hashes.legacySourceFingerprint].includes(migration.sourceFingerprint)) {
+      return true;
+    }
+    const beginIds = parseJsonlRecords(content.rawLog, content.sourceLog, { allowLegacy: true })
+      .map((record) => record.event)
+      .filter((event) => event.type === 'begin')
+      .map((event) => event.id);
+    const knownIds = v2KnownRecordIds();
+    if (beginIds.some((id) => !knownIds.has(id))) return false;
+    if (Array.isArray(migration.madrManifest)) {
+      const expected = new Map(migration.madrManifest.map((entry) => [entry.name, entry.sha256]));
+      for (const decision of content.decisions) {
+        const sha256 = expected.get(decision.name);
+        if (!sha256) return false;
+        const actual = crypto.createHash('sha256').update(decision.bytes).digest('hex');
+        if (actual !== sha256) return false;
+      }
+    }
+    return beginIds.length > 0 || content.decisions.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function unmigratedV1Source() {
+  const migration = repositoryMigrationEvent();
+  const defaultLog = path.resolve(process.cwd(), '.intent-log', 'events.jsonl');
+  const defaultDecisions = path.resolve(process.cwd(), '.decision-log');
+  const configuredLog = process.env.DRIFTSEAL_HOME
+    ? path.resolve(process.env.DRIFTSEAL_HOME, 'events.jsonl')
+    : null;
+  const configuredDecisions = process.env.DRIFTSEAL_DECISION_HOME
+    ? path.resolve(process.env.DRIFTSEAL_DECISION_HOME)
+    : defaultDecisions;
+  const candidates = [{
+    sourceLog: defaultLog,
+    sourceDecisions: defaultDecisions,
+  }];
+  if (configuredLog) {
+    candidates.push({
+      sourceLog: configuredLog,
+      sourceDecisions: configuredDecisions,
+    });
+  } else if (process.env.DRIFTSEAL_DECISION_HOME) {
+    candidates.push({
+      sourceLog: defaultLog,
+      sourceDecisions: configuredDecisions,
+    });
+  }
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = `${canonicalPath(candidate.sourceLog)}\0${canonicalPath(candidate.sourceDecisions)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const hasLog = fs.existsSync(candidate.sourceLog) && !isV2OutcomeLog(candidate.sourceLog);
+    const hasDecisions = !isV2MadrDirectory(candidate.sourceDecisions) &&
+      migrationDecisionFiles(candidate.sourceDecisions).length > 0;
+    if (!hasLog && !hasDecisions) continue;
+    if (migration && migrationCoversCandidate(candidate, migration)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function staleInheritedSealHome() {
+  if (!process.env.DRIFTSEAL_HOME) return null;
+  const home = canonicalPath(process.env.DRIFTSEAL_HOME);
+  if (fs.existsSync(logFile())) return null;
+  const others = existingV2SealRoots().filter((root) => root !== home);
+  if (others.length === 0) return null;
+  const defaultSeal = canonicalPath(path.join(process.cwd(), '.seal'));
+  return {
+    home,
+    seal: others.includes(defaultSeal) ? defaultSeal : others[0],
+  };
+}
+
 function assertV2RepositoryReady(cmd, rest) {
   if (!usesV2RepositoryState(cmd, rest)) return;
   const source = unmigratedV1Source();
-  if (!source) return;
-  let destination = path.resolve(sealRoot());
-  if (
-    pathContains(source.sourceLog, destination) ||
-    pathContains(destination, source.sourceLog) ||
-    pathContains(source.sourceDecisions, destination) ||
-    pathContains(destination, source.sourceDecisions)
-  ) {
-    destination = path.resolve(process.cwd(), '.seal');
+  if (source) {
+    let destination = path.resolve(sealRoot());
+    if (
+      pathContains(source.sourceLog, destination) ||
+      pathContains(destination, source.sourceLog) ||
+      pathContains(source.sourceDecisions, destination) ||
+      pathContains(destination, source.sourceDecisions)
+    ) {
+      destination = path.resolve(process.cwd(), '.seal');
+    }
+    const staged = repositoryMigrationEvent();
+    const mismatch = staged
+      ? 'it does not match the already staged v1-to-v2 migration; v2 repository commands are disabled until the extra v1 source is removed\n'
+      : 'v2 repository commands are disabled until migration is staged\n';
+    fail(
+      `unmigrated v1 state detected at ${source.sourceLog} or ${source.sourceDecisions}; ` +
+        mismatch +
+        `run: driftseal migrate v1-to-v2 inspect --source-log ${JSON.stringify(source.sourceLog)} ` +
+        `--source-decisions ${JSON.stringify(source.sourceDecisions)} --destination ${JSON.stringify(destination)}\n` +
+        'if DRIFTSEAL_HOME points to v1 storage, unset or update it after migration'
+    );
   }
+  const staleHome = staleInheritedSealHome();
+  if (!staleHome) return;
   fail(
-    `unmigrated v1 state detected at ${source.sourceLog} or ${source.sourceDecisions}; ` +
-      'v2 repository commands are disabled until migration is staged\n' +
-      `run: driftseal migrate v1-to-v2 inspect --source-log ${JSON.stringify(source.sourceLog)} ` +
-      `--source-decisions ${JSON.stringify(source.sourceDecisions)} --destination ${JSON.stringify(destination)}\n` +
-      'if DRIFTSEAL_HOME points to v1 storage, unset or update it after migration'
+    `DRIFTSEAL_HOME points to ${staleHome.home}, which has no v2 outcome log, ` +
+      `but this repository already has v2 state at ${staleHome.seal}; ` +
+      'unset DRIFTSEAL_HOME or point it at the seal root'
   );
 }
 

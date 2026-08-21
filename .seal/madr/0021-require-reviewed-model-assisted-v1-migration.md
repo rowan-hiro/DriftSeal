@@ -45,3 +45,31 @@ Hardened reviewed migration with fail-closed v1 detection, durable MADR manifest
 Status: Accepted → Accepted
 
 Completed migration hardening for MADR-only v1 state, authoritative source paths, latest reconciliation hashes, and non-overlapping removal boundaries.
+
+<!-- driftseal-reconciliation: e23a9ce3-13bd-4e7f-884f-7362638b0999 -->
+### 2026-08-21T07:05:39.099Z — Outcome `2026-08-21-006`
+
+Status: Accepted → Accepted
+
+Fail-closed v1 detection now keeps custom MADR-only homes distinct from v2 storage, canonical-excludes aliased decision paths, and stores portable fingerprints when a legacy absolute plan is applied.
+
+<!-- driftseal-reconciliation: 0a2c35c1-89d4-4f0a-a274-6e38a44a628e -->
+### 2026-08-21T07:34:43.179Z — Outcome `2026-08-21-007`
+
+Status: Accepted → Accepted
+
+Fail-closed now treats a leftover DRIFTSEAL_HOME as unsafe when the repository .seal already holds v2 state, and it re-blocks v1 sources that introduce records not already present in the staged migration.
+
+<!-- driftseal-reconciliation: 9f81efa4-58a3-4dd6-b5ce-de0beceaac76 -->
+### 2026-08-21T07:50:53.583Z — Outcome `2026-08-21-008`
+
+Status: Accepted → Accepted
+
+Field testing confirmed reviewed append-only migration refresh is required when v1 gains closed work after staging; the refresh preserves native v2 outcomes and reconciled MADRs.
+
+<!-- driftseal-reconciliation: 3726abd2-3d1c-4a4a-9e8c-cacd0a4cc255 -->
+### 2026-08-21T08:05:54.147Z — Outcome `2026-08-21-010`
+
+Status: Accepted → Accepted
+
+Fail-closed now treats leftover DRIFTSEAL_HOME as unsafe for any discovered staged seal root, including custom destinations, and attests leftover v1 records only via imported or excluded source ids plus MADR sha256.
