@@ -1874,26 +1874,31 @@ MCP and lifecycle hooks are optional adapters.
 
 ${intentLogLanguageParagraph(language)}
 
-1. **Write intent first**, before any change to project content that will be
-   committed and cannot be reconstructed from Git history:
+1. **Write intent first**, before changing durable project content:
    \`driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"\`.
    Repeat \`--accept\` when completion has multiple independently observable criteria.
    Add one \`--decision <id>\` for each existing decision this round may change.
-   Record intents for changes that alter what the project commits: edits to
-   code, configuration, documentation, and dependencies. Everything else is
+   Record intents for changes intended to persist in the project: edits to code,
+   configuration, documentation, dependencies, and equivalent project files,
+   whether or not the project is inside a Git worktree. Everything else is
    exempt: Git operations (Git maintains their history — inspection, branch
    and worktree management, staging, commits, merges, rebases, cherry-picks,
    tags, and pushes); single-step commands that only build or check work
    already done, such as compiling or running tests; auxiliary file or shell
-   operations whose results stay out of the tracked tree or can be regenerated
-   at will (for example an rsync scratch copy or temp scaffolding); and any
-   state change outside a Git worktree (a remote machine, the local
-   environment), which never belongs in the intent log.
-   In multi-agent work the same rule applies per writer: every agent that
-   changes tracked content, subagents included, holds its own open intent; an
-   agent that only receives another agent's changes into a shared workspace
-   records nothing and lets \`verify\` expose misalignment; handoff files are
-   exempt while gitignored and require an intent once tracked.
+   operations whose results remain outside durable project content (for example
+   an rsync scratch copy or temp scaffolding); and state changes to a remote
+   machine or the local environment that do not write durable project content
+   into this workspace. When an external operation does bring durable content
+   into the project, record an intent for that project-content change, not for
+   the external operation itself.
+   In multi-agent work, one open intent belongs to one worktree, or to one
+   configured project root outside Git. Every agent or subagent that changes
+   durable project content in the same root first re-anchors and continues its
+   matching open intent; agents working in separate worktrees hold separate
+   intents. An agent that only receives another agent's changes through Git or
+   into a shared worktree records no receiving intent and lets \`verify\` expose
+   misalignment; handoff files are exempt while ignored or otherwise kept
+   outside durable project content and require an intent when promoted into it.
    Size an intent to the smallest unit that leaves the tree self-consistent
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
@@ -1922,13 +1927,13 @@ ${intentLogLanguageParagraph(language)}
    Git operations remain subject to normal authorization and safety requirements
    even though they do not require an intent. Any content change made while
    preparing a Git operation still requires an intent when it meets the
-   committed-content rule in step 1.
+   durable-project-content rule in step 1.
 4. **Re-anchor after context loss**: run \`driftseal status\` and \`driftseal log --last 3\` before
    doing anything else. The open intent is the source of truth: resume it when its
    objective still matches the current task; otherwise close it (\`partial\` or
-   \`abandoned\`, with a note) and \`begin\` a new one. Taking over from another
-   agent mid-intent is the same re-anchor: resume the open intent when its
-   objective still matches.
+   \`abandoned\`, with a note) and \`begin\` a new one. Taking over work in the
+   same root from another agent is the same re-anchor: resume the open intent
+   when its objective still matches.
 
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 \`.intent-log/events.jsonl\` (or anything under \`$DRIFTSEAL_HOME\`) directly; use
@@ -1946,26 +1951,31 @@ ${INTENT_PROTOCOL_END}`;
 function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   const v13 = intentProtocolBlock(version, language, localLog)
     .replace(
-      '1. **Write intent first**, before any change to project content that will be\n' +
-        '   committed and cannot be reconstructed from Git history:\n' +
+      '1. **Write intent first**, before changing durable project content:\n' +
         '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
         '   Repeat `--accept` when completion has multiple independently observable criteria.\n' +
         '   Add one `--decision <id>` for each existing decision this round may change.\n' +
-        '   Record intents for changes that alter what the project commits: edits to\n' +
-        '   code, configuration, documentation, and dependencies. Everything else is\n' +
+        '   Record intents for changes intended to persist in the project: edits to code,\n' +
+        '   configuration, documentation, dependencies, and equivalent project files,\n' +
+        '   whether or not the project is inside a Git worktree. Everything else is\n' +
         '   exempt: Git operations (Git maintains their history — inspection, branch\n' +
         '   and worktree management, staging, commits, merges, rebases, cherry-picks,\n' +
         '   tags, and pushes); single-step commands that only build or check work\n' +
         '   already done, such as compiling or running tests; auxiliary file or shell\n' +
-        '   operations whose results stay out of the tracked tree or can be regenerated\n' +
-        '   at will (for example an rsync scratch copy or temp scaffolding); and any\n' +
-        '   state change outside a Git worktree (a remote machine, the local\n' +
-        '   environment), which never belongs in the intent log.\n' +
-        '   In multi-agent work the same rule applies per writer: every agent that\n' +
-        '   changes tracked content, subagents included, holds its own open intent; an\n' +
-        "   agent that only receives another agent's changes into a shared workspace\n" +
-        '   records nothing and lets `verify` expose misalignment; handoff files are\n' +
-        '   exempt while gitignored and require an intent once tracked.\n' +
+        '   operations whose results remain outside durable project content (for example\n' +
+        '   an rsync scratch copy or temp scaffolding); and state changes to a remote\n' +
+        '   machine or the local environment that do not write durable project content\n' +
+        '   into this workspace. When an external operation does bring durable content\n' +
+        '   into the project, record an intent for that project-content change, not for\n' +
+        '   the external operation itself.\n' +
+        '   In multi-agent work, one open intent belongs to one worktree, or to one\n' +
+        '   configured project root outside Git. Every agent or subagent that changes\n' +
+        '   durable project content in the same root first re-anchors and continues its\n' +
+        '   matching open intent; agents working in separate worktrees hold separate\n' +
+        "   intents. An agent that only receives another agent's changes through Git or\n" +
+        '   into a shared worktree records no receiving intent and lets `verify` expose\n' +
+        '   misalignment; handoff files are exempt while ignored or otherwise kept\n' +
+        '   outside durable project content and require an intent when promoted into it.\n' +
         '   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
         '   and can be verified on its own.',
       '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
@@ -1989,7 +1999,7 @@ function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, l
       '   Git operations remain subject to normal authorization and safety requirements\n' +
         '   even though they do not require an intent. Any content change made while\n' +
         '   preparing a Git operation still requires an intent when it meets the\n' +
-        '   committed-content rule in step 1.',
+        '   durable-project-content rule in step 1.',
       '   Git operations remain subject to normal authorization and safety requirements\n' +
         '   even though they do not require an intent. Any non-Git content change made while\n' +
         '   preparing a Git operation does require a new intent, per the step 1 test.'
@@ -1998,9 +2008,9 @@ function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, l
       '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
         '   doing anything else. The open intent is the source of truth: resume it when its\n' +
         '   objective still matches the current task; otherwise close it (`partial` or\n' +
-        '   `abandoned`, with a note) and `begin` a new one. Taking over from another\n' +
-        '   agent mid-intent is the same re-anchor: resume the open intent when its\n' +
-        '   objective still matches.',
+        '   `abandoned`, with a note) and `begin` a new one. Taking over work in the\n' +
+        '   same root from another agent is the same re-anchor: resume the open intent\n' +
+        '   when its objective still matches.',
       '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
         '   doing anything else. The open intent is the source of truth: resume it when its\n' +
         '   objective still matches the current task; otherwise close it (`partial` or\n' +
@@ -2972,12 +2982,13 @@ function hookReminder(event, { readOnly = false } = {}) {
   if (!file) return null;
   if (event === 'prompt') {
     return (
-      'DriftSeal reminder: if this round will change project content that will be committed and ' +
-      'cannot be reconstructed from Git history (code, configuration, documentation, dependencies), ' +
+      'DriftSeal reminder: if this round will change durable project content in this workspace ' +
+      '(code, configuration, documentation, dependencies), ' +
       'begin an intent first: driftseal begin "<intent>" --accept "<observable outcome>" ' +
       '--verify "<command>". ' +
-      'Questions, read-only exploration, single-step checks, and work outside the tracked tree ' +
-      'need no intent — skip this reminder when it does not apply.'
+      'Questions, read-only exploration, single-step checks, temporary work outside durable ' +
+      'project content, and external state changes that do not write project content here need ' +
+      'no intent — skip this reminder when it does not apply.'
     );
   }
   const open = openIntent(fold(readEvents({ file, readOnly })));

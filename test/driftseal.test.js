@@ -145,26 +145,31 @@ function protocolV13(content) {
     .replace('driftseal-version: 14', 'driftseal-version: 13')
     .replace('driftseal-decisions-version: 14', 'driftseal-decisions-version: 13')
     .replace(
-      '1. **Write intent first**, before any change to project content that will be\n' +
-        '   committed and cannot be reconstructed from Git history:\n' +
+      '1. **Write intent first**, before changing durable project content:\n' +
         '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
         '   Repeat `--accept` when completion has multiple independently observable criteria.\n' +
         '   Add one `--decision <id>` for each existing decision this round may change.\n' +
-        '   Record intents for changes that alter what the project commits: edits to\n' +
-        '   code, configuration, documentation, and dependencies. Everything else is\n' +
+        '   Record intents for changes intended to persist in the project: edits to code,\n' +
+        '   configuration, documentation, dependencies, and equivalent project files,\n' +
+        '   whether or not the project is inside a Git worktree. Everything else is\n' +
         '   exempt: Git operations (Git maintains their history — inspection, branch\n' +
         '   and worktree management, staging, commits, merges, rebases, cherry-picks,\n' +
         '   tags, and pushes); single-step commands that only build or check work\n' +
         '   already done, such as compiling or running tests; auxiliary file or shell\n' +
-        '   operations whose results stay out of the tracked tree or can be regenerated\n' +
-        '   at will (for example an rsync scratch copy or temp scaffolding); and any\n' +
-        '   state change outside a Git worktree (a remote machine, the local\n' +
-        '   environment), which never belongs in the intent log.\n' +
-        '   In multi-agent work the same rule applies per writer: every agent that\n' +
-        '   changes tracked content, subagents included, holds its own open intent; an\n' +
-        "   agent that only receives another agent's changes into a shared workspace\n" +
-        '   records nothing and lets `verify` expose misalignment; handoff files are\n' +
-        '   exempt while gitignored and require an intent once tracked.\n' +
+        '   operations whose results remain outside durable project content (for example\n' +
+        '   an rsync scratch copy or temp scaffolding); and state changes to a remote\n' +
+        '   machine or the local environment that do not write durable project content\n' +
+        '   into this workspace. When an external operation does bring durable content\n' +
+        '   into the project, record an intent for that project-content change, not for\n' +
+        '   the external operation itself.\n' +
+        '   In multi-agent work, one open intent belongs to one worktree, or to one\n' +
+        '   configured project root outside Git. Every agent or subagent that changes\n' +
+        '   durable project content in the same root first re-anchors and continues its\n' +
+        '   matching open intent; agents working in separate worktrees hold separate\n' +
+        "   intents. An agent that only receives another agent's changes through Git or\n" +
+        '   into a shared worktree records no receiving intent and lets `verify` expose\n' +
+        '   misalignment; handoff files are exempt while ignored or otherwise kept\n' +
+        '   outside durable project content and require an intent when promoted into it.\n' +
         '   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
         '   and can be verified on its own.',
       '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
@@ -188,7 +193,7 @@ function protocolV13(content) {
       '   Git operations remain subject to normal authorization and safety requirements\n' +
         '   even though they do not require an intent. Any content change made while\n' +
         '   preparing a Git operation still requires an intent when it meets the\n' +
-        '   committed-content rule in step 1.',
+        '   durable-project-content rule in step 1.',
       '   Git operations remain subject to normal authorization and safety requirements\n' +
         '   even though they do not require an intent. Any non-Git content change made while\n' +
         '   preparing a Git operation does require a new intent, per the step 1 test.'
@@ -197,9 +202,9 @@ function protocolV13(content) {
       '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
         '   doing anything else. The open intent is the source of truth: resume it when its\n' +
         '   objective still matches the current task; otherwise close it (`partial` or\n' +
-        '   `abandoned`, with a note) and `begin` a new one. Taking over from another\n' +
-        '   agent mid-intent is the same re-anchor: resume the open intent when its\n' +
-        '   objective still matches.',
+        '   `abandoned`, with a note) and `begin` a new one. Taking over work in the\n' +
+        '   same root from another agent is the same re-anchor: resume the open intent\n' +
+        '   when its objective still matches.',
       '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
         '   doing anything else. The open intent is the source of truth: resume it when its\n' +
         '   objective still matches the current task; otherwise close it (`partial` or\n' +
@@ -2025,12 +2030,13 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /intent write-ahead log/);
   assert.match(first, /driftseal begin/);
   assert.match(first, /--decision <id>/);
-  assert.match(first, /committed and cannot be reconstructed from Git history/);
+  assert.match(first, /before changing durable project content/);
   assert.match(first, /Everything else is\s+exempt: Git operations/);
   assert.match(first, /branch\s+and worktree\s+management/);
   assert.match(first, /merges, rebases, cherry-picks,\s+tags, and pushes/);
   assert.match(first, /normal authorization and safety requirements/);
-  assert.match(first, /never belongs in the intent log/);
+  assert.match(first, /whether or not the project is inside a Git worktree/);
+  assert.match(first, /do not write durable project content\s+into this workspace/);
   assert.match(first, /Agent protocol: decision log/);
   assert.match(first, /driftseal decision add/);
   assert.match(first, /cannot be\s+recovered from the intent log and Git history/);
@@ -2054,14 +2060,15 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /first reconcile every\s+declared decision/);
   assert.match(first, /--allow-tracked-command/);
   assert.match(first, /workspace changed after it/);
-  assert.match(first, /Record intents for changes that alter what the project commits/);
-  assert.match(first, /holds its own open intent/);
-  assert.match(first, /lets `verify` expose misalignment/);
-  assert.match(first, /exempt while gitignored and require an intent once tracked/);
-  assert.match(first, /Taking over from another\s+agent mid-intent/);
+  assert.match(first, /Record intents for changes intended to persist in the project/);
+  assert.match(first, /one open intent belongs to one worktree/);
+  assert.match(first, /agents working in separate worktrees hold separate\s+intents/);
+  assert.match(first, /records no receiving intent and lets `verify` expose\s+misalignment/);
+  assert.match(first, /require an intent when promoted into it/);
+  assert.match(first, /Taking over work in the\s+same root from another agent/);
   assert.match(first, /Size an intent to the smallest unit/);
   assert.match(first, /To revise a decision's prose/);
-  assert.match(first, /committed-content rule in step 1/);
+  assert.match(first, /durable-project-content rule in step 1/);
   assert.match(first, /driftseal-log-language: en/);
   assert.match(first, /\*\*Log language:\*\* `en`/);
   assert.match(first, /Write intent-log prose/);
@@ -2083,6 +2090,13 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const upgradeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-'));
   const upgradeFile = path.join(upgradeCwd, 'AGENTS.md');
+  const versionThirteen = protocolV13(first);
+  const upgradeThirteenCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v13-'));
+  const upgradeThirteenFile = path.join(upgradeThirteenCwd, 'AGENTS.md');
+  fs.writeFileSync(upgradeThirteenFile, versionThirteen);
+  run(['init'], { cwd: upgradeThirteenCwd });
+  assert.equal(fs.readFileSync(upgradeThirteenFile, 'utf8'), first);
+
   const versionTwelve = protocolV12(first);
   const upgradeTwelveCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v12-'));
   const upgradeTwelveFile = path.join(upgradeTwelveCwd, 'AGENTS.md');
@@ -2268,7 +2282,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(upgradedEleven, /driftseal-version: 14/);
   assert.match(upgradedEleven, /driftseal-decisions-version: 14/);
   assert.match(upgradedEleven, /run `driftseal verify`/);
-  assert.match(upgradedEleven, /reconstructed from Git history/);
+  assert.match(upgradedEleven, /whether or not the project is inside a Git worktree/);
   assert.match(upgradedEleven, /Size an intent to the smallest unit/);
   assert.doesNotMatch(upgradedEleven, /<verify output>/);
 
@@ -2314,7 +2328,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
   assert.match(upgradedFour, /driftseal-version: 14/);
   assert.match(upgradedFour, /driftseal-decisions-version: 14/);
-  assert.match(upgradedFour, /Record intents for changes that alter what the project commits/);
+  assert.match(upgradedFour, /Record intents for changes intended to persist in the project/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
   const crlfFile = path.join(crlfCwd, 'AGENTS.md');
@@ -3617,7 +3631,8 @@ test('hook prompt and stop emit advisory reminders once an intent log exists', (
   run(['end']);
 
   const prompt = run(['hook', 'prompt']);
-  assert.match(prompt, /DriftSeal reminder: if this round will change project content that will be committed/);
+  assert.match(prompt, /DriftSeal reminder: if this round will change durable project content in this workspace/);
+  assert.match(prompt, /external state changes that do not write project content here/);
   assert.match(prompt, /need no intent/);
 
   const stopped = run(['hook', 'stop']);

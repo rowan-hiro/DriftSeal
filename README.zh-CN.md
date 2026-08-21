@@ -235,19 +235,23 @@ driftseal end \
 
 如果范围发生变化，先把当前 intent 以 `partial` 或 `abandoned` 关闭，再开启新的 intent。发生 context loss 后，用 `driftseal status` 和 `driftseal log --last 3` 重新锚定当前目标。
 
-需要记录 intent 的是会改变项目提交内容的改动：代码、配置、文档、依赖的编辑——凡是要进
-commit 且无法从 Git 历史重建的内容。其余操作一律免记。Git 操作完全不计入 intent log，
-因为 Git 会自行维护历史；查看状态、管理 branch 或 worktree、stage、commit、merge、
-rebase、cherry-pick、tag 和 push 都不需要单独开启 intent，但仍须遵守正常的授权与安全
-要求。编译、跑测试等单步构建或检查不需要 intent。结果不进 tracked tree 或可随时重建的
-辅助文件或 shell 操作——比如 `rsync` 临时拷贝、临时脚手架——同样不需要；Git worktree
-之外的状态变更（远程机器、本机环境）也永远不属于 intent log。
+需要记录 intent 的是准备作为项目内容长期保留的改动，包括代码、配置、文档、依赖及同类
+项目文件。这个边界不取决于 Git：在 worktree 中，它包括准备提交的内容；在非 Git 项目中，
+它包括要长期保留的项目文件。其余操作一律免记。Git 会自行维护操作历史，因此查看状态、
+管理 branch 或 worktree、stage、commit、merge、rebase、cherry-pick、tag 和 push 都
+不需要单独开启 intent，但仍须遵守正常的授权与安全要求。编译、跑测试等单步构建或检查也
+不需要 intent。结果不会成为持久项目内容的辅助文件或 shell 操作——比如 `rsync` 临时拷贝、
+临时脚手架——同样免记。远程机器或本机环境的状态变更，只要不把持久项目内容写入当前
+workspace，也不属于 intent log；如果外部操作确实把持久内容带进项目，记录的是落入项目的
+内容改动，而不是外部操作本身。
 
-多 agent 协作时，同样的规则按写入者分别适用：每个改动 tracked 内容的 agent（包括
-subagent）都要持有自己的 open intent。只把其他 agent 的变更接收到共享工作区的 agent
-不用记录，交给 `verify` 暴露不一致。中转用的 handoff 文件在被 gitignore 时免记，被
-tracked 时则需要。中途接手另一个 agent 的 intent 属于重新锚定而非边界：目标仍然匹配
-就继续沿用这个 open intent。
+多 agent 协作时，intent 的作用域属于 worktree，而不是写入者。一个 worktree 只能有一个
+open intent；在那里改动持久项目内容的所有 agent 和 subagent 都要先重新锚定，再继续同一个
+匹配的 intent。不同 worktree 各自持有 intent；非 Git 项目的 configured root 同样只持有
+一个。只通过 Git 或共享 worktree 接收其他 agent 变更的一方不另记 receiving intent，交给
+`verify` 暴露不一致。handoff 文件在被 ignore 或以其他方式排除在持久项目内容之外时免记，
+一旦转为正式项目内容就需要 intent。在同一个 root 中途接手工作属于重新锚定而非边界：目标
+仍然匹配就继续沿用 open intent。
 
 ## 命令速览
 

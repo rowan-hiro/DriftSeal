@@ -22,26 +22,31 @@ MCP and lifecycle hooks are optional adapters.
 verify-result, and reclaim/unreclaim reason) in that language. Keep command
 names, flags, status tokens, and ids in English.
 
-1. **Write intent first**, before any change to project content that will be
-   committed and cannot be reconstructed from Git history:
+1. **Write intent first**, before changing durable project content:
    `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.
    Repeat `--accept` when completion has multiple independently observable criteria.
    Add one `--decision <id>` for each existing decision this round may change.
-   Record intents for changes that alter what the project commits: edits to
-   code, configuration, documentation, and dependencies. Everything else is
+   Record intents for changes intended to persist in the project: edits to code,
+   configuration, documentation, dependencies, and equivalent project files,
+   whether or not the project is inside a Git worktree. Everything else is
    exempt: Git operations (Git maintains their history — inspection, branch
    and worktree management, staging, commits, merges, rebases, cherry-picks,
    tags, and pushes); single-step commands that only build or check work
    already done, such as compiling or running tests; auxiliary file or shell
-   operations whose results stay out of the tracked tree or can be regenerated
-   at will (for example an rsync scratch copy or temp scaffolding); and any
-   state change outside a Git worktree (a remote machine, the local
-   environment), which never belongs in the intent log.
-   In multi-agent work the same rule applies per writer: every agent that
-   changes tracked content, subagents included, holds its own open intent; an
-   agent that only receives another agent's changes into a shared workspace
-   records nothing and lets `verify` expose misalignment; handoff files are
-   exempt while gitignored and require an intent once tracked.
+   operations whose results remain outside durable project content (for example
+   an rsync scratch copy or temp scaffolding); and state changes to a remote
+   machine or the local environment that do not write durable project content
+   into this workspace. When an external operation does bring durable content
+   into the project, record an intent for that project-content change, not for
+   the external operation itself.
+   In multi-agent work, one open intent belongs to one worktree, or to one
+   configured project root outside Git. Every agent or subagent that changes
+   durable project content in the same root first re-anchors and continues its
+   matching open intent; agents working in separate worktrees hold separate
+   intents. An agent that only receives another agent's changes through Git or
+   into a shared worktree records no receiving intent and lets `verify` expose
+   misalignment; handoff files are exempt while ignored or otherwise kept
+   outside durable project content and require an intent when promoted into it.
    Size an intent to the smallest unit that leaves the tree self-consistent
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
@@ -70,13 +75,13 @@ names, flags, status tokens, and ids in English.
    Git operations remain subject to normal authorization and safety requirements
    even though they do not require an intent. Any content change made while
    preparing a Git operation still requires an intent when it meets the
-   committed-content rule in step 1.
+   durable-project-content rule in step 1.
 4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before
    doing anything else. The open intent is the source of truth: resume it when its
    objective still matches the current task; otherwise close it (`partial` or
-   `abandoned`, with a note) and `begin` a new one. Taking over from another
-   agent mid-intent is the same re-anchor: resume the open intent when its
-   objective still matches.
+   `abandoned`, with a note) and `begin` a new one. Taking over work in the
+   same root from another agent is the same re-anchor: resume the open intent
+   when its objective still matches.
 
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 `.intent-log/events.jsonl` (or anything under `$DRIFTSEAL_HOME`) directly; use
