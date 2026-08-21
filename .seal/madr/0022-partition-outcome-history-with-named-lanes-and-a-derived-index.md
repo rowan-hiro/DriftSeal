@@ -4,7 +4,7 @@ Date: 2026-08-21
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
@@ -30,3 +30,12 @@ Keep a single WAL. Tag each outcome with one named lane (default main). Store th
 
 * Older clients fail-closed on lane_add, lane_assign, or begin events that name a non-default lane
 * Cross-cutting work stays on main or a dedicated integration lane; an outcome cannot belong to two lanes
+
+## Decision History
+
+<!-- driftseal-reconciliation: 820d8f3f-1a0e-4745-b1dd-c0e47d09cc00 -->
+### 2026-08-21T14:32:27.702Z — Outcome `2026-08-21-012`
+
+Status: Proposed → Accepted
+
+Named lanes, a derived local index, protocol 2.1, and package 2.1.0 are implemented.
