@@ -7,7 +7,7 @@ and decision records in `.decision-log/` (override with
 `$DRIFTSEAL_DECISION_HOME`); both are meant to be committed.
 
 <!-- driftseal -->
-<!-- driftseal-version: 13 -->
+<!-- driftseal-version: 14 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: intent write-ahead log
@@ -22,20 +22,31 @@ MCP and lifecycle hooks are optional adapters.
 verify-result, and reclaim/unreclaim reason) in that language. Keep command
 names, flags, status tokens, and ids in English.
 
-1. **Write intent first**, before modifying, creating, or deleting files, or
-   making any other non-Git change that may need a rollback:
+1. **Write intent first**, before changing durable project content:
    `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.
    Repeat `--accept` when completion has multiple independently observable criteria.
    Add one `--decision <id>` for each existing decision this round may change.
-   Git operations never need an intent and are not included in the intent log;
-   Git maintains their history. This includes inspection, branch and worktree
-   management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.
-   A command whose result can be reconstructed from Git state (for example a
-   patch file regenerated from a commit range, or a scratch harness that
-   re-runs) needs no intent; content that will be committed and cannot be
-   reconstructed (for example a .gitignore edit) does.
-   Single-step commands that only build or check work already done, such as
-   compiling or running tests, also need no intent.
+   Record intents for changes intended to persist in the project: edits to code,
+   configuration, documentation, dependencies, and equivalent project files,
+   whether or not the project is inside a Git worktree. Everything else is
+   exempt: Git operations (Git maintains their history — inspection, branch
+   and worktree management, staging, commits, merges, rebases, cherry-picks,
+   tags, and pushes); single-step commands that only build or check work
+   already done, such as compiling or running tests; auxiliary file or shell
+   operations whose results remain outside durable project content (for example
+   an rsync scratch copy or temp scaffolding); and state changes to a remote
+   machine or the local environment that do not write durable project content
+   into this workspace. When an external operation does bring durable content
+   into the project, record an intent for that project-content change, not for
+   the external operation itself.
+   In multi-agent work, one open intent belongs to one worktree, or to one
+   configured project root outside Git. Every agent or subagent that changes
+   durable project content in the same root first re-anchors and continues its
+   matching open intent; agents working in separate worktrees hold separate
+   intents. An agent that only receives another agent's changes through Git or
+   into a shared worktree records no receiving intent and lets `verify` expose
+   misalignment; handoff files are exempt while ignored or otherwise kept
+   outside durable project content and require an intent when promoted into it.
    Size an intent to the smallest unit that leaves the tree self-consistent
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
@@ -62,12 +73,15 @@ names, flags, status tokens, and ids in English.
    by the next linked `decision update` or successful `end`. Closing as
    `failed` or `abandoned` cancels pending recovery for that intent.
    Git operations remain subject to normal authorization and safety requirements
-   even though they do not require an intent. Any non-Git content change made while
-   preparing a Git operation does require a new intent, per the step 1 test.
+   even though they do not require an intent. Any content change made while
+   preparing a Git operation still requires an intent when it meets the
+   durable-project-content rule in step 1.
 4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before
    doing anything else. The open intent is the source of truth: resume it when its
    objective still matches the current task; otherwise close it (`partial` or
-   `abandoned`, with a note) and `begin` a new one.
+   `abandoned`, with a note) and `begin` a new one. Taking over work in the
+   same root from another agent is the same re-anchor: resume the open intent
+   when its objective still matches.
 
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 `.intent-log/events.jsonl` (or anything under `$DRIFTSEAL_HOME`) directly; use
@@ -82,7 +96,7 @@ Log: `.intent-log/events.jsonl` (override with `$DRIFTSEAL_HOME`); commit it wit
 <!-- /driftseal -->
 
 <!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 13 -->
+<!-- driftseal-decisions-version: 14 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: decision log

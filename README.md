@@ -251,15 +251,32 @@ driftseal end \
 
 If the scope changes, close the current intent as `partial` or `abandoned`, then start a new one. After context loss, use `driftseal status` and `driftseal log --last 3` to re-anchor.
 
-Git operations are entirely outside the intent log because Git maintains their
-history. Inspection, branch and worktree management, staging, commits, merges,
-rebases, cherry-picks, tags, and pushes never need an intent of their own. They
-still require normal authorization and safety checks. A command whose result
-can be reconstructed from Git state, such as a patch file regenerated from a
-commit range or a scratch harness that re-runs, needs no intent either; content
-that will be committed and cannot be reconstructed, such as a `.gitignore`
-edit, does. Single-step builds and checks, such as compiling or running tests,
-also need no intent. Any other non-Git content change starts a new work round.
+Record an intent for changes intended to persist in the project: edits to code,
+configuration, documentation, dependencies, and equivalent project files. The
+boundary does not depend on Git: inside a worktree it includes content intended
+for commit, while outside Git it includes durable project files. Everything else
+is exempt. Git operations are entirely outside the intent log because Git
+maintains their history; inspection, branch and worktree management, staging,
+commits, merges, rebases, cherry-picks, tags, and pushes never need an intent of
+their own, though they still require normal authorization and safety checks.
+Single-step builds and checks, such as compiling or running tests, need no
+intent. Auxiliary file or shell operations whose results remain outside durable
+project content — an `rsync` scratch copy, temp scaffolding — need none either.
+State changes to a remote machine or the local environment are also exempt when
+they do not write durable project content into this workspace. When an external
+operation does bring durable content into the project, record the intent for
+that project-content change, not for the external operation itself.
+
+In multi-agent work the scope belongs to the worktree, not the writer. One
+worktree holds one open intent; every agent or subagent changing durable project
+content there re-anchors and continues that matching intent. Agents in separate
+worktrees hold separate intents. A configured project root outside Git follows
+the same single-intent rule. An agent that only receives another agent's changes
+through Git or into a shared worktree records no receiving intent and lets
+`verify` expose misalignment. Handoff files are exempt while ignored or
+otherwise kept outside durable project content and require an intent when
+promoted into it. Taking over work in the same root is a re-anchor, not a
+boundary: resume the open intent when its objective still matches the task.
 
 ## Commands
 
