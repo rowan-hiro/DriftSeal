@@ -29,3 +29,12 @@ Use .seal as the unified root, with outcome events in .seal/outcomes/events.json
 
 * v1 paths are migration inputs rather than runtime aliases.
 * All public CLI, API, MCP, hook, merge, and documentation surfaces use outcome terminology.
+
+## Decision History
+
+<!-- driftseal-reconciliation: fe532de2-c499-45d7-a819-7f42fb41b9aa -->
+### 2026-08-21T05:35:24.546Z — Outcome `2026-08-21-003`
+
+Status: Accepted → Accepted
+
+Confirmed the unified v2 seal root while adding explicit migration source and destination paths for legacy custom storage.

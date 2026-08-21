@@ -29,3 +29,12 @@ Provide inspect, apply, and check phases. A model proposes an ordered complete g
 
 * Removal of .intent-log and .decision-log remains a manual action after explicit user approval.
 * Source fingerprints and plan digests make repeated apply operations safe and detect stale plans.
+
+## Decision History
+
+<!-- driftseal-reconciliation: dba5e8cd-dd4d-401d-b777-90a64aa431d8 -->
+### 2026-08-21T05:35:24.662Z — Outcome `2026-08-21-003`
+
+Status: Accepted → Accepted
+
+Hardened reviewed migration with fail-closed v1 detection, durable MADR manifests, and valid empty visible partitions.

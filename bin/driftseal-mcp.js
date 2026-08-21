@@ -493,20 +493,25 @@ function registerTools(server, api, z) {
       outcome: nonEmpty,
       summary: nonEmpty,
       sourceIds: z.array(z.string()).min(1),
-    })).min(1),
+    })),
     excluded: z.array(z.object({ sourceId: z.string(), reason: nonEmpty })).default([]),
   });
+  const migrationLocations = {
+    sourceLog: nonEmpty.optional().describe('Path to the v1 events.jsonl source.'),
+    sourceDecisions: nonEmpty.optional().describe('Path to the v1 MADR directory.'),
+    destination: nonEmpty.optional().describe('Path to the v2 seal root to create or check.'),
+  };
   server.registerTool(
     'driftseal_migration_inspect',
     {
       title: 'Inspect a DriftSeal v1 repository for v2 migration',
-      description: 'Read and normalize the fixed repository v1 logs for model-assisted grouping. Makes no changes.',
-      inputSchema: {},
+      description: 'Read and normalize v1 logs for model-assisted grouping. Custom v1 storage and a distinct v2 destination may be supplied. Makes no changes.',
+      inputSchema: migrationLocations,
       outputSchema: { root: z.string(), inspection: z.unknown() },
       annotations: readOnly,
     },
-    async () => guarded(() => {
-      const inspection = api.migrationInspect();
+    async (locations) => guarded(() => {
+      const inspection = api.migrationInspect(locations);
       return success({ root: api.root, inspection }, `Found ${inspection.records.length} closed v1 intent records.`);
     })
   );
@@ -515,12 +520,12 @@ function registerTools(server, api, z) {
     {
       title: 'Stage a validated DriftSeal v1-to-v2 migration',
       description: 'Validate a model-generated ordered grouping plan, create .seal side-by-side, copy MADRs byte-for-byte, and never delete v1 data.',
-      inputSchema: { plan: migrationPlan },
+      inputSchema: { plan: migrationPlan, ...migrationLocations },
       outputSchema: { root: z.string(), result: z.unknown() },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ plan }) => guarded(() => {
-      const result = api.migrationApply({ plan });
+    async ({ plan, ...locations }) => guarded(() => {
+      const result = api.migrationApply({ plan, ...locations });
       return success({ root: api.root, result }, 'Staged DriftSeal v2 without deleting v1 data.');
     })
   );
@@ -528,13 +533,13 @@ function registerTools(server, api, z) {
     'driftseal_migration_check',
     {
       title: 'Check a staged DriftSeal v1-to-v2 migration',
-      description: 'Validate the staged outcome log and byte-identical MADRs, then report whether v1 still awaits manual removal.',
-      inputSchema: {},
+      description: 'Validate the staged outcome log and manifest-backed MADRs, then report whether v1 still awaits manual removal.',
+      inputSchema: migrationLocations,
       outputSchema: { root: z.string(), result: z.unknown() },
       annotations: readOnly,
     },
-    async () => guarded(() => {
-      const result = api.migrationCheck();
+    async (locations) => guarded(() => {
+      const result = api.migrationCheck(locations);
       return success({ root: api.root, result }, result.complete ? 'Migration complete.' : 'Migration valid; v1 remains for user review.');
     })
   );

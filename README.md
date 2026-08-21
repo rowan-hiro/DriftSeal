@@ -21,11 +21,13 @@ decisions were made.
 DriftSeal v2 is an outcome log rather than an intent-per-step log.
 
 - State lives under one seal root: `.seal/outcomes/events.jsonl` and `.seal/madr/`.
-- `DRIFTSEAL_HOME` overrides the whole `.seal` root. The v1
-  `DRIFTSEAL_DECISION_HOME` setting is used only when locating migration input.
+- `DRIFTSEAL_HOME` overrides the whole v2 `.seal` root. A value inherited from
+  v1 still points at an intent-log directory; pass that legacy location to the
+  migration command explicitly, then unset or replace the variable.
 - `driftseal extend` appends another step, acceptance criterion, verifier, or
   decision link to the currently open outcome.
-- Every extension changes the contract hash and invalidates earlier verification.
+- Every extension changes the contract hash and invalidates earlier verification
+  and MADR reconciliation.
 - Stored events use `logVersion: 2` and `schemaVersion: 1`.
 - The generated `AGENTS.md` protocol series is `2.0`; compatible protocol
   refinements use `2.1`, `2.2`, and so on.
@@ -156,9 +158,9 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 | `driftseal unreclaim <id> --reason "..."` | Restore a reclaimed record. |
 | `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | Merge another lineage and remap colliding outcome or MADR ids. |
 | `driftseal decision add\|update\|list\|show` | Manage MADR records. |
-| `driftseal migrate v1-to-v2 inspect --json` | Normalize v1 state for model-assisted grouping. |
-| `driftseal migrate v1-to-v2 apply --plan <file>` | Validate a grouping plan and stage `.seal/` beside v1. |
-| `driftseal migrate v1-to-v2 check` | Validate the staged result and report the review/deletion gate. |
+| `driftseal migrate v1-to-v2 inspect --json [migration paths]` | Normalize v1 state for model-assisted grouping. |
+| `driftseal migrate v1-to-v2 apply --plan <file> [migration paths]` | Validate a grouping plan and stage the v2 seal beside v1. |
+| `driftseal migrate v1-to-v2 check [migration paths]` | Validate the staged result and report the review/deletion gate. |
 | `driftseal init [--lang tag] [--local-log]` | Install or upgrade the repository protocol. |
 
 Run `driftseal help` for the complete syntax, including skill, MCP, and hook
@@ -168,6 +170,9 @@ installation targets.
 
 Migration is deliberately model-assisted because grouping step-sized intents
 into delivered outcomes is semantic work.
+
+When an unmigrated default v1 log is present, normal v2 repository commands
+fail closed instead of silently starting an unrelated `.seal` lineage.
 
 1. Close every v1 intent. A parked v1 intent blocks migration.
 2. Inspect the normalized source:
@@ -179,7 +184,8 @@ into delivered outcomes is semantic work.
 3. Have the model propose a `driftseal-v1-to-v2-plan` JSON document. Its groups
    must form an ordered, complete partition of all visible v1 records. Only
    records already reclaimed in v1 may be excluded, and every exclusion needs a
-   reason.
+   reason. `groups` may be empty when no visible records remain; MADRs are still
+   migrated.
 4. Review the proposed outcomes, then apply the approved plan:
 
    ```sh
@@ -188,10 +194,31 @@ into delivered outcomes is semantic work.
    ```
 
 `apply` fingerprints the source, validates the partition, validates the staged
-v2 log, and copies every v1 MADR byte-for-byte. It creates `.seal/` beside
-`.intent-log/` and `.decision-log/`; it never deletes v1 data. After the user has
-reviewed and approved the result, remove the old tracked paths manually. Running
-`check` afterward reports migration complete.
+v2 log, copies every v1 MADR byte-for-byte, and records a name, size, and hash
+manifest so `check` can still verify them after v1 is removed. Later MADR content
+is accepted only when a v2 reconciliation event attests its current hash. `apply`
+creates `.seal/` beside `.intent-log/` and `.decision-log/`; it never deletes v1
+data. After the user has reviewed and approved the result, remove the old tracked
+paths manually. Running `check` afterward reports migration complete.
+
+If v1 used custom storage, keep the source and destination explicit for every
+phase. In particular, an inherited v1 `DRIFTSEAL_HOME` must not also be used as
+the v2 destination:
+
+```sh
+driftseal migrate v1-to-v2 inspect --json \
+  --source-log /path/to/v1-intents/events.jsonl \
+  --source-decisions /path/to/v1-decisions \
+  --destination /path/to/repository/.seal
+driftseal migrate v1-to-v2 apply --plan /tmp/driftseal-plan.json \
+  --source-log /path/to/v1-intents/events.jsonl \
+  --source-decisions /path/to/v1-decisions \
+  --destination /path/to/repository/.seal
+```
+
+After applying, unset the v1 `DRIFTSEAL_HOME` or point it at the new seal root.
+The Node API and MCP migration tools expose the same `sourceLog`,
+`sourceDecisions`, and `destination` fields.
 
 ## Git and merge behavior
 

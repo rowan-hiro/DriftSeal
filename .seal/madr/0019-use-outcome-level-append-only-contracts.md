@@ -29,3 +29,19 @@ Treat one coherent deliverable as an outcome opened by begin and append same-out
 
 * Every extension invalidates earlier machine verification.
 * The CLI retains begin, verify, end, status, and log while adding extend and using outcome terminology.
+
+## Decision History
+
+<!-- driftseal-reconciliation: 5f8f6a3b-4ae3-40ae-bd5f-0b5a5cba1ce3 -->
+### 2026-08-21T05:35:24.428Z — Outcome `2026-08-21-003`
+
+Status: Accepted → Accepted
+
+Confirmed that every outcome extension invalidates both machine verification and prior MADR reconciliation.
+
+<!-- driftseal-reconciliation: fdbe8a2d-dc79-49d7-b263-c4a9564ee41e -->
+### 2026-08-21T05:36:49.814Z — Outcome `2026-08-21-004`
+
+Status: Accepted → Accepted
+
+Closed the crash-recovery edge so a reconciliation prepared before an extension cannot become fresh merely by committing afterward.

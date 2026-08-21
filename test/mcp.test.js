@@ -450,3 +450,45 @@ test('MCP status accepts a verification record with a null exit code', async () 
     await client.close();
   }
 });
+
+test('MCP migration supports custom v1 storage and destination paths', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-custom-v1-storage-'));
+  const legacy = path.join(root, 'legacy');
+  const sourceLog = path.join(legacy, 'intents', 'events.jsonl');
+  const sourceDecisions = path.join(legacy, 'decisions');
+  const destination = path.join(root, 'custom-v2-seal');
+  fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
+  fs.mkdirSync(sourceDecisions, { recursive: true });
+  fs.writeFileSync(sourceLog, [
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: 'begin', intent: 'migrate through MCP' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: 'end', status: 'completed' },
+  ].map(JSON.stringify).join('\n') + '\n');
+  fs.writeFileSync(path.join(sourceDecisions, '0001-mcp-migration.md'), 'MCP migration bytes\n');
+
+  const client = await connect(root);
+  const locations = { sourceLog, sourceDecisions, destination };
+  try {
+    const inspected = await call(client, 'driftseal_migration_inspect', locations);
+    assert.equal(inspected.isError, undefined);
+    assert.equal(inspected.structuredContent.inspection.destination, destination);
+    const plan = {
+      format: 'driftseal-v1-to-v2-plan',
+      sourceFingerprint: inspected.structuredContent.inspection.sourceFingerprint,
+      groups: [{
+        outcome: 'Migrate custom v1 storage through MCP',
+        summary: 'MCP forwarded explicit legacy and v2 paths.',
+        sourceIds: ['2026-01-01-001'],
+      }],
+      excluded: [],
+    };
+    const applied = await call(client, 'driftseal_migration_apply', { plan, ...locations });
+    assert.equal(applied.isError, undefined);
+    assert.equal(applied.structuredContent.result.destination, destination);
+    const checked = await call(client, 'driftseal_migration_check', locations);
+    assert.equal(checked.isError, undefined);
+    assert.equal(checked.structuredContent.result.valid, true);
+    assert.equal(fs.existsSync(path.join(destination, 'madr', '0001-mcp-migration.md')), true);
+  } finally {
+    await client.close();
+  }
+});

@@ -32,8 +32,8 @@ names, flags, status tokens, and ids in English.
    delivery goal, append `driftseal extend "<addition>"`. It may add
    `--accept`, `--decision`, and a replacement `--verify`; adding acceptance
    requires a replacement verifier that proves the complete accumulated contract.
-   Every extension invalidates earlier verification. If the delivery goal changes,
-   close the current outcome honestly and begin a new one.
+   Every extension invalidates earlier verification and MADR reconciliation. If
+   the delivery goal changes, close the current outcome honestly and begin a new one.
    One open outcome belongs to one worktree, or one configured non-Git project
    root. Every agent changing durable content in the same root re-anchors and
    continues it; separate worktrees hold separate outcomes.

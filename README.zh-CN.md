@@ -19,10 +19,10 @@ DriftSeal 是一套跟随 repo 保存的协议与工具，用来让 coding agent
 DriftSeal v2 从“按步骤记录 intent”改为“按交付记录 outcome”。
 
 - 所有状态归到同一个 seal root：`.seal/outcomes/events.jsonl` 与 `.seal/madr/`。
-- `DRIFTSEAL_HOME` 覆盖整个 `.seal` root。v1 的
-  `DRIFTSEAL_DECISION_HOME` 只在定位 migration 输入时使用。
+- `DRIFTSEAL_HOME` 覆盖整个 v2 `.seal` root。从 v1 继承的值仍指向 intent-log
+  目录；migration 时需要显式传入旧位置，之后再 unset 或替换这个变量。
 - `driftseal extend` 可以向当前 outcome 追加步骤、acceptance、verifier 或 decision link。
-- 每次 extend 都会改变 contract hash，并让之前的 verification 失效。
+- 每次 extend 都会改变 contract hash，并让之前的 verification 与 MADR reconciliation 失效。
 - event 使用 `logVersion: 2`、`schemaVersion: 1`。
 - `AGENTS.md` 的新协议版本从 `2.0` 开始，兼容改进依次使用 `2.1`、`2.2`。
 - CLI、Node API、MCP tool 与 resource 全部使用 outcome 命名；v1 名称和路径不会作为
@@ -145,9 +145,9 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 | `driftseal unreclaim <id> --reason "..."` | 恢复 reclaimed record。 |
 | `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | 合并另一条 lineage 并处理撞号。 |
 | `driftseal decision add\|update\|list\|show` | 管理 MADR。 |
-| `driftseal migrate v1-to-v2 inspect --json` | 规范化 v1 状态，供模型分组。 |
-| `driftseal migrate v1-to-v2 apply --plan <file>` | 校验分组计划，并把 `.seal/` 放在 v1 数据旁边。 |
-| `driftseal migrate v1-to-v2 check` | 校验 migration 结果并报告 review/deletion gate。 |
+| `driftseal migrate v1-to-v2 inspect --json [migration paths]` | 规范化 v1 状态，供模型分组。 |
+| `driftseal migrate v1-to-v2 apply --plan <file> [migration paths]` | 校验分组计划，并在 v1 旁边创建 v2 seal。 |
+| `driftseal migrate v1-to-v2 check [migration paths]` | 校验 migration 结果并报告 review/deletion gate。 |
 | `driftseal init [--lang tag] [--local-log]` | 安装或升级 repo 协议。 |
 
 完整语法以及 skill、MCP、hook 的安装 target 请查看 `driftseal help`。
@@ -156,6 +156,9 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 
 把按步骤记录的 intent 合并为真正交付的 outcome 需要语义判断，因此 migration 特意
 采用 model-assisted 流程。
+
+如果发现尚未 migration 的默认 v1 log，普通 v2 repo 命令会 fail closed，避免悄悄
+创建一条与 v1 历史无关的 `.seal` lineage。
 
 1. 先关闭所有 v1 intent；只要还有 parked v1 intent，migration 就会拒绝继续。
 2. 读取规范化后的源数据：
@@ -166,6 +169,7 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 
 3. 让模型生成 `driftseal-v1-to-v2-plan` JSON。所有可见 v1 record 必须按原顺序组成
    完整 partition。只有已经在 v1 中 reclaimed 的记录可以排除，而且每项都要给出理由。
+   如果没有剩余的可见记录，`groups` 可以为空；MADR 仍会照常 migration。
 4. 用户审阅 outcome 分组后，应用认可的 plan：
 
    ```sh
@@ -173,10 +177,29 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
    driftseal migrate v1-to-v2 check
    ```
 
-`apply` 会为 source 计算 fingerprint，校验 partition 与 staged v2 log，并逐字节复制
-所有 v1 MADR。它只会在 `.intent-log/`、`.decision-log/` 旁边新建 `.seal/`，绝不删除
-v1 数据。用户审阅并明确认可后，再手动移除旧 tracked paths；随后执行 `check` 会报告
-migration 已完成。
+`apply` 会为 source 计算 fingerprint，校验 partition 与 staged v2 log，逐字节复制
+所有 v1 MADR，并记录文件名、大小与 hash manifest，使 v1 删除后 `check` 仍能验证
+完整性。后续 MADR 内容只有在 v2 reconciliation event 已记录其当前 hash 时才会被接受。
+`apply` 只会在 `.intent-log/`、`.decision-log/` 旁边新建 `.seal/`，绝不删除 v1 数据。
+用户审阅并明确认可后，再手动移除旧 tracked paths；随后执行 `check` 会报告 migration
+已完成。
+
+如果 v1 使用自定义存储，每个阶段都要明确给出 source 与 destination。尤其不能把从
+v1 继承的 `DRIFTSEAL_HOME` 同时当成 v2 destination：
+
+```sh
+driftseal migrate v1-to-v2 inspect --json \
+  --source-log /path/to/v1-intents/events.jsonl \
+  --source-decisions /path/to/v1-decisions \
+  --destination /path/to/repository/.seal
+driftseal migrate v1-to-v2 apply --plan /tmp/driftseal-plan.json \
+  --source-log /path/to/v1-intents/events.jsonl \
+  --source-decisions /path/to/v1-decisions \
+  --destination /path/to/repository/.seal
+```
+
+apply 后应 unset v1 的 `DRIFTSEAL_HOME`，或让它指向新的 seal root。Node API 与 MCP
+migration tools 也提供相同的 `sourceLog`、`sourceDecisions`、`destination` 字段。
 
 ## Git 与 merge
 
