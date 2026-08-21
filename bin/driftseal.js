@@ -41,7 +41,7 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const EVENT_SCHEMA_VERSION = 4;
-const PROTOCOL_VERSION = 13;
+const PROTOCOL_VERSION = 14;
 const DEFAULT_LOG_LANGUAGE = 'en';
 const IN_PROGRESS_GIT_PATH = 'driftseal-in-progress.jsonl';
 const LOCK_STALE_MS = 30 * 60 * 1000;
@@ -1874,20 +1874,26 @@ MCP and lifecycle hooks are optional adapters.
 
 ${intentLogLanguageParagraph(language)}
 
-1. **Write intent first**, before modifying, creating, or deleting files, or
-   making any other non-Git change that may need a rollback:
+1. **Write intent first**, before any change to project content that will be
+   committed and cannot be reconstructed from Git history:
    \`driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"\`.
    Repeat \`--accept\` when completion has multiple independently observable criteria.
    Add one \`--decision <id>\` for each existing decision this round may change.
-   Git operations never need an intent and are not included in the intent log;
-   Git maintains their history. This includes inspection, branch and worktree
-   management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.
-   A command whose result can be reconstructed from Git state (for example a
-   patch file regenerated from a commit range, or a scratch harness that
-   re-runs) needs no intent; content that will be committed and cannot be
-   reconstructed (for example a .gitignore edit) does.
-   Single-step commands that only build or check work already done, such as
-   compiling or running tests, also need no intent.
+   Record intents for changes that alter what the project commits: edits to
+   code, configuration, documentation, and dependencies. Everything else is
+   exempt: Git operations (Git maintains their history — inspection, branch
+   and worktree management, staging, commits, merges, rebases, cherry-picks,
+   tags, and pushes); single-step commands that only build or check work
+   already done, such as compiling or running tests; auxiliary file or shell
+   operations whose results stay out of the tracked tree or can be regenerated
+   at will (for example an rsync scratch copy or temp scaffolding); and any
+   state change outside a Git worktree (a remote machine, the local
+   environment), which never belongs in the intent log.
+   In multi-agent work the same rule applies per writer: every agent that
+   changes tracked content, subagents included, holds its own open intent; an
+   agent that only receives another agent's changes into a shared workspace
+   records nothing and lets \`verify\` expose misalignment; handoff files are
+   exempt while gitignored and require an intent once tracked.
    Size an intent to the smallest unit that leaves the tree self-consistent
    and can be verified on its own.
 2. **Execute only the intent.** Scope change? Close the current intent
@@ -1914,12 +1920,15 @@ ${intentLogLanguageParagraph(language)}
    by the next linked \`decision update\` or successful \`end\`. Closing as
    \`failed\` or \`abandoned\` cancels pending recovery for that intent.
    Git operations remain subject to normal authorization and safety requirements
-   even though they do not require an intent. Any non-Git content change made while
-   preparing a Git operation does require a new intent, per the step 1 test.
+   even though they do not require an intent. Any content change made while
+   preparing a Git operation still requires an intent when it meets the
+   committed-content rule in step 1.
 4. **Re-anchor after context loss**: run \`driftseal status\` and \`driftseal log --last 3\` before
    doing anything else. The open intent is the source of truth: resume it when its
    objective still matches the current task; otherwise close it (\`partial\` or
-   \`abandoned\`, with a note) and \`begin\` a new one.
+   \`abandoned\`, with a note) and \`begin\` a new one. Taking over from another
+   agent mid-intent is the same re-anchor: resume the open intent when its
+   objective still matches.
 
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 \`.intent-log/events.jsonl\` (or anything under \`$DRIFTSEAL_HOME\`) directly; use
@@ -1935,7 +1944,70 @@ ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  const v12 = intentProtocolBlock(version, language, localLog)
+  const v13 = intentProtocolBlock(version, language, localLog)
+    .replace(
+      '1. **Write intent first**, before any change to project content that will be\n' +
+        '   committed and cannot be reconstructed from Git history:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
+        '   Repeat `--accept` when completion has multiple independently observable criteria.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Record intents for changes that alter what the project commits: edits to\n' +
+        '   code, configuration, documentation, and dependencies. Everything else is\n' +
+        '   exempt: Git operations (Git maintains their history — inspection, branch\n' +
+        '   and worktree management, staging, commits, merges, rebases, cherry-picks,\n' +
+        '   tags, and pushes); single-step commands that only build or check work\n' +
+        '   already done, such as compiling or running tests; auxiliary file or shell\n' +
+        '   operations whose results stay out of the tracked tree or can be regenerated\n' +
+        '   at will (for example an rsync scratch copy or temp scaffolding); and any\n' +
+        '   state change outside a Git worktree (a remote machine, the local\n' +
+        '   environment), which never belongs in the intent log.\n' +
+        '   In multi-agent work the same rule applies per writer: every agent that\n' +
+        '   changes tracked content, subagents included, holds its own open intent; an\n' +
+        "   agent that only receives another agent's changes into a shared workspace\n" +
+        '   records nothing and lets `verify` expose misalignment; handoff files are\n' +
+        '   exempt while gitignored and require an intent once tracked.\n' +
+        '   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
+        '   and can be verified on its own.',
+      '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+        '   making any other non-Git change that may need a rollback:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
+        '   Repeat `--accept` when completion has multiple independently observable criteria.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Git operations never need an intent and are not included in the intent log;\n' +
+        '   Git maintains their history. This includes inspection, branch and worktree\n' +
+        '   management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.\n' +
+        '   A command whose result can be reconstructed from Git state (for example a\n' +
+        '   patch file regenerated from a commit range, or a scratch harness that\n' +
+        '   re-runs) needs no intent; content that will be committed and cannot be\n' +
+        '   reconstructed (for example a .gitignore edit) does.\n' +
+        '   Single-step commands that only build or check work already done, such as\n' +
+        '   compiling or running tests, also need no intent.\n' +
+        '   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
+        '   and can be verified on its own.'
+    )
+    .replace(
+      '   Git operations remain subject to normal authorization and safety requirements\n' +
+        '   even though they do not require an intent. Any content change made while\n' +
+        '   preparing a Git operation still requires an intent when it meets the\n' +
+        '   committed-content rule in step 1.',
+      '   Git operations remain subject to normal authorization and safety requirements\n' +
+        '   even though they do not require an intent. Any non-Git content change made while\n' +
+        '   preparing a Git operation does require a new intent, per the step 1 test.'
+    )
+    .replace(
+      '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
+        '   doing anything else. The open intent is the source of truth: resume it when its\n' +
+        '   objective still matches the current task; otherwise close it (`partial` or\n' +
+        '   `abandoned`, with a note) and `begin` a new one. Taking over from another\n' +
+        '   agent mid-intent is the same re-anchor: resume the open intent when its\n' +
+        '   objective still matches.',
+      '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
+        '   doing anything else. The open intent is the source of truth: resume it when its\n' +
+        '   objective still matches the current task; otherwise close it (`partial` or\n' +
+        '   `abandoned`, with a note) and `begin` a new one.'
+    );
+  if (version >= 13) return v13;
+  const v12 = v13
     .replace(
       '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
         '   Repeat `--accept` when completion has multiple independently observable criteria.',
@@ -2900,11 +2972,12 @@ function hookReminder(event, { readOnly = false } = {}) {
   if (!file) return null;
   if (event === 'prompt') {
     return (
-      'DriftSeal reminder: if this round will modify files or anything else that may need a ' +
-      'rollback, begin an intent first: driftseal begin "<intent>" --accept "<observable outcome>" ' +
+      'DriftSeal reminder: if this round will change project content that will be committed and ' +
+      'cannot be reconstructed from Git history (code, configuration, documentation, dependencies), ' +
+      'begin an intent first: driftseal begin "<intent>" --accept "<observable outcome>" ' +
       '--verify "<command>". ' +
-      'Questions, read-only exploration, and single-step checks need no intent — skip this ' +
-      'reminder when it does not apply.'
+      'Questions, read-only exploration, single-step checks, and work outside the tracked tree ' +
+      'need no intent — skip this reminder when it does not apply.'
     );
   }
   const open = openIntent(fold(readEvents({ file, readOnly })));
@@ -4607,6 +4680,8 @@ const commands = {
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(previousIntentProtocolBlock(13, source), eol),
+          protocolEol(previousIntentProtocolBlock(13, source, true), eol),
           protocolEol(previousIntentProtocolBlock(12, source), eol),
           protocolEol(previousIntentProtocolBlock(12, source, true), eol),
           protocolEol(previousIntentProtocolBlock(11, source), eol),
@@ -4634,6 +4709,8 @@ const commands = {
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(previousDecisionProtocolBlock(13, source), eol),
+          protocolEol(previousDecisionProtocolBlock(13, source, true), eol),
           protocolEol(previousDecisionProtocolBlock(12, source), eol),
           protocolEol(previousDecisionProtocolBlock(12, source, true), eol),
           protocolEol(previousDecisionProtocolBlock(11, source), eol),

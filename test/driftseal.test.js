@@ -140,8 +140,75 @@ function readJsonl(file) {
     .map(JSON.parse);
 }
 
-function protocolV12(content) {
+function protocolV13(content) {
   return content
+    .replace('driftseal-version: 14', 'driftseal-version: 13')
+    .replace('driftseal-decisions-version: 14', 'driftseal-decisions-version: 13')
+    .replace(
+      '1. **Write intent first**, before any change to project content that will be\n' +
+        '   committed and cannot be reconstructed from Git history:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
+        '   Repeat `--accept` when completion has multiple independently observable criteria.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Record intents for changes that alter what the project commits: edits to\n' +
+        '   code, configuration, documentation, and dependencies. Everything else is\n' +
+        '   exempt: Git operations (Git maintains their history — inspection, branch\n' +
+        '   and worktree management, staging, commits, merges, rebases, cherry-picks,\n' +
+        '   tags, and pushes); single-step commands that only build or check work\n' +
+        '   already done, such as compiling or running tests; auxiliary file or shell\n' +
+        '   operations whose results stay out of the tracked tree or can be regenerated\n' +
+        '   at will (for example an rsync scratch copy or temp scaffolding); and any\n' +
+        '   state change outside a Git worktree (a remote machine, the local\n' +
+        '   environment), which never belongs in the intent log.\n' +
+        '   In multi-agent work the same rule applies per writer: every agent that\n' +
+        '   changes tracked content, subagents included, holds its own open intent; an\n' +
+        "   agent that only receives another agent's changes into a shared workspace\n" +
+        '   records nothing and lets `verify` expose misalignment; handoff files are\n' +
+        '   exempt while gitignored and require an intent once tracked.\n' +
+        '   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
+        '   and can be verified on its own.',
+      '1. **Write intent first**, before modifying, creating, or deleting files, or\n' +
+        '   making any other non-Git change that may need a rollback:\n' +
+        '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
+        '   Repeat `--accept` when completion has multiple independently observable criteria.\n' +
+        '   Add one `--decision <id>` for each existing decision this round may change.\n' +
+        '   Git operations never need an intent and are not included in the intent log;\n' +
+        '   Git maintains their history. This includes inspection, branch and worktree\n' +
+        '   management, staging, commits, merges, rebases, cherry-picks, tags, and pushes.\n' +
+        '   A command whose result can be reconstructed from Git state (for example a\n' +
+        '   patch file regenerated from a commit range, or a scratch harness that\n' +
+        '   re-runs) needs no intent; content that will be committed and cannot be\n' +
+        '   reconstructed (for example a .gitignore edit) does.\n' +
+        '   Single-step commands that only build or check work already done, such as\n' +
+        '   compiling or running tests, also need no intent.\n' +
+        '   Size an intent to the smallest unit that leaves the tree self-consistent\n' +
+        '   and can be verified on its own.'
+    )
+    .replace(
+      '   Git operations remain subject to normal authorization and safety requirements\n' +
+        '   even though they do not require an intent. Any content change made while\n' +
+        '   preparing a Git operation still requires an intent when it meets the\n' +
+        '   committed-content rule in step 1.',
+      '   Git operations remain subject to normal authorization and safety requirements\n' +
+        '   even though they do not require an intent. Any non-Git content change made while\n' +
+        '   preparing a Git operation does require a new intent, per the step 1 test.'
+    )
+    .replace(
+      '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
+        '   doing anything else. The open intent is the source of truth: resume it when its\n' +
+        '   objective still matches the current task; otherwise close it (`partial` or\n' +
+        '   `abandoned`, with a note) and `begin` a new one. Taking over from another\n' +
+        '   agent mid-intent is the same re-anchor: resume the open intent when its\n' +
+        '   objective still matches.',
+      '4. **Re-anchor after context loss**: run `driftseal status` and `driftseal log --last 3` before\n' +
+        '   doing anything else. The open intent is the source of truth: resume it when its\n' +
+        '   objective still matches the current task; otherwise close it (`partial` or\n' +
+        '   `abandoned`, with a note) and `begin` a new one.'
+    );
+}
+
+function protocolV12(content) {
+  return protocolV13(content)
     .replace('driftseal-version: 13', 'driftseal-version: 12')
     .replace('driftseal-decisions-version: 13', 'driftseal-decisions-version: 12')
     .replace(
@@ -1958,12 +2025,12 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /intent write-ahead log/);
   assert.match(first, /driftseal begin/);
   assert.match(first, /--decision <id>/);
-  assert.match(first, /may need a rollback/);
-  assert.match(first, /Git operations never need an intent/);
-  assert.match(first, /branch and worktree\s+management/);
-  assert.match(first, /merges, rebases, cherry-picks, tags, and pushes/);
+  assert.match(first, /committed and cannot be reconstructed from Git history/);
+  assert.match(first, /Everything else is\s+exempt: Git operations/);
+  assert.match(first, /branch\s+and worktree\s+management/);
+  assert.match(first, /merges, rebases, cherry-picks,\s+tags, and pushes/);
   assert.match(first, /normal authorization and safety requirements/);
-  assert.match(first, /need no intent/);
+  assert.match(first, /never belongs in the intent log/);
   assert.match(first, /Agent protocol: decision log/);
   assert.match(first, /driftseal decision add/);
   assert.match(first, /cannot be\s+recovered from the intent log and Git history/);
@@ -1981,16 +2048,20 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /AGENTS\.md` protocol is the source of truth/);
   assert.match(first, /Use the `driftseal` CLI by\s+default/);
   assert.match(first, /MCP and lifecycle hooks are optional adapters/);
-  assert.match(first, /driftseal-version: 13/);
+  assert.match(first, /driftseal-version: 14/);
   assert.match(first, /--accept "<observable outcome>"/);
   assert.match(first, /run `driftseal verify`/);
   assert.match(first, /first reconcile every\s+declared decision/);
   assert.match(first, /--allow-tracked-command/);
   assert.match(first, /workspace changed after it/);
-  assert.match(first, /reconstructed from Git state/);
+  assert.match(first, /Record intents for changes that alter what the project commits/);
+  assert.match(first, /holds its own open intent/);
+  assert.match(first, /lets `verify` expose misalignment/);
+  assert.match(first, /exempt while gitignored and require an intent once tracked/);
+  assert.match(first, /Taking over from another\s+agent mid-intent/);
   assert.match(first, /Size an intent to the smallest unit/);
   assert.match(first, /To revise a decision's prose/);
-  assert.match(first, /per the step 1 test/);
+  assert.match(first, /committed-content rule in step 1/);
   assert.match(first, /driftseal-log-language: en/);
   assert.match(first, /\*\*Log language:\*\* `en`/);
   assert.match(first, /Write intent-log prose/);
@@ -2166,8 +2237,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   const upgraded = fs.readFileSync(upgradeFile, 'utf8');
   assert.equal((upgraded.match(/<!-- driftseal -->/g) || []).length, 1);
   assert.equal((upgraded.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(upgraded, /driftseal-version: 13/);
-  assert.match(upgraded, /driftseal-decisions-version: 13/);
+  assert.match(upgraded, /driftseal-version: 14/);
+  assert.match(upgraded, /driftseal-decisions-version: 14/);
   assert.match(upgraded, /driftseal-log-language: en/);
   assert.match(upgraded, /# trailing user instructions/);
 
@@ -2176,16 +2247,16 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeNineFile, versionNine.trimEnd() + '\n');
   run(['init'], { cwd: upgradeNineCwd });
   const upgradedNine = fs.readFileSync(upgradeNineFile, 'utf8');
-  assert.match(upgradedNine, /driftseal-version: 13/);
-  assert.match(upgradedNine, /Git operations never need an intent/);
-  assert.match(upgradedNine, /merges, rebases, cherry-picks, tags, and pushes/);
+  assert.match(upgradedNine, /driftseal-version: 14/);
+  assert.match(upgradedNine, /Everything else is\s+exempt: Git operations/);
+  assert.match(upgradedNine, /merges, rebases, cherry-picks,\s+tags, and pushes/);
 
   const upgradeTenCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v10-'));
   const upgradeTenFile = path.join(upgradeTenCwd, 'AGENTS.md');
   fs.writeFileSync(upgradeTenFile, versionTen.trimEnd() + '\n');
   run(['init'], { cwd: upgradeTenCwd });
   const upgradedTen = fs.readFileSync(upgradeTenFile, 'utf8');
-  assert.match(upgradedTen, /driftseal-version: 13/);
+  assert.match(upgradedTen, /driftseal-version: 14/);
   assert.match(upgradedTen, /driftseal-log-language: en/);
   assert.match(upgradedTen, /Write intent-log prose/);
 
@@ -2194,10 +2265,10 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeElevenFile, versionEleven.trimEnd() + '\n');
   run(['init'], { cwd: upgradeElevenCwd });
   const upgradedEleven = fs.readFileSync(upgradeElevenFile, 'utf8');
-  assert.match(upgradedEleven, /driftseal-version: 13/);
-  assert.match(upgradedEleven, /driftseal-decisions-version: 13/);
+  assert.match(upgradedEleven, /driftseal-version: 14/);
+  assert.match(upgradedEleven, /driftseal-decisions-version: 14/);
   assert.match(upgradedEleven, /run `driftseal verify`/);
-  assert.match(upgradedEleven, /reconstructed from Git state/);
+  assert.match(upgradedEleven, /reconstructed from Git history/);
   assert.match(upgradedEleven, /Size an intent to the smallest unit/);
   assert.doesNotMatch(upgradedEleven, /<verify output>/);
 
@@ -2206,7 +2277,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeEightFile, versionEight.trimEnd() + '\n');
   run(['init'], { cwd: upgradeEightCwd });
   const upgradedEight = fs.readFileSync(upgradeEightFile, 'utf8');
-  assert.match(upgradedEight, /driftseal-version: 13/);
+  assert.match(upgradedEight, /driftseal-version: 14/);
   assert.match(upgradedEight, /driftseal absorb/);
   assert.match(upgradedEight, /colliding decision ids are remapped/);
 
@@ -2215,7 +2286,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSevenFile, versionSeven.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSevenCwd });
   const upgradedSeven = fs.readFileSync(upgradeSevenFile, 'utf8');
-  assert.match(upgradedSeven, /driftseal-version: 13/);
+  assert.match(upgradedSeven, /driftseal-version: 14/);
   assert.match(upgradedSeven, /source of truth/);
   assert.match(upgradedSeven, /--driver "<decision driver>"/);
 
@@ -2224,7 +2295,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeSixFile, versionSix.trimEnd() + '\n');
   run(['init'], { cwd: upgradeSixCwd });
   const upgradedSix = fs.readFileSync(upgradeSixFile, 'utf8');
-  assert.match(upgradedSix, /driftseal-version: 13/);
+  assert.match(upgradedSix, /driftseal-version: 14/);
   assert.match(upgradedSix, /resume it when its\s+objective still matches/);
   assert.match(upgradedSix, /--driver "<decision driver>"/);
 
@@ -2233,7 +2304,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFiveFile, versionFive.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFiveCwd });
   const upgradedFive = fs.readFileSync(upgradeFiveFile, 'utf8');
-  assert.match(upgradedFive, /driftseal-version: 13/);
+  assert.match(upgradedFive, /driftseal-version: 14/);
   assert.match(upgradedFive, /Log access goes only through DriftSeal/);
 
   const upgradeFourCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-upgrade-v4-'));
@@ -2241,9 +2312,9 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(upgradeFourFile, versionFour.trimEnd() + '\n');
   run(['init'], { cwd: upgradeFourCwd });
   const upgradedFour = fs.readFileSync(upgradeFourFile, 'utf8');
-  assert.match(upgradedFour, /driftseal-version: 13/);
-  assert.match(upgradedFour, /driftseal-decisions-version: 13/);
-  assert.match(upgradedFour, /need no intent/);
+  assert.match(upgradedFour, /driftseal-version: 14/);
+  assert.match(upgradedFour, /driftseal-decisions-version: 14/);
+  assert.match(upgradedFour, /Record intents for changes that alter what the project commits/);
 
   const crlfCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-crlf-'));
   const crlfFile = path.join(crlfCwd, 'AGENTS.md');
@@ -2257,7 +2328,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   fs.writeFileSync(crlfUpgradeFile, versionThree.replace(/\n/g, '\r\n'));
   run(['init'], { cwd: crlfUpgradeCwd });
   const upgradedCrLf = fs.readFileSync(crlfUpgradeFile, 'utf8');
-  assert.match(upgradedCrLf, /driftseal-version: 13/);
+  assert.match(upgradedCrLf, /driftseal-version: 14/);
   assert.equal(upgradedCrLf.replace(/\r\n/g, '').includes('\n'), false);
 
   const preservedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-preserve-'));
@@ -2288,7 +2359,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   const futureCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-future-'));
   const futureFile = path.join(futureCwd, 'AGENTS.md');
-  const future = first.replace('driftseal-version: 13', 'driftseal-version: 999');
+  const future = first.replace('driftseal-version: 14', 'driftseal-version: 999');
   fs.writeFileSync(futureFile, future);
   assert.match(
     runFail(['init'], { cwd: futureCwd }).stderr,
@@ -2318,7 +2389,7 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     '<!-- /driftseal-decisions -->'.length;
   const legacyDecision = first
     .slice(decisionStart, decisionEnd)
-    .replace('<!-- driftseal-decisions-version: 13 -->\n', '')
+    .replace('<!-- driftseal-decisions-version: 14 -->\n', '')
     .replace('<!-- driftseal-log-language: en -->\n', '')
     .replace(
       '\n**Log language:** `en`. Write decision-log prose (title, context,\n' +
@@ -2337,8 +2408,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   run(['init'], { cwd: legacyCwd });
   const migratedLegacy = fs.readFileSync(legacyFile, 'utf8');
   assert.equal((migratedLegacy.match(/<!-- driftseal-decisions -->/g) || []).length, 1);
-  assert.match(migratedLegacy, /driftseal-decisions-version: 13/);
-  assert.match(migratedLegacy, /driftseal-version: 13/);
+  assert.match(migratedLegacy, /driftseal-decisions-version: 14/);
+  assert.match(migratedLegacy, /driftseal-version: 14/);
 
   assert.ok(dir); // DRIFTSEAL_HOME unused by init, but keeps setup() symmetric
 });
@@ -2473,7 +2544,7 @@ test('init --local-log persists the local, untracked log mode', () => {
   run(['init', '--local-log'], { cwd });
   const local = fs.readFileSync(agentsFile, 'utf8');
   assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
-  assert.match(local, /driftseal-version: 13/);
+  assert.match(local, /driftseal-version: 14/);
   assert.match(local, /keeps the log local and untracked; do not add it to commits\./);
   assert.match(local, /Keep `\.decision-log\/` local and untracked; do not add it to commits\./);
   assert.doesNotMatch(local, /commit it with the code/);
@@ -2516,7 +2587,7 @@ test('init --local-log enables local mode on an already-current repository', () 
   run(['init', '--local-log'], { cwd }); // same-version default -> local is an upgrade, not a customization
   const local = fs.readFileSync(agentsFile, 'utf8');
   assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
-  assert.match(local, /driftseal-version: 13/);
+  assert.match(local, /driftseal-version: 14/);
   assert.match(local, /keeps the log local and untracked; do not add it to commits\./);
   assert.match(local, /Keep `\.decision-log\/` local and untracked; do not add it to commits\./);
 
@@ -2593,8 +2664,8 @@ test('init --local-log --lang upgrades a v11 English protocol to local mode in o
 
   run(['init', '--local-log', '--lang', 'zh-CN'], { cwd });
   const upgraded = fs.readFileSync(agentsFile, 'utf8');
-  assert.match(upgraded, /driftseal-version: 13/);
-  assert.match(upgraded, /driftseal-decisions-version: 13/);
+  assert.match(upgraded, /driftseal-version: 14/);
+  assert.match(upgraded, /driftseal-decisions-version: 14/);
   assert.match(upgraded, /driftseal-log-language: zh-CN/);
   assert.equal((upgraded.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
   assert.match(upgraded, /local and untracked/);
@@ -3546,7 +3617,7 @@ test('hook prompt and stop emit advisory reminders once an intent log exists', (
   run(['end']);
 
   const prompt = run(['hook', 'prompt']);
-  assert.match(prompt, /DriftSeal reminder: if this round will modify files/);
+  assert.match(prompt, /DriftSeal reminder: if this round will change project content that will be committed/);
   assert.match(prompt, /need no intent/);
 
   const stopped = run(['hook', 'stop']);

@@ -4,7 +4,7 @@ Date: 2026-08-17
 
 ## Status
 
-Accepted
+Superseded
 
 ## Context and Problem Statement
 
@@ -29,3 +29,12 @@ A command whose result can be reconstructed from Git state (for example a patch 
 
 * git format-patch output and re-runnable harnesses need no intent; committed content like .gitignore edits still does
 * Protocol v12 step 1 carries the rule; refines 0010 rather than replacing it
+
+## Decision History
+
+<!-- driftseal-reconciliation: 35c03773-b916-4cbd-adc4-23feaa1db2dd -->
+### 2026-08-21T02:57:04.935Z — Intent `2026-08-21-001`
+
+Status: Accepted → Superseded
+
+Superseded by 0017: the boundary is now the positive committed-content rule (changes that alter what the project commits), not reconstructability from Git state.

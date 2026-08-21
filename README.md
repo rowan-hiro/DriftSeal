@@ -251,15 +251,26 @@ driftseal end \
 
 If the scope changes, close the current intent as `partial` or `abandoned`, then start a new one. After context loss, use `driftseal status` and `driftseal log --last 3` to re-anchor.
 
-Git operations are entirely outside the intent log because Git maintains their
-history. Inspection, branch and worktree management, staging, commits, merges,
-rebases, cherry-picks, tags, and pushes never need an intent of their own. They
-still require normal authorization and safety checks. A command whose result
-can be reconstructed from Git state, such as a patch file regenerated from a
-commit range or a scratch harness that re-runs, needs no intent either; content
-that will be committed and cannot be reconstructed, such as a `.gitignore`
-edit, does. Single-step builds and checks, such as compiling or running tests,
-also need no intent. Any other non-Git content change starts a new work round.
+Record an intent for changes that alter what the project commits: edits to code,
+configuration, documentation, and dependencies — anything that will be committed
+and cannot be reconstructed from Git history. Everything else is exempt. Git
+operations are entirely outside the intent log because Git maintains their
+history; inspection, branch and worktree management, staging, commits, merges,
+rebases, cherry-picks, tags, and pushes never need an intent of their own, though
+they still require normal authorization and safety checks. Single-step builds
+and checks, such as compiling or running tests, need no intent. Auxiliary file
+or shell operations whose results stay out of the tracked tree or can be
+regenerated at will — an `rsync` scratch copy, temp scaffolding — need none
+either, nor does any state change outside a Git worktree (a remote machine, the
+local environment), which never belongs in the intent log.
+
+In multi-agent work the same rule applies per writer: every agent that changes
+tracked content, subagents included, holds its own open intent. An agent that
+only receives another agent's changes into a shared workspace records nothing
+and lets `verify` expose misalignment. Handoff files are exempt while
+gitignored and require an intent once tracked. Taking over from another agent
+mid-intent is a re-anchor, not a boundary: resume the open intent when its
+objective still matches the task.
 
 ## Commands
 

@@ -235,12 +235,19 @@ driftseal end \
 
 如果范围发生变化，先把当前 intent 以 `partial` 或 `abandoned` 关闭，再开启新的 intent。发生 context loss 后，用 `driftseal status` 和 `driftseal log --last 3` 重新锚定当前目标。
 
-Git 操作完全不计入 intent log，因为 Git 会自行维护历史。查看状态、管理 branch
-或 worktree、stage、commit、merge、rebase、cherry-pick、tag 和 push 都不需要
-单独开启 intent，但仍须遵守正常的授权与安全要求。结果能从 Git 状态重建的命令
-——比如从 commit range 重新生成的 patch 文件、可以重跑的临时 harness——也不需要
-intent；会被提交且无法重建的内容改动（比如编辑 `.gitignore`）则需要。编译、跑测试
-等单步构建或检查同样不需要 intent；除此之外的非 Git 内容改动，都要开启新一轮。
+需要记录 intent 的是会改变项目提交内容的改动：代码、配置、文档、依赖的编辑——凡是要进
+commit 且无法从 Git 历史重建的内容。其余操作一律免记。Git 操作完全不计入 intent log，
+因为 Git 会自行维护历史；查看状态、管理 branch 或 worktree、stage、commit、merge、
+rebase、cherry-pick、tag 和 push 都不需要单独开启 intent，但仍须遵守正常的授权与安全
+要求。编译、跑测试等单步构建或检查不需要 intent。结果不进 tracked tree 或可随时重建的
+辅助文件或 shell 操作——比如 `rsync` 临时拷贝、临时脚手架——同样不需要；Git worktree
+之外的状态变更（远程机器、本机环境）也永远不属于 intent log。
+
+多 agent 协作时，同样的规则按写入者分别适用：每个改动 tracked 内容的 agent（包括
+subagent）都要持有自己的 open intent。只把其他 agent 的变更接收到共享工作区的 agent
+不用记录，交给 `verify` 暴露不一致。中转用的 handoff 文件在被 gitignore 时免记，被
+tracked 时则需要。中途接手另一个 agent 的 intent 属于重新锚定而非边界：目标仍然匹配
+就继续沿用这个 open intent。
 
 ## 命令速览
 
