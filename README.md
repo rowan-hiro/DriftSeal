@@ -204,10 +204,11 @@ data. After the user has reviewed and approved the result, remove the old tracke
 paths manually. Running `check` afterward reports migration complete.
 
 If v1 used custom storage, keep the source and destination explicit for inspect
-and apply. The migration marker records their canonical identity, so later
-checks recover the source paths from the destination. Source and destination
-must not contain one another. In particular, an inherited v1 `DRIFTSEAL_HOME`
-must not also be used as the v2 destination:
+and apply. The migration marker records repository-local paths as portable
+identities, so later checks recover the source paths from the destination even
+after the repository moves. The destination must not contain, or be contained
+by, the source log file or MADR directory. In particular, an inherited v1
+`DRIFTSEAL_HOME` must not also be used as the v2 destination:
 
 ```sh
 driftseal migrate v1-to-v2 inspect --json \

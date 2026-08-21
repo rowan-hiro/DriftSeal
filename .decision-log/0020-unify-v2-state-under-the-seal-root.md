@@ -29,3 +29,12 @@ Use .seal as the unified root, with outcome events in .seal/outcomes/events.json
 
 * v1 paths are migration inputs rather than runtime aliases.
 * All public CLI, API, MCP, hook, merge, and documentation surfaces use outcome terminology.
+
+## Decision History
+
+<!-- driftseal-reconciliation: 6576626e-5b3f-47fa-b808-53e426ff994a -->
+### 2026-08-21T06:24:39.798Z — Intent `2026-08-21-006`
+
+Status: Accepted → Accepted
+
+Confirmed that v2 MADR storage is excluded from legacy detection and repository-local migration identities remain portable.

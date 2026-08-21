@@ -29,3 +29,12 @@ Provide inspect, apply, and check phases. A model proposes an ordered complete g
 
 * Removal of .intent-log and .decision-log remains a manual action after explicit user approval.
 * Source fingerprints and plan digests make repeated apply operations safe and detect stale plans.
+
+## Decision History
+
+<!-- driftseal-reconciliation: e99fd0ec-a3e3-4d48-b6c0-c12fe9dc42d0 -->
+### 2026-08-21T06:24:31.577Z — Intent `2026-08-21-006`
+
+Status: Accepted → Accepted
+
+Refined migration fingerprints and overlap checks so reviewed migrations survive repository relocation without rejecting safe sibling layouts.

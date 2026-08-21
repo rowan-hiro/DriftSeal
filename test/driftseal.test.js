@@ -2455,6 +2455,59 @@ test('MADR-only v1 repositories fail closed and migrate without an intent log', 
   assert.match(run(['migrate', 'v1-to-v2', 'check']), /migration complete/);
 });
 
+test('v2 MADR home is not mistaken for v1 state', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v2-madr-home-'));
+  const seal = path.join(cwd, '.seal');
+  const { run } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: seal,
+    DRIFTSEAL_DECISION_HOME: path.join(seal, 'madr'),
+  });
+
+  run(['decision', 'add', 'Keep v2 state distinct', '-c', 'v2 context', '-o', 'v2 outcome']);
+  assert.equal(run(['status']), 'no outcome in progress\n');
+  const id = run(['begin', 'Continue normal v2 work']).trim();
+  assert.match(id, /^\d{4}-\d{2}-\d{2}-001$/);
+  assert.equal(run(['end', '--status', 'completed']).trim(), `${id} completed`);
+});
+
+test('migration source fingerprint survives repository relocation', () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-migration-relocation-'));
+  const original = path.join(parent, 'original');
+  const relocated = path.join(parent, 'relocated');
+  fs.mkdirSync(original);
+  const sourceLog = path.join(original, '.intent-log', 'events.jsonl');
+  fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
+  fs.writeFileSync(sourceLog, [
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: 'begin', intent: 'move safely' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: 'end', status: 'completed' },
+  ].map(JSON.stringify).join('\n') + '\n');
+  const originalCli = cliHarness(original, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const inspection = JSON.parse(originalCli.run(['migrate', 'v1-to-v2', 'inspect', '--json']));
+  const plan = {
+    format: 'driftseal-v1-to-v2-plan',
+    sourceFingerprint: inspection.sourceFingerprint,
+    groups: [{
+      outcome: 'Move safely',
+      summary: 'The repository-local migration remains portable.',
+      sourceIds: ['2026-01-01-001'],
+    }],
+    excluded: [],
+  };
+  originalCli.run(['migrate', 'v1-to-v2', 'apply', '--plan-json', JSON.stringify(plan)]);
+
+  fs.renameSync(original, relocated);
+  const relocatedCli = cliHarness(relocated, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const relocatedInspection = JSON.parse(relocatedCli.run(['migrate', 'v1-to-v2', 'inspect', '--json']));
+  assert.equal(relocatedInspection.sourceFingerprint, inspection.sourceFingerprint);
+  assert.match(relocatedCli.run(['migrate', 'v1-to-v2', 'check']), /valid and staged/);
+});
+
 test('migration manifest rejects a historical reconciliation rollback', () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-reconciliation-rollback-'));
   const { run, runFail } = cliHarness(cwd, {
@@ -2528,6 +2581,38 @@ test('migration rejects a nested migration destination inside removable v1 sourc
     ]).stderr,
     /destination overlaps v1 source path/
   );
+});
+
+test('migration permits sibling destination outside removable v1 sources', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-sibling-migration-destination-'));
+  const { run } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const sourceLog = path.join(cwd, 'events.jsonl');
+  const sourceDecisions = path.join(cwd, 'legacy-madr');
+  const destination = path.join(cwd, '.seal');
+  fs.writeFileSync(sourceLog, '');
+  fs.mkdirSync(sourceDecisions);
+  fs.writeFileSync(path.join(sourceDecisions, '0001-context.md'), 'context\n');
+  const locations = [
+    '--source-log', sourceLog,
+    '--source-decisions', sourceDecisions,
+    '--destination', destination,
+  ];
+  const inspection = JSON.parse(run(['migrate', 'v1-to-v2', 'inspect', '--json', ...locations]));
+  const plan = {
+    format: 'driftseal-v1-to-v2-plan',
+    sourceFingerprint: inspection.sourceFingerprint,
+    groups: [],
+    excluded: [],
+  };
+
+  assert.match(
+    run(['migrate', 'v1-to-v2', 'apply', '--plan-json', JSON.stringify(plan), ...locations]),
+    /staged v1-to-v2 migration/
+  );
+  assert.match(run(['migrate', 'v1-to-v2', 'check', ...locations]), /valid and staged/);
 });
 
 test('init injects the protocol into AGENTS.md, idempotently', () => {
