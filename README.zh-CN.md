@@ -126,10 +126,20 @@ driftseal begin "Ship the inverted index" --accept "lookups return stored postin
 
 有 open outcome 时不能切 lane。以后回到同一能力，是切回去再 `begin` 新的 outcome，
 而不是重开已关闭的记录。`driftseal lane assign <id> <name>` 可以把已关闭的 outcome
-移过去。跨切工作留在 `main`。
+移过去。跨切工作留在 `main`。open outcome 即使属于别的 lane，也会出现在 `log` 里；
+若它和当前 lane 不同，`status` 会写出它的 lane。
 
-派生的 lane index 保存每条 lane 的 head、反向链接和 WAL byte range，放在 Git
-metadata（或自定义 seal 旁边）。它可以重建，不会随 log 一起提交。
+lane 不能改名或删除。`lane add` 打错的名字会一直出现在 `driftseal lane` 输出里；
+补上正确名字，旧名字不要再用。
+
+如果 `begin` 引用了 WAL 里没有 `lane_add` 的 lane，DriftSeal 会推断这条 lane，
+让 `status` / `log` / `lane` 仍可读，也允许再用 `lane add` 补上缺失事件。若
+worktree 的 current-lane 指针指向 WAL 里已不存在的 lane，`status` / `log` / `lane`
+会警告并回落到 `main`；`begin` 仍会拒绝，直到 `lane switch main` 或把该 lane 加回来。
+
+派生的 lane index 缓存 fold 状态、每条 lane 的 head、反向链接和 WAL byte range，
+放在 Git metadata（或自定义 seal 旁边）。它可以重建，不会随 log 一起提交。自定义
+home 下的 sidecar 放在 `events.jsonl` 旁边，并由该目录的 `.gitignore` 忽略。
 
 ## Decision 与 MADR
 
@@ -287,7 +297,8 @@ resources 为：
 - `.seal/madr/` 保存编号化 MADR。
 - `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
 - 当前 lane 与派生 lane index 对默认 repo seal 存在 Git metadata 里，对自定义 seal
-  则放在旁边。它们可以重建，不是 committed WAL 的一部分。
+  则放在旁边（`outcomes/.current-lane` 与 `outcomes/.lane-index.json`，已被
+  gitignore）。它们可以重建，不是 committed WAL 的一部分。
 - advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
 
 DriftSeal 不会替你判断 verification command 是否安全，也不会判断测试本身是否充分。

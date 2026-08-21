@@ -33,7 +33,8 @@ driftseal log --last 3
 Then resume, extend, replace, verify, or close the outcome exactly as
 `AGENTS.md` requires. Use `extend` only when the additional work still delivers
 the same coherent outcome. `status` and `log --last 3` follow the current lane;
-if the requested work belongs to a different existing lane, switch first. For
+an open outcome stays visible even if it belongs to another lane. If the
+requested work belongs to a different existing lane, switch first. For
 command syntax, run:
 
 ```sh

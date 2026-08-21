@@ -318,6 +318,7 @@ function registerTools(server, api, z) {
     name: z.string(),
     description: z.string().nullable(),
     addedAt: z.string().nullable(),
+    inferred: z.boolean().optional(),
     visible: z.number().int().nonnegative(),
     count: z.number().int().nonnegative(),
     total: z.number().int().nonnegative(),
@@ -334,6 +335,7 @@ function registerTools(server, api, z) {
       outputSchema: {
         root: z.string(),
         current: z.string(),
+        missingCurrentLane: z.string().nullable().optional(),
         lanes: z.array(laneRecord),
         total: z.number().int().nonnegative(),
         readOnly: z.boolean().optional(),

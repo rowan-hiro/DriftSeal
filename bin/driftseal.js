@@ -598,7 +598,7 @@ function laneIndexFile() {
 }
 
 function emptyLaneCatalog() {
-  return new Map([[DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null }]]);
+  return new Map([[DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null }]]);
 }
 
 function readCurrentLaneName() {
@@ -614,7 +614,24 @@ function writeCurrentLaneName(name, { readOnly = false } = {}) {
   const file = currentLaneFile();
   if (!file) fail('cannot persist the current lane outside a writable seal');
   ensureDirectoryDurable(path.dirname(file));
+  ensureDerivedLaneSidecarIgnore();
   atomicWriteFile(file, `${name}\n`, 0o600);
+}
+
+function ensureDerivedLaneSidecarIgnore() {
+  if (isParkableOutcomeLog()) return;
+  const ignoreFile = path.join(logDir(), '.gitignore');
+  let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
+  let next = current;
+  for (const name of ['.current-lane', '.lane-index.json']) {
+    const present = next.split(/\r?\n/).some((line) => line.trim() === name);
+    if (present) continue;
+    if (next && !next.endsWith('\n')) next += '\n';
+    next += `${name}\n`;
+  }
+  if (next === current) return;
+  ensureDirectoryDurable(logDir());
+  atomicWriteFile(ignoreFile, next, 0o644);
 }
 
 function defaultLaneCatalogObject() {
@@ -626,6 +643,7 @@ function emptyLaneIndexState() {
     indexVersion: LANE_INDEX_VERSION,
     source: {
       indexedThrough: 0,
+      indexedLines: 0,
       prefixHash: contentHash(''),
       tailHash: contentHash(''),
     },
@@ -650,10 +668,11 @@ function hashFileRange(file, start, length) {
   }
 }
 
-function laneIndexSourceIdentity(file, indexedThrough) {
+function laneIndexSourceIdentity(file, indexedThrough, indexedLines = 0) {
   if (!fs.existsSync(file) || indexedThrough <= 0) {
     return {
       indexedThrough: 0,
+      indexedLines: 0,
       prefixHash: contentHash(''),
       tailHash: contentHash(''),
     };
@@ -662,6 +681,7 @@ function laneIndexSourceIdentity(file, indexedThrough) {
   const tail = Math.min(LANE_INDEX_TAIL_BYTES, indexedThrough);
   return {
     indexedThrough,
+    indexedLines,
     prefixHash: hashFileRange(file, 0, prefix),
     tailHash: hashFileRange(file, indexedThrough - tail, tail),
   };
@@ -669,6 +689,7 @@ function laneIndexSourceIdentity(file, indexedThrough) {
 
 function laneIndexMatchesFile(index, file) {
   if (!index || index.indexVersion !== LANE_INDEX_VERSION) return false;
+  if (!Number.isSafeInteger(index.source?.indexedLines) || index.source.indexedLines < 0) return false;
   if (!fs.existsSync(file)) return index.source.indexedThrough === 0;
   const size = fs.statSync(file).size;
   if (size < index.source.indexedThrough) return false;
@@ -687,7 +708,7 @@ function serializeLaneIndex(state) {
     lanes: Object.fromEntries(
       [...state.lanes.entries()].map(([name, lane]) => [
         name,
-        { name, description: lane.description || null, addedAt: lane.addedAt || null, head: lane.head || null },
+        { name, description: lane.description || null, addedAt: lane.addedAt || null, head: lane.head || null, inferred: lane.inferred === true },
       ])
     ),
     order: [...state.order],
@@ -706,6 +727,7 @@ function deserializeLaneIndex(raw) {
       description: lane.description || null,
       addedAt: lane.addedAt || null,
       head: lane.head || null,
+      inferred: lane.inferred === true,
     });
   }
   if (!lanes.has(DEFAULT_LANE)) {
@@ -752,18 +774,14 @@ function applyIndexedEvent(state, ev, startByte, endByte) {
 
 function applyFoldEvent(state, ev) {
   const { records, reconciliations, order, lanes } = state;
-  const ensureLane = (name, id) => {
+  const ensureLane = (name) => {
     if (lanes.has(name)) return;
-    if (state.allowUnknownLanes) {
-      lanes.set(name, { name, description: null, addedAt: null, head: null });
-      return;
-    }
-    fail(`outcome ${id} references unknown lane ${name}`);
+    lanes.set(name, { name, description: null, addedAt: null, head: null, inferred: true });
   };
   if (ev.type === 'begin') {
     if (records.has(ev.id)) fail(`duplicate begin event for outcome id: ${ev.id}`);
     const record = newOutcomeRecord(ev);
-    ensureLane(record.lane, record.id);
+    ensureLane(record.lane);
     records.set(ev.id, record);
     order.push(ev.id);
     return;
@@ -776,7 +794,7 @@ function applyFoldEvent(state, ev) {
       acceptance: [],
       verify: null,
     });
-    ensureLane(record.lane, record.id);
+    ensureLane(record.lane);
     record.status = ev.status;
     record.tsEnd = ev.endedAt;
     record.note = ev.summary || null;
@@ -794,8 +812,15 @@ function applyFoldEvent(state, ev) {
   }
   if (ev.type === 'migration') return;
   if (ev.type === 'lane_add') {
-    if (lanes.has(ev.lane)) fail(`duplicate lane add for ${ev.lane}`);
-    lanes.set(ev.lane, { name: ev.lane, description: ev.description || null, addedAt: ev.ts, head: null });
+    const existing = lanes.get(ev.lane);
+    if (existing && !existing.inferred) fail(`duplicate lane add for ${ev.lane}`);
+    lanes.set(ev.lane, {
+      name: ev.lane,
+      description: ev.description || null,
+      addedAt: ev.ts,
+      head: existing ? existing.head : null,
+      inferred: false,
+    });
     return;
   }
   if (ev.type === 'lane_assign') {
@@ -956,15 +981,15 @@ function applyFoldEvent(state, ev) {
   }
 }
 
-function consumeLogSlice(file, startByte, onEvent, { repairTail = false, readOnly = false } = {}) {
-  if (!fs.existsSync(file)) return 0;
+function consumeLogSlice(file, startByte, onEvent, { repairTail = false, readOnly = false, startLine = 0 } = {}) {
+  if (!fs.existsSync(file)) return { endByte: 0, endLine: 0 };
   const fd = fs.openSync(file, 'r');
   let size;
   let buf;
   try {
     size = fs.fstatSync(fd).size;
     if (startByte > size) fail('lane index is ahead of the outcome log');
-    if (startByte === size) return size;
+    if (startByte === size) return { endByte: size, endLine: startLine };
     buf = Buffer.alloc(size - startByte);
     fs.readSync(fd, buf, 0, buf.length, startByte);
   } finally {
@@ -994,25 +1019,27 @@ function consumeLogSlice(file, startByte, onEvent, { repairTail = false, readOnl
   }
   const parts = text.split('\n');
   let pos = startByte;
+  let lineNumber = startLine;
   for (let i = 0; i < parts.length; i++) {
     const line = parts[i];
     if (i === parts.length - 1 && line === '') break;
+    lineNumber += 1;
     const start = pos;
     pos += Buffer.byteLength(line, 'utf8');
     if (i < parts.length - 1) pos += 1;
     if (line.trim().length === 0) continue;
     try {
-      const event = normalizeEvent(JSON.parse(line), i + 1);
+      const event = normalizeEvent(JSON.parse(line), lineNumber);
       if (event.logVersion !== LOG_VERSION) {
         fail(`v1 intent log cannot be used as a v2 outcome log; run driftseal migrate v1-to-v2 inspect`);
       }
       onEvent(event, start, pos);
     } catch (err) {
       if (err instanceof DriftSealError) throw err;
-      fail(`corrupt log line in ${file}`);
+      fail(`corrupt log line ${lineNumber} in ${file}`);
     }
   }
-  return pos;
+  return { endByte: pos, endLine: lineNumber };
 }
 
 function persistLaneIndex(state, { readOnly = false } = {}) {
@@ -1020,6 +1047,7 @@ function persistLaneIndex(state, { readOnly = false } = {}) {
   const file = laneIndexFile();
   if (!file) return;
   ensureDirectoryDurable(path.dirname(file));
+  ensureDerivedLaneSidecarIgnore();
   atomicWriteFile(file, `${JSON.stringify(serializeLaneIndex(state))}\n`, 0o600);
 }
 
@@ -1038,29 +1066,35 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false } = {}) {
   let state = loadPersistedLaneIndex();
   const canIncrement = state && laneIndexMatchesFile(state, file);
   let indexedThrough = 0;
+  let indexedLines = 0;
   if (!canIncrement) {
     state = emptyLaneIndexState();
-    indexedThrough = consumeLogSlice(file, 0, (event, start, end) => applyIndexedEvent(state, event, start, end), {
+    const slice = consumeLogSlice(file, 0, (event, start, end) => applyIndexedEvent(state, event, start, end), {
       repairTail,
       readOnly,
     });
+    indexedThrough = slice.endByte;
+    indexedLines = slice.endLine;
     state.lastBuild = 'full';
   } else {
     const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
     if (size > state.source.indexedThrough) {
-      indexedThrough = consumeLogSlice(
+      const slice = consumeLogSlice(
         file,
         state.source.indexedThrough,
         (event, start, end) => applyIndexedEvent(state, event, start, end),
-        { repairTail, readOnly }
+        { repairTail, readOnly, startLine: state.source.indexedLines || 0 }
       );
+      indexedThrough = slice.endByte;
+      indexedLines = slice.endLine;
       state.lastBuild = 'incremental';
     } else {
       indexedThrough = size;
+      indexedLines = state.source.indexedLines || 0;
       state.lastBuild = 'hot';
     }
   }
-  state.source = laneIndexSourceIdentity(file, indexedThrough);
+  state.source = laneIndexSourceIdentity(file, indexedThrough, indexedLines);
   linkLaneIndex(state);
   if (state.lastBuild !== 'hot') persistLaneIndex(state, { readOnly });
   return state;
@@ -1118,8 +1152,9 @@ function laneSummary(records, name) {
     name,
     description: lane ? lane.description : null,
     addedAt: lane ? lane.addedAt : null,
+    inferred: Boolean(lane && lane.inferred),
     visible: visible.length,
-    total: records.length,
+    total: members.length,
     count: members.length,
   };
 }
@@ -1129,24 +1164,51 @@ function publicLane(summary) {
     name: summary.name,
     description: summary.description,
     addedAt: summary.addedAt || null,
+    inferred: summary.inferred === true,
     visible: summary.visible,
     count: summary.count,
     total: summary.total,
   };
 }
 
-function currentLaneOrFail(records) {
-  const name = readCurrentLaneName();
+function resolveCurrentLane(records, { required = false } = {}) {
+  const requested = readCurrentLaneName();
   const lanes = records.lanes || emptyLaneCatalog();
-  if (!lanes.has(name)) {
-    fail(`current lane ${name} does not exist; switch to ${DEFAULT_LANE} or add it`);
+  if (lanes.has(requested)) return { current: requested, missing: null };
+  if (required) {
+    fail(`current lane ${requested} does not exist; switch to ${DEFAULT_LANE} or add it`);
   }
-  return name;
+  return { current: DEFAULT_LANE, missing: requested };
+}
+
+function currentLaneOrFail(records) {
+  return resolveCurrentLane(records, { required: true }).current;
+}
+
+function warnMissingCurrentLane(missing) {
+  if (!missing) return;
+  printLine(`warning: current lane ${missing} does not exist; showing ${DEFAULT_LANE}`);
 }
 
 function renderLaneLine(records, name) {
   const summary = laneSummary(records, name);
-  return `lane: ${name} (${summary.visible} visible / ${summary.total} total)`;
+  return `lane: ${name} (${summary.visible} visible / ${summary.count} in lane)`;
+}
+
+function selectLaneLogRecords(records, current) {
+  return records.filter(
+    (record) => (record.lane || DEFAULT_LANE) === current || record.status === 'in_progress'
+  );
+}
+
+function selectLastLogRecords(records, current, n) {
+  const inLane = records.filter((record) => (record.lane || DEFAULT_LANE) === current);
+  const clipped = inLane.slice(-n);
+  const kept = new Set(clipped.map((record) => record.id));
+  const extras = records.filter((record) => record.status === 'in_progress' && !kept.has(record.id));
+  if (extras.length === 0) return clipped;
+  const order = new Map(records.map((record, index) => [record.id, index]));
+  return [...clipped, ...extras].sort((left, right) => order.get(left.id) - order.get(right.id));
 }
 
 function liveWorktreeOutcomeLog() {
@@ -1414,7 +1476,7 @@ function flushInProgressLog() {
 function parkedOpenOutcome(park) {
   if (!fs.existsSync(park)) return null;
   const records = readJsonlRecordsFromFile(park, { repairTail: true });
-  return openOutcome(fold(records.map((record) => record.event), { allowUnknownLanes: true }));
+  return openOutcome(fold(records.map((record) => record.event)));
 }
 
 function appendEvent(event) {
@@ -1851,13 +1913,12 @@ function newOutcomeRecord(ev) {
 }
 
 /** Fold the event stream into one record per outcome. Legacy v1 events are accepted for migration. */
-function fold(events, { allowUnknownLanes = false } = {}) {
+function fold(events) {
   const state = {
     records: new Map(),
     reconciliations: new Map(),
     order: [],
     lanes: emptyLaneCatalog(),
-    allowUnknownLanes,
   };
   for (const ev of events) applyFoldEvent(state, ev);
   const folded = state.order.map((id) => state.records.get(id));
@@ -2244,9 +2305,12 @@ function parseArgs(argv, spec, usageKey) {
   return { positionals, flags };
 }
 
-function render(rec) {
+function render(rec, { currentLane } = {}) {
   const lines = [`[${rec.id}] ${rec.status}`];
-  if (rec.lane && rec.lane !== DEFAULT_LANE) lines.push(`  lane: ${rec.lane}`);
+  const lane = rec.lane || DEFAULT_LANE;
+  if (lane !== DEFAULT_LANE || (currentLane && lane !== currentLane)) {
+    lines.push(`  lane: ${lane}`);
+  }
   lines.push(`  outcome: ${rec.outcome}`);
   for (const extension of rec.extensions) lines.push(`  extend: ${extension.extension}`);
   for (const criterion of rec.acceptance) lines.push(`  accept: ${criterion}`);
@@ -3415,6 +3479,7 @@ const SKILL_RELEASE_DIGESTS = new Set([
   'df8bc7035de1a19faf307c92f9bb0f4052e683d1a94881c2c5d5cbef48b67568', // dc9899d 1.1.7 parked intents in absorb
   '42a0549dff21483c0508ea4a79658e7bf05cd98f8af4238c95dbd23cdcde7ee6', // 2.0.0 outcome workflow
   '38e89060ff37ecdd663eae73a3e0c646d6bb220fc8232a5762356375d84ba69b', // 2.1.0 outcome lanes
+  'b4b2cc27ea71c5777b5eb9b67d861fbe1da43f31ab5d422d6a877e0cad592493', // 2.1.0 lane re-anchor recovery
 ]);
 
 function skillInstallUsage() {
@@ -4541,12 +4606,8 @@ function resolveOpenIntents(
   abandon,
   { allowConflict = false, overlay = [], parkedOpen = null } = {}
 ) {
-  const oursOpen = openOutcome(
-    fold(oursRecords.map((record) => record.event), { allowUnknownLanes: true })
-  );
-  const theirsOpen = openOutcome(
-    fold(theirsRecords.map((record) => record.event), { allowUnknownLanes: true })
-  );
+  const oursOpen = openOutcome(fold(oursRecords.map((record) => record.event)));
+  const theirsOpen = openOutcome(fold(theirsRecords.map((record) => record.event)));
   try {
     openOutcome(fold([...result, ...overlay].map((record) => record.event)));
     return { abandoned: null, conflict: false, parkedClosed: false };
@@ -4684,7 +4745,7 @@ function finishAbsorb({
   });
   const overlay = plan && !plan.alreadyCommitted ? plan.records : [];
   const parkedOpen =
-    overlay.length > 0 ? openOutcome(fold(overlay.map((record) => record.event), { allowUnknownLanes: true })) : null;
+    overlay.length > 0 ? openOutcome(fold(overlay.map((record) => record.event))) : null;
   const parkMappings = plan
     ? plan.mappings.map((mapping) => ({ ...mapping, side: 'parked' }))
     : [];
@@ -5854,7 +5915,7 @@ function checkMigration(snapshot, { sourceMissing = false } = {}) {
 
 function listLaneSnapshot(records) {
   const catalog = records.lanes || emptyLaneCatalog();
-  const current = currentLaneOrFail(records);
+  const { current, missing } = resolveCurrentLane(records);
   const lanes = [...catalog.keys()].map((name) => {
     const summary = laneSummary(records, name);
     return {
@@ -5862,14 +5923,16 @@ function listLaneSnapshot(records) {
       current: name === current,
     };
   });
-  return { current, lanes, total: records.length };
+  return { current, missingCurrentLane: missing, lanes, total: records.length };
 }
 
 function printLaneSnapshot(snapshot) {
+  warnMissingCurrentLane(snapshot.missingCurrentLane);
   const lines = snapshot.lanes.map((lane) => {
     const mark = lane.current ? '*' : ' ';
     const desc = lane.description ? ` — ${lane.description}` : '';
-    return `${mark} ${lane.name}  ${lane.visible} visible / ${lane.count} in lane${desc}`;
+    const inferred = lane.inferred ? ' (inferred)' : '';
+    return `${mark} ${lane.name}  ${lane.visible} visible / ${lane.count} in lane${desc}${inferred}`;
   });
   printLine(`current lane: ${snapshot.current}`);
   printLine(lines.join('\n'));
@@ -5886,7 +5949,7 @@ function showLanes(argv, { readOnly = false } = {}) {
   const lane = snapshot.lanes.find((item) => item.name === name);
   if (!lane) fail(`unknown lane ${name}`);
   printLine(
-    `${lane.current ? 'current ' : ''}lane: ${lane.name} (${lane.visible} visible / ${lane.count} in lane / ${lane.total} total)`
+    `${lane.current ? 'current ' : ''}lane: ${lane.name} (${lane.visible} visible / ${lane.count} in lane)`
   );
   if (lane.description) printLine(lane.description);
   return lane;
@@ -5900,7 +5963,8 @@ function addLane(argv) {
   const events = readEvents({ repairTail: true });
   const records = fold(events);
   const catalog = records.lanes || emptyLaneCatalog();
-  if (catalog.has(name)) fail(`lane ${name} already exists`);
+  const existing = catalog.get(name);
+  if (existing && !existing.inferred) fail(`lane ${name} already exists`);
   const description = flags.desc && flags.desc.trim() ? flags.desc.trim() : null;
   appendEvent({
     type: 'lane_add',
@@ -6206,7 +6270,8 @@ const commands = {
     }
     const view = loadOutcomeView({ repairTail: true, readOnly });
     const records = view.records;
-    const current = currentLaneOrFail(records);
+    const { current, missing } = resolveCurrentLane(records);
+    warnMissingCurrentLane(missing);
     const customLanes = records.lanes && records.lanes.size > 1;
     if (customLanes || current !== DEFAULT_LANE) {
       printLine(renderLaneLine(records, current));
@@ -6216,7 +6281,7 @@ const commands = {
       printLine('no outcome in progress');
       return null;
     }
-    printLine(render(open));
+    printLine(render(open, { currentLane: current }));
     return publicOutcome(open);
   },
 
@@ -6234,29 +6299,27 @@ const commands = {
       records = Object.assign([...records, parkedV1], { lanes: records.lanes });
     }
     const catalog = records.lanes || emptyLaneCatalog();
-    const current = currentLaneOrFail(records);
+    const { current, missing } = resolveCurrentLane(view.records);
+    warnMissingCurrentLane(missing);
     const allLanes = flags['all-lanes'] === true;
     if (!allLanes) {
-      records = Object.assign(
-        records.filter((record) => (record.lane || DEFAULT_LANE) === current),
-        { lanes: catalog }
-      );
+      records = Object.assign(selectLaneLogRecords(records, current), { lanes: catalog });
     }
     const visible = flags.all ? records : records.filter((record) => !record.reclaimed);
     const customLanes = catalog.size > 1;
-    if (!allLanes && (customLanes || current !== DEFAULT_LANE)) {
+    if (!allLanes && (customLanes || current !== DEFAULT_LANE || missing)) {
       printLine(renderLaneLine(view.records, current));
     }
     let shown = visible;
     if (flags.last) {
       const n = positiveInteger(flags.last, '--last');
-      shown = visible.slice(-n);
+      shown = selectLastLogRecords(visible, current, n);
     }
     if (shown.length === 0) {
       printLine('log is empty');
       return [];
     }
-    printLine(shown.map(render).join('\n\n'));
+    printLine(shown.map((record) => render(record, { currentLane: current })).join('\n\n'));
     return shown.map(publicOutcome);
   },
 

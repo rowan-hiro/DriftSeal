@@ -140,11 +140,22 @@ driftseal begin "Ship the inverted index" --accept "lookups return stored postin
 Close the open outcome before switching. Later work on the same capability
 switches back and begins a new outcome on that lane; it does not reopen a closed
 record. `driftseal lane assign <id> <name>` moves a closed outcome. Cross-cutting
-work stays on `main`.
+work stays on `main`. An open outcome stays visible in `log` even when it belongs
+to another lane; `status` prints that lane when it differs from the current one.
 
-A derived lane index stores per-lane heads, reverse links, and WAL byte ranges
-in Git metadata (or beside a custom seal). It is reconstructable and is not
-committed with the log.
+Lanes cannot be renamed or removed. A typo in `lane add` stays in `driftseal lane`
+output; add the intended name and stop using the old one.
+
+If a `begin` names a lane whose `lane_add` is missing, DriftSeal infers the lane
+so `status`, `log`, and `lane` still work, and `lane add` can write the missing
+event. If the worktree's current-lane pointer names a lane the WAL no longer
+has, `status`, `log`, and `lane` fall back to `main` with a warning; `begin`
+still refuses until you `lane switch main` or add the lane.
+
+A derived lane index caches fold state, per-lane heads, reverse links, and WAL
+byte ranges in Git metadata (or beside a custom seal). It is reconstructable
+and is not committed with the log. Custom-home sidecars sit next to
+`events.jsonl` and are listed in that directory's `.gitignore`.
 
 ## Decisions and MADR
 
@@ -313,7 +324,8 @@ MADR tools, and the three migration tools. Resources are:
 - `.seal/madr/` stores numbered MADR documents.
 - `$DRIFTSEAL_HOME` replaces the `.seal` root.
 - The current lane and derived lane index live in Git metadata for a default
-  repository seal, or beside a custom seal. They are reconstructable and are not
+  repository seal, or beside a custom seal (`outcomes/.current-lane` and
+  `outcomes/.lane-index.json`, gitignored). They are reconstructable and are not
   part of the committed WAL.
 - Advisory hooks remind agents about lifecycle state but never broaden the
   repository's `AGENTS.md` policy.

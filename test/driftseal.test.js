@@ -5729,3 +5729,87 @@ test('current lane is local to a git worktree', () => {
   assert.match(runOther(['log']), /index in primary/);
   assert.match(run(['lane']), /current lane: index/);
 });
+
+test('an outcome that names a missing lane still reads and can be repaired', () => {
+  const { dir, run, events } = setup();
+  run(['lane', 'add', 'index']);
+  run(['lane', 'switch', 'index']);
+  run(['begin', 'index work']);
+  run(['end', '--status', 'abandoned', '--note', 'done']);
+  const logPath = path.join(dir, 'outcomes', 'events.jsonl');
+  const kept = events().filter((event) => event.type !== 'lane_add');
+  fs.writeFileSync(logPath, `${kept.map(JSON.stringify).join('\n')}\n`);
+  fs.rmSync(path.join(dir, 'outcomes', '.lane-index.json'), { force: true });
+
+  assert.match(run(['status']), /no outcome in progress/);
+  assert.match(run(['log']), /index work/);
+  assert.match(run(['lane']), /index/);
+  assert.match(run(['lane']), /inferred/);
+  assert.match(run(['lane', 'add', 'index']), /added lane index/);
+  assert.equal(
+    events().some((event) => event.type === 'lane_add' && event.lane === 'index'),
+    true
+  );
+  assert.doesNotMatch(run(['lane']), /inferred/);
+});
+
+test('status and log fall back when the current lane is missing from the WAL', () => {
+  const { git, run, runFail } = setupGitRepository('driftseal-stale-lane-');
+  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['commit', '-m', 'base']);
+  git(['checkout', '-b', 'feature']);
+  run(['lane', 'add', 'index']);
+  run(['lane', 'switch', 'index']);
+  git(['add', '.']);
+  git(['commit', '-m', 'index lane']);
+  git(['checkout', 'main']);
+
+  const status = run(['status']);
+  assert.match(status, /warning: current lane index does not exist; showing main/);
+  assert.match(status, /no outcome in progress/);
+  const listed = run(['lane']);
+  assert.match(listed, /warning: current lane index does not exist; showing main/);
+  assert.match(listed, /current lane: main/);
+  assert.match(runFail(['begin', 'should not start']).stderr, /current lane index does not exist/);
+  assert.match(run(['lane', 'switch', 'main']), /switched to lane main/);
+  assert.doesNotMatch(run(['status']), /warning: current lane/);
+});
+
+test('log keeps an open outcome visible when it belongs to another lane', () => {
+  const ours = setup();
+  const theirs = setup();
+  ours.run(['lane', 'add', 'index']);
+  ours.run(['lane', 'switch', 'index']);
+  ours.run(['begin', 'our index work']);
+  ours.run(['end', '--status', 'abandoned', '--note', 'done']);
+  theirs.run(['begin', 'their open work on main']);
+  ours.run(['absorb', path.join(theirs.dir, 'outcomes', 'events.jsonl')]);
+
+  const status = ours.run(['status']);
+  assert.match(status, /lane: index \(1 visible \/ 1 in lane\)/);
+  assert.match(status, /their open work on main/);
+  assert.match(status, /lane: main/);
+  const log = ours.run(['log']);
+  assert.match(log, /our index work/);
+  assert.match(log, /their open work on main/);
+  assert.match(log, /lane: main/);
+});
+
+test('custom-home lane sidecars are gitignored next to the WAL', () => {
+  const { dir, run } = setup();
+  run(['lane', 'add', 'index']);
+  run(['log']);
+  const ignore = fs.readFileSync(path.join(dir, 'outcomes', '.gitignore'), 'utf8');
+  assert.match(ignore, /^\.current-lane$/m);
+  assert.match(ignore, /^\.lane-index\.json$/m);
+});
+
+test('incremental WAL errors report the file line number', () => {
+  const { dir, run, runFail } = setup();
+  run(['begin', 'first']);
+  run(['end', '--status', 'abandoned', '--note', 'done']);
+  run(['log']);
+  const logPath = path.join(dir, 'outcomes', 'events.jsonl');
+  fs.appendFileSync(logPath, '{not-json\n');
+  assert.match(runFail(['status']).stderr, /corrupt log line 3 in /);
+});
