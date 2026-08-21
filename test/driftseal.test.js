@@ -1944,6 +1944,7 @@ test('ordinary outcomes ignore unrelated malformed decisions', () => {
   const { dir, run } = setup();
   const decisions = path.join(dir, 'madr');
   fs.mkdirSync(path.join(dir, 'outcomes'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'outcomes', 'events.jsonl'), '');
   fs.mkdirSync(decisions);
   fs.writeFileSync(path.join(decisions, '0001-broken.md'), '# 1. Broken\n\n## Status\n\n');
 
@@ -2233,7 +2234,7 @@ test('v1-to-v2 migration validates model grouping, copies MADRs, and never delet
   const checked = run(['migrate', 'v1-to-v2', 'check']);
   assert.match(checked, /valid and staged side-by-side with v1/);
   assert.match(checked, /after explicit user approval/);
-  assert.match(checked, /git rm -r -- \.intent-log \.decision-log/);
+  assert.match(checked, /rm -rf -- \.intent-log \.decision-log/);
   assert.match(
     run(['migrate', 'v1-to-v2', 'apply', '--plan', planFile]),
     /already staged with the same source and plan/
@@ -2809,6 +2810,233 @@ test('altered v1 MADR bytes after migration fail-close', () => {
   const altered = runFail(['status']);
   assert.match(altered.stderr, /unmigrated v1 state detected/);
   assert.match(altered.stderr, /does not match the already staged/);
+});
+
+test('parked v1 intent can be closed while fail-closed', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-parked-v1-'));
+  const env = { ...process.env };
+  delete env.DRIFTSEAL_HOME;
+  delete env.DRIFTSEAL_DECISION_HOME;
+  const git = (args) => execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...env,
+      GIT_AUTHOR_NAME: 'Test',
+      GIT_AUTHOR_EMAIL: 'test@example.com',
+      GIT_COMMITTER_NAME: 'Test',
+      GIT_COMMITTER_EMAIL: 'test@example.com',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'test@example.com']);
+  git(['config', 'user.name', 'Test']);
+  const { run, runFail } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const sourceLog = path.join(cwd, '.intent-log', 'events.jsonl');
+  fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
+  fs.writeFileSync(sourceLog, [
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: '2026-01-01T00:00:00.000Z', intent: 'closed v1 work' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: '2026-01-01T01:00:00.000Z', status: 'completed' },
+  ].map(JSON.stringify).join('\n') + '\n');
+  const park = path.resolve(cwd, git(['rev-parse', '--git-path', 'driftseal-in-progress.jsonl']).trim());
+  fs.mkdirSync(path.dirname(park), { recursive: true });
+  fs.writeFileSync(park, `${JSON.stringify({
+    schemaVersion: 4,
+    type: 'begin',
+    id: '2026-01-01-002',
+    ts: '2026-01-01T02:00:00.000Z',
+    intent: 'unfinished v1 work',
+  })}\n`);
+
+  const status = run(['status']);
+  assert.match(status, /2026-01-01-002/);
+  assert.match(status, /unfinished v1 work/);
+  assert.match(status, /parked v1 intent/);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal')), false);
+  assert.match(runFail(['begin', 'must close park first']).stderr, /parked v1 intent 2026-01-01-002/);
+  assert.match(runFail(['migrate', 'v1-to-v2', 'inspect']).stderr, /driftseal end --status abandoned/);
+  assert.match(
+    run(['end', '--status', 'abandoned', '--note', 'close parked v1 intent before migration']),
+    /2026-01-01-002 abandoned/
+  );
+  assert.equal(fs.existsSync(park), false);
+  const events = readJsonl(sourceLog);
+  assert.equal(events.some((event) => event.type === 'begin' && event.id === '2026-01-01-002'), true);
+  assert.equal(events.at(-1).type, 'end');
+  assert.equal(events.at(-1).id, '2026-01-01-002');
+  assert.equal(events.at(-1).status, 'abandoned');
+  const inspection = JSON.parse(run(['migrate', 'v1-to-v2', 'inspect', '--json']));
+  assert.deepEqual(inspection.records.map((record) => record.id), ['2026-01-01-001', '2026-01-01-002']);
+});
+
+test('empty outcomes directory does not disable MADR-only custom-home fail-closed', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-empty-outcomes-v1-'));
+  const legacyHome = path.join(cwd, 'legacy');
+  const legacyMadr = path.join(legacyHome, 'madr');
+  fs.mkdirSync(legacyMadr, { recursive: true });
+  fs.writeFileSync(path.join(legacyMadr, '0001-legacy-only.md'), 'legacy MADR-only context\n');
+  fs.mkdirSync(path.join(legacyHome, 'outcomes'), { recursive: true });
+  const { runFail } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: legacyHome,
+    DRIFTSEAL_DECISION_HOME: legacyMadr,
+  });
+  assert.match(runFail(['status']).stderr, /unmigrated v1 state detected/);
+  assert.match(runFail(['begin', 'must migrate first']).stderr, /migration is staged/);
+  assert.equal(fs.existsSync(path.join(legacyHome, 'outcomes', 'events.jsonl')), false);
+});
+
+test('mixed custom v1 layout fail-closed hint names the real log and .seal', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mixed-v1-layout-'));
+  const legacyHome = path.join(cwd, 'legacy');
+  fs.mkdirSync(legacyHome);
+  const sourceLog = path.join(legacyHome, 'events.jsonl');
+  fs.writeFileSync(sourceLog, [
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: 'begin', intent: 'keep custom log' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: 'end', status: 'completed' },
+  ].map(JSON.stringify).join('\n') + '\n');
+  const sourceMadr = path.join(cwd, '.decision-log');
+  fs.mkdirSync(sourceMadr);
+  fs.writeFileSync(path.join(sourceMadr, '0001-default-madr.md'), 'default decision bytes\n');
+  const { runFail } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: legacyHome,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const failed = runFail(['status']);
+  assert.match(failed.stderr, /unmigrated v1 state detected/);
+  assert.equal(failed.stderr.includes(sourceLog), true);
+  assert.equal(failed.stderr.includes(sourceMadr), true);
+  assert.doesNotMatch(failed.stderr, /\.intent-log/);
+  assert.match(failed.stderr, /--destination .*[.]seal/);
+});
+
+test('v1 intent log merge keeps incoming records', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v1-absorb-git-'));
+  const env = { ...process.env };
+  delete env.DRIFTSEAL_HOME;
+  delete env.DRIFTSEAL_DECISION_HOME;
+  const gitEnv = {
+    ...env,
+    GIT_AUTHOR_NAME: 'Test',
+    GIT_AUTHOR_EMAIL: 'test@example.com',
+    GIT_COMMITTER_NAME: 'Test',
+    GIT_COMMITTER_EMAIL: 'test@example.com',
+  };
+  const git = (args) => execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: gitEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'test@example.com']);
+  git(['config', 'user.name', 'Test']);
+  git([
+    'config',
+    '--local',
+    'merge.driftseal.driver',
+    `${process.execPath} ${DRIFTSEAL} absorb --git %O %A %B`,
+  ]);
+  const sourceLog = path.join(cwd, '.intent-log', 'events.jsonl');
+  fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
+  const writeLog = (records) => {
+    fs.writeFileSync(sourceLog, records.map(JSON.stringify).join('\n') + '\n');
+  };
+  writeLog([
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: '2026-01-01T00:00:00.000Z', intent: 'shared v1 work' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: '2026-01-01T01:00:00.000Z', status: 'completed' },
+  ]);
+  fs.writeFileSync(path.join(cwd, '.gitattributes'), '.intent-log/events.jsonl merge=driftseal\n');
+  git(['add', '.intent-log/events.jsonl', '.gitattributes']);
+  git(['commit', '-m', 'base']);
+
+  git(['checkout', '-b', 'feature']);
+  writeLog([
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: '2026-01-01T00:00:00.000Z', intent: 'shared v1 work' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: '2026-01-01T01:00:00.000Z', status: 'completed' },
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-002', ts: '2026-01-01T02:00:00.000Z', intent: 'feature v1 work' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-002', ts: '2026-01-01T03:00:00.000Z', status: 'completed' },
+  ]);
+  git(['add', '.intent-log/events.jsonl']);
+  git(['commit', '-m', 'feature']);
+
+  git(['checkout', 'main']);
+  writeLog([
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: '2026-01-01T00:00:00.000Z', intent: 'shared v1 work' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: '2026-01-01T01:00:00.000Z', status: 'completed' },
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-002', ts: '2026-01-01T04:00:00.000Z', intent: 'main v1 work' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-002', ts: '2026-01-01T05:00:00.000Z', status: 'completed' },
+  ]);
+  git(['add', '.intent-log/events.jsonl']);
+  git(['commit', '-m', 'main']);
+
+  git(['merge', 'feature', '--no-edit']);
+  const merged = readJsonl(sourceLog);
+  const begins = merged.filter((event) => event.type === 'begin');
+  assert.equal(begins.length, 3);
+  assert.equal(begins.some((event) => event.intent === 'main v1 work' || event.outcome === 'main v1 work'), true);
+  assert.equal(begins.some((event) => event.intent === 'feature v1 work' || event.outcome === 'feature v1 work'), true);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal')), false);
+});
+
+test('local-log v1 removal hint uses rm not git rm', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-local-log-v1-removal-'));
+  const env = { ...process.env };
+  delete env.DRIFTSEAL_HOME;
+  delete env.DRIFTSEAL_DECISION_HOME;
+  const gitEnv = {
+    ...env,
+    GIT_AUTHOR_NAME: 'Test',
+    GIT_AUTHOR_EMAIL: 'test@example.com',
+    GIT_COMMITTER_NAME: 'Test',
+    GIT_COMMITTER_EMAIL: 'test@example.com',
+  };
+  const git = (args) => execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: gitEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.email', 'test@example.com']);
+  git(['config', 'user.name', 'Test']);
+  const { run } = cliHarness(cwd, {
+    DRIFTSEAL_HOME: undefined,
+    DRIFTSEAL_DECISION_HOME: undefined,
+  });
+  const sourceLog = path.join(cwd, '.intent-log', 'events.jsonl');
+  const sourceMadr = path.join(cwd, '.decision-log');
+  fs.mkdirSync(path.dirname(sourceLog), { recursive: true });
+  fs.mkdirSync(sourceMadr, { recursive: true });
+  fs.writeFileSync(sourceLog, [
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: 'begin', intent: 'ship v1 work' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: 'end', status: 'completed' },
+  ].map(JSON.stringify).join('\n') + '\n');
+  fs.writeFileSync(path.join(sourceMadr, '0001-context.md'), 'context\n');
+  const inspection = JSON.parse(run(['migrate', 'v1-to-v2', 'inspect', '--json']));
+  const plan = {
+    format: 'driftseal-v1-to-v2-plan',
+    sourceFingerprint: inspection.sourceFingerprint,
+    groups: [{
+      outcome: 'Ship v1 work',
+      summary: 'Migrated so the removal hint can be checked.',
+      sourceIds: ['2026-01-01-001'],
+    }],
+    excluded: [],
+  };
+  run(['migrate', 'v1-to-v2', 'apply', '--plan-json', JSON.stringify(plan)]);
+  const untracked = run(['migrate', 'v1-to-v2', 'check']);
+  assert.match(untracked, /rm -rf -- \.intent-log \.decision-log/);
+  assert.doesNotMatch(untracked, /git rm/);
+
+  git(['add', '.intent-log', '.decision-log']);
+  git(['commit', '-m', 'track v1']);
+  const tracked = run(['migrate', 'v1-to-v2', 'check']);
+  assert.match(tracked, /git rm -r -- \.intent-log \.decision-log/);
+  assert.doesNotMatch(tracked, /rm -rf/);
 });
 
 test('a .decision-log symlink to v2 MADR is not treated as unmigrated v1', () => {
@@ -4128,6 +4356,7 @@ test('decision parsing supports CRLF and rejects malformed status sections', () 
   const { dir, run, runFail } = setup();
   const decisions = path.join(dir, 'madr');
   fs.mkdirSync(path.join(dir, 'outcomes'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'outcomes', 'events.jsonl'), '');
   fs.mkdirSync(decisions);
   const file = path.join(decisions, '0001-crlf.md');
   fs.writeFileSync(
@@ -4152,6 +4381,7 @@ test('decision catalog rejects canonical duplicates, title mismatches, and symli
   const { dir, runFail } = setup();
   const decisions = path.join(dir, 'madr');
   fs.mkdirSync(path.join(dir, 'outcomes'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'outcomes', 'events.jsonl'), '');
   fs.mkdirSync(decisions);
   const record = (id, title) => `# ${id}. ${title}\n\n## Status\n\nAccepted\n`;
 
@@ -4249,6 +4479,7 @@ test('decision ids remain usable beyond 9999 and duplicate ids are rejected by s
   const { dir, run, runFail } = setup();
   const decisions = path.join(dir, 'madr');
   fs.mkdirSync(path.join(dir, 'outcomes'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'outcomes', 'events.jsonl'), '');
   fs.mkdirSync(decisions);
   fs.writeFileSync(path.join(decisions, '9999-placeholder.md'), '# 9999. Placeholder\n\n## Status\n\nAccepted\n');
 

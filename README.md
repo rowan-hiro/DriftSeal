@@ -176,7 +176,11 @@ repository commands fail closed instead of silently starting an unrelated
 `.seal` lineage. A MADR-only v1 repository may migrate without creating an
 empty intent log first.
 
-1. Close every v1 intent. A parked v1 intent blocks migration.
+1. Close every v1 intent. A parked v1 intent blocks migration. After upgrading
+   the CLI, close it with `driftseal end` (for example `--status abandoned`)
+   before `inspect`. Merge or freeze branches that still edit `.intent-log`
+   first; `absorb --git` keeps both sides of a v1 log merge instead of dropping
+   theirs.
 2. Inspect the normalized source:
 
    ```sh
@@ -200,11 +204,13 @@ v2 log, copies every v1 MADR byte-for-byte, and records a name, size, and hash
 manifest so `check` can still verify them after v1 is removed. Later MADR content
 is accepted only when the latest valid v2 reconciliation attests its current hash. `apply`
 creates `.seal/` beside `.intent-log/` and `.decision-log/`; it never deletes v1
-data. After the user has reviewed and approved the result, remove the old tracked
-paths manually. Running `check` afterward reports migration complete.
+data. After the user has reviewed and approved the result, remove the old paths
+manually. `check` prints `git rm` when those paths are tracked and `rm -rf` when
+they are local-only. Running `check` afterward reports migration complete.
 
 If v1 used custom storage, keep the source and destination explicit for inspect
-and apply. The migration marker records repository-local paths as portable
+and apply. `DRIFTSEAL_DECISION_HOME` is a v1-only default for the MADR source
+and for fail-closed detection; v2 runtime ignores it. The migration marker records repository-local paths as portable
 identities, so later checks recover the source paths from the destination even
 after the repository moves. The destination must not contain, or be contained
 by, the source log file or MADR directory. In particular, an inherited v1

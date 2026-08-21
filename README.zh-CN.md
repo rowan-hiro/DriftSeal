@@ -161,7 +161,10 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 closed，避免悄悄创建一条与 v1 历史无关的 `.seal` lineage。只有 MADR、没有 intent
 log 的 v1 repo 也可以直接 migration，不必先创建空 log。
 
-1. 先关闭所有 v1 intent；只要还有 parked v1 intent，migration 就会拒绝继续。
+1. 先关闭所有 v1 intent。parked v1 intent 会挡住 migration；升级 CLI 之后用
+   `driftseal end`（例如 `--status abandoned`）关掉它，再跑 `inspect`。先合并或冻结
+   仍会改 `.intent-log` 的分支；`absorb --git` 会保留 v1 log 合并的两侧，而不是丢掉
+   theirs。
 2. 读取规范化后的源数据：
 
    ```sh
@@ -182,11 +185,13 @@ log 的 v1 repo 也可以直接 migration，不必先创建空 log。
 所有 v1 MADR，并记录文件名、大小与 hash manifest，使 v1 删除后 `check` 仍能验证
 完整性。后续 MADR 内容只有在最新的有效 v2 reconciliation 已记录其当前 hash 时才会被接受。
 `apply` 只会在 `.intent-log/`、`.decision-log/` 旁边新建 `.seal/`，绝不删除 v1 数据。
-用户审阅并明确认可后，再手动移除旧 tracked paths；随后执行 `check` 会报告 migration
-已完成。
+用户审阅并明确认可后，再手动移除旧路径。`check` 在这些路径仍被 git 跟踪时打印
+`git rm`，在 `--local-log` 这类未跟踪布局下打印 `rm -rf`。随后执行 `check` 会报告
+migration 已完成。
 
 如果 v1 使用自定义存储，inspect 与 apply 都要明确给出 source 和 destination。
-migration marker 会保存这些路径的规范 identity，之后 `check` 可以从 destination 找回
+`DRIFTSEAL_DECISION_HOME` 只作为 v1 的 MADR source 默认值和 fail-closed 检测来源，
+v2 运行期会忽略它。migration marker 会保存这些路径的规范 identity，之后 `check` 可以从 destination 找回
 source。source 与 destination 不能互相包含，尤其不能把从 v1 继承的
 `DRIFTSEAL_HOME` 同时当成 v2 destination：
 

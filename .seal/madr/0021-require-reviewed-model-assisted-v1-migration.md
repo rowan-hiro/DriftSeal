@@ -73,3 +73,10 @@ Field testing confirmed reviewed append-only migration refresh is required when 
 Status: Accepted → Accepted
 
 Fail-closed now treats leftover DRIFTSEAL_HOME as unsafe for any discovered staged seal root, including custom destinations, and attests leftover v1 records only via imported or excluded source ids plus MADR sha256.
+
+<!-- driftseal-reconciliation: cff82170-6f7f-4b40-abc4-a784d7c866f1 -->
+### 2026-08-21T08:30:34.657Z — Outcome `2026-08-21-011`
+
+Status: Accepted → Accepted
+
+Fail-closed now prefers the real custom v1 log over default .decision-log, ignores empty outcomes directories, lets end close a parked v1 intent, keeps both sides of a v1 absorb --git merge, and prints rm -rf when v1 paths are untracked.

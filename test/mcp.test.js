@@ -499,3 +499,31 @@ test('MCP migration destination remains visible to ordinary workflow tools', asy
     await client.close();
   }
 });
+
+test('isolateStorage still fail-closes inherited custom v1 layouts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-isolate-v1-'));
+  const legacy = path.join(root, 'legacy');
+  const sourceLog = path.join(legacy, 'events.jsonl');
+  const sourceDecisions = path.join(legacy, 'decisions');
+  fs.mkdirSync(sourceDecisions, { recursive: true });
+  fs.writeFileSync(sourceLog, [
+    { schemaVersion: 4, type: 'begin', id: '2026-01-01-001', ts: 'begin', intent: 'must not start v2' },
+    { schemaVersion: 4, type: 'end', id: '2026-01-01-001', ts: 'end', status: 'completed' },
+  ].map(JSON.stringify).join('\n') + '\n');
+  fs.writeFileSync(path.join(sourceDecisions, '0001-legacy.md'), 'legacy decision bytes\n');
+
+  const previousHome = process.env.DRIFTSEAL_HOME;
+  const previousDecisions = process.env.DRIFTSEAL_DECISION_HOME;
+  process.env.DRIFTSEAL_HOME = legacy;
+  process.env.DRIFTSEAL_DECISION_HOME = sourceDecisions;
+  try {
+    const api = createApi({ root, isolateStorage: true });
+    assert.throws(() => api.begin({ outcome: 'must migrate first' }), /unmigrated v1 state detected/);
+    assert.equal(fs.existsSync(path.join(root, '.seal', 'outcomes', 'events.jsonl')), false);
+  } finally {
+    if (previousHome === undefined) delete process.env.DRIFTSEAL_HOME;
+    else process.env.DRIFTSEAL_HOME = previousHome;
+    if (previousDecisions === undefined) delete process.env.DRIFTSEAL_DECISION_HOME;
+    else process.env.DRIFTSEAL_DECISION_HOME = previousDecisions;
+  }
+});

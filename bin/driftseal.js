@@ -198,6 +198,17 @@ function decisionDir() {
   return path.join(sealRoot(), 'madr');
 }
 
+// isolateStorage clears write-target env vars; detection still sees the inherited v1 homes.
+let isolatedV1Detection = null;
+
+function v1HomeEnv() {
+  return process.env.DRIFTSEAL_HOME || isolatedV1Detection?.home || null;
+}
+
+function v1DecisionHomeEnv() {
+  return process.env.DRIFTSEAL_DECISION_HOME || isolatedV1Detection?.decisions || null;
+}
+
 // A corrupt log line must not wedge reads; a non-string head degrades to null.
 function normalizeHead(value) {
   return typeof value === 'string' ? value : null;
@@ -685,6 +696,14 @@ function ensureDirectoryDurable(directory) {
   }
   fs.mkdirSync(target, { recursive: true });
   for (const created of missing.reverse()) fsyncDirectory(path.dirname(created));
+}
+
+function ensureV2OutcomeLogExists() {
+  ensureDirectoryDurable(logDir());
+  if (fs.existsSync(logFile())) return;
+  if (isParkableOutcomeLog()) return;
+  fs.writeFileSync(logFile(), '');
+  fsyncDirectory(logDir());
 }
 
 function appendEventTo(file, event) {
@@ -4045,7 +4064,7 @@ function absorbUsage() {
   );
 }
 
-function loadAbsorbSide(file, label, { repairTail = false, allowMissing = false } = {}) {
+function loadAbsorbSide(file, label, { repairTail = false, allowMissing = false, allowLegacy = false } = {}) {
   if (!fs.existsSync(file)) {
     if (allowMissing) return { records: [], conflict: false };
     fail(`outcome log not found: ${file}`);
@@ -4058,12 +4077,12 @@ function loadAbsorbSide(file, label, { repairTail = false, allowMissing = false 
   const conflict = parseConflictContent(content);
   if (conflict) {
     return {
-      ours: parseJsonlRecords(conflict.oursText, `${label} ours`),
-      theirs: parseJsonlRecords(conflict.theirsText, `${label} theirs`),
+      ours: parseJsonlRecords(conflict.oursText, `${label} ours`, { allowLegacy }),
+      theirs: parseJsonlRecords(conflict.theirsText, `${label} theirs`, { allowLegacy }),
       conflict: true,
     };
   }
-  return { records: parseJsonlRecords(content, label), conflict: false };
+  return { records: parseJsonlRecords(content, label, { allowLegacy }), conflict: false };
 }
 
 function finishAbsorb({
@@ -4304,14 +4323,16 @@ function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
 }
 
 function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
-  const base = loadAbsorbSide(baseFile, baseFile, { allowMissing: true });
-  const ours = loadAbsorbSide(oursFile, oursFile);
-  const theirs = loadAbsorbSide(theirsFile, theirsFile);
+  const base = loadAbsorbSide(baseFile, baseFile, { allowMissing: true, allowLegacy: true });
+  const ours = loadAbsorbSide(oursFile, oursFile, { allowLegacy: true });
+  const theirs = loadAbsorbSide(theirsFile, theirsFile, { allowLegacy: true });
   if (base.conflict || ours.conflict || theirs.conflict) {
     fail('git merge driver received a log that still contains conflict markers');
   }
   const otherHead =
-    gitOtherHead() || gitFindCommitForFile(theirsFile, '.seal/outcomes/events.jsonl');
+    gitOtherHead() ||
+    gitFindCommitForFile(theirsFile, '.seal/outcomes/events.jsonl') ||
+    gitFindCommitForFile(theirsFile, '.intent-log/events.jsonl');
   const mergeBase = otherHead ? gitMergeBaseFor('HEAD', otherHead) : null;
   let followupMessage = null;
   if (!otherHead) {
@@ -4550,16 +4571,25 @@ function encodeMigrationIdentityPath(file) {
   return { base: 'absolute', path: resolved };
 }
 
+function defaultV1SourceLog() {
+  const home = v1HomeEnv();
+  if (home) {
+    const configured = path.join(home, 'events.jsonl');
+    if (fs.existsSync(configured)) return configured;
+  }
+  return path.join(process.cwd(), '.intent-log', 'events.jsonl');
+}
+
 function migrationPaths(flags = {}, { storedSource } = {}) {
   const sourceLog = canonicalPath(
     flags['source-log'] ||
       resolveMigrationIdentityPath(storedSource?.log) ||
-      path.join(process.cwd(), '.intent-log', 'events.jsonl')
+      defaultV1SourceLog()
   );
   const sourceDecisions = canonicalPath(
     flags['source-decisions'] ||
       resolveMigrationIdentityPath(storedSource?.decisions) ||
-      process.env.DRIFTSEAL_DECISION_HOME ||
+      v1DecisionHomeEnv() ||
       path.join(process.cwd(), '.decision-log')
   );
   const destination = canonicalPath(flags.destination || sealRoot());
@@ -4575,6 +4605,50 @@ function legacyParkFile() {
   if (!isGitWorkTree()) return null;
   const gitPath = gitCapture(['rev-parse', '--git-path', 'driftseal-in-progress.jsonl']);
   return gitPath ? path.resolve(process.cwd(), gitPath) : null;
+}
+
+function legacyIntentLogFile() {
+  return path.resolve(process.cwd(), '.intent-log', 'events.jsonl');
+}
+
+function legacyParkedIntent() {
+  const park = legacyParkFile();
+  if (!park || !fs.existsSync(park)) return null;
+  try {
+    const records = parseJsonlRecords(fs.readFileSync(park, 'utf8'), park, { allowLegacy: true });
+    return openOutcome(fold(records.map((record) => record.event)));
+  } catch {
+    return null;
+  }
+}
+
+function closeLegacyParkedIntent(status, note) {
+  const parked = legacyParkedIntent();
+  if (!parked) fail('no parked v1 intent to close');
+  const park = legacyParkFile();
+  const log = legacyIntentLogFile();
+  const parkRecords = parseJsonlRecords(fs.readFileSync(park, 'utf8'), park, { allowLegacy: true });
+  const logRecords = fs.existsSync(log)
+    ? parseJsonlRecords(fs.readFileSync(log, 'utf8'), log, { allowLegacy: true })
+    : [];
+  const endEvent = {
+    schemaVersion: LEGACY_EVENT_SCHEMA_VERSION,
+    type: 'end',
+    id: parked.id,
+    ts: new Date().toISOString(),
+    status,
+    note: note || null,
+  };
+  writeJsonl(log, [
+    ...logRecords,
+    ...parkRecords,
+    { raw: JSON.stringify(endEvent), event: normalizeEvent(endEvent, logRecords.length + parkRecords.length + 1) },
+  ]);
+  fs.unlinkSync(park);
+  fsyncDirectory(path.dirname(park));
+  const closed = fold([...logRecords, ...parkRecords].map((record) => record.event).concat(normalizeEvent(endEvent, 1)))
+    .find((record) => record.id === parked.id);
+  return closed || { ...parked, status, note: note || null, tsEnd: endEvent.ts };
 }
 
 function migrationDecisionFiles(directory) {
@@ -4698,7 +4772,10 @@ function migrationSourceSnapshot(flags = {}, { storedSource } = {}) {
   }
   const park = legacyParkFile();
   if (park && fs.existsSync(park)) {
-    fail('v1 migration requires no open intent; close the parked v1 intent first');
+    fail(
+      'v1 migration requires no open intent; close the parked v1 intent first:\n' +
+        '  driftseal end --status abandoned --note "close parked v1 intent before migration"'
+    );
   }
   const records = fold(
     parseJsonlRecords(content.rawLog, content.sourceLog, { allowLegacy: true })
@@ -5098,6 +5175,47 @@ function applyMigration(snapshot, validated) {
   };
 }
 
+function gitTracksPath(target) {
+  if (!isGitWorkTree()) return false;
+  const root = gitWorktreeRoot();
+  if (!root) return false;
+  const resolved = canonicalPath(target);
+  if (canonicalPath(root) !== resolved && !pathContains(root, resolved)) return false;
+  const relative = path.relative(root, resolved).split(path.sep).join('/');
+  const listing = gitCaptureRaw(
+    ['ls-files', '-z', '--', `:(literal)${relative}`, `:(literal)${relative}/`],
+    root
+  );
+  if (!listing) return false;
+  return listing.split('\0').some((file) => file.length > 0);
+}
+
+function displayV1RemovalPath(target) {
+  const cwd = canonicalPath(process.cwd());
+  const resolved = canonicalPath(target);
+  const relative = path.relative(cwd, resolved).split(path.sep).join('/');
+  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) return relative;
+  return resolved;
+}
+
+function v1RemovalHint(snapshot) {
+  const items = [];
+  if (snapshot.sourceLogPresent && fs.existsSync(path.dirname(snapshot.sourceLog))) {
+    items.push(path.dirname(snapshot.sourceLog));
+  }
+  if (fs.existsSync(snapshot.sourceDecisions)) items.push(snapshot.sourceDecisions);
+  if (items.length === 0) return null;
+  const tracked = items.every((item) => gitTracksPath(item));
+  const shown = items.map((item) => {
+    const relative = displayV1RemovalPath(item);
+    return /[\s"'$]/.test(relative) ? JSON.stringify(relative) : relative;
+  });
+  const command = tracked && isGitWorkTree()
+    ? `git rm -r -- ${shown.join(' ')}`
+    : `rm -rf -- ${shown.join(' ')}`;
+  return `after explicit user approval, remove the v1 source paths manually: ${command}`;
+}
+
 function checkMigration(snapshot, { sourceMissing = false } = {}) {
   const destinationLog = path.join(snapshot.destination, 'outcomes', 'events.jsonl');
   const migration = findMigrationEvent(destinationLog);
@@ -5140,12 +5258,8 @@ function checkMigration(snapshot, { sourceMissing = false } = {}) {
     printLine('v1-to-v2 migration complete; v1 source paths are absent and the v2 log is valid');
   } else {
     printLine('v1-to-v2 migration is valid and staged side-by-side with v1');
-    if (snapshot.sourceLog === path.resolve(process.cwd(), '.intent-log', 'events.jsonl') &&
-      snapshot.sourceDecisions === path.resolve(process.cwd(), '.decision-log')) {
-      printLine('after explicit user approval, remove the tracked v1 paths manually: git rm -r -- .intent-log .decision-log');
-    } else {
-      printLine(`after explicit user approval, remove the v1 source paths manually: ${snapshot.sourceLog} and ${snapshot.sourceDecisions}`);
-    }
+    const hint = v1RemovalHint(snapshot);
+    if (hint) printLine(hint);
   }
   return {
     valid: true,
@@ -5284,6 +5398,16 @@ const commands = {
       fail(`invalid status "${status}" (expected: ${END_STATUSES.join(', ')})`);
     }
 
+    const parkedV1 = legacyParkedIntent();
+    if (parkedV1) {
+      if (positionals.length > 0 && positionals[0] !== parkedV1.id) {
+        fail(`unknown outcome id: ${positionals[0]}`);
+      }
+      const closed = closeLegacyParkedIntent(status, flags.note);
+      printLine(`${closed.id} ${status}`);
+      return publicOutcome(closed);
+    }
+
     let events = readEvents({ repairTail: true });
     let records = fold(events);
     let target;
@@ -5383,6 +5507,12 @@ const commands = {
   status(argv, { readOnly = false } = {}) {
     const { positionals } = parseArgs(argv, {}, 'status');
     if (positionals.length > 0) fail(usageFor('status'));
+    const parkedV1 = legacyParkedIntent();
+    if (parkedV1) {
+      printLine(render(parkedV1));
+      printLine('parked v1 intent; close it with: driftseal end --status abandoned --note "close parked v1 intent before migration"');
+      return publicOutcome(parkedV1);
+    }
     const open = openOutcome(fold(readEvents({ repairTail: true, readOnly })));
     if (!open) {
       printLine('no outcome in progress');
@@ -5396,6 +5526,10 @@ const commands = {
     const { positionals, flags } = parseArgs(argv, { last: '-n', all: 'boolean' }, 'log');
     if (positionals.length > 0) fail(usageFor('log'));
     let records = fold(readEvents({ repairTail: true, readOnly }));
+    const parkedV1 = legacyParkedIntent();
+    if (parkedV1 && !records.some((record) => record.id === parkedV1.id && record.status === 'in_progress')) {
+      records = [...records, parkedV1];
+    }
     if (!flags.all) records = records.filter((record) => !record.reclaimed);
     if (flags.last) {
       const n = positiveInteger(flags.last, '--last');
@@ -5547,7 +5681,7 @@ const commands = {
         options: flags.option || [],
         consequences: flags.consequence || [],
       });
-      ensureDirectoryDurable(logDir());
+      ensureV2OutcomeLogExists();
       ensureDirectoryDurable(decisionDir());
       atomicCreateFile(path.join(decisionDir(), file), content);
       const decision = findDecision(String(id));
@@ -5919,8 +6053,8 @@ usage:
                                  model-assisted, validated migration that never deletes v1 data
 
 migration paths:
-  --source-log <file>           v1 events.jsonl (default: .intent-log/events.jsonl)
-  --source-decisions <dir>      v1 MADR directory (default: .decision-log)
+  --source-log <file>           v1 events.jsonl (default: $DRIFTSEAL_HOME/events.jsonl or .intent-log/events.jsonl)
+  --source-decisions <dir>      v1 MADR directory (default: $DRIFTSEAL_DECISION_HOME or .decision-log)
   --destination <dir>           v2 seal root (default: $DRIFTSEAL_HOME or .seal)
   driftseal --version | -V             print the installed DriftSeal version
   driftseal help
@@ -5934,6 +6068,7 @@ decision add options:
 seal root: $DRIFTSEAL_HOME, or .seal in the current directory
 outcome log: <seal-root>/outcomes/events.jsonl
 MADR records: <seal-root>/madr/
+$DRIFTSEAL_DECISION_HOME is a v1-only default for migration source detection; v2 runtime ignores it.
 In a Git worktree, begin parks an open outcome in Git metadata until end, so merge does not need a log-only commit.`);
     return null;
   },
@@ -5998,7 +6133,14 @@ function mutationResources(cmd, argv) {
   if (cmd === 'init') return [process.cwd()];
   if (cmd === 'migrate') return [process.cwd()];
   if (cmd === 'reclaim' || cmd === 'unreclaim') return [logDir()];
+  if (cmd === 'absorb' && argv[0] === '--git') {
+    const ours = argv[2];
+    return ours ? [path.dirname(path.resolve(ours))] : [process.cwd()];
+  }
   if (cmd === 'absorb') return [logDir(), decisionDir()];
+  if (cmd === 'end' && legacyParkedIntent()) {
+    return [path.dirname(legacyIntentLogFile())];
+  }
   if (cmd === 'begin' && !argv.some((arg) => arg === '--decision' || arg.startsWith('--decision='))) {
     return [logDir()];
   }
@@ -6020,10 +6162,6 @@ function usesV2RepositoryState(cmd, rest) {
 function looksLikeV2SealRoot(root) {
   const resolved = canonicalPath(root);
   if (fs.existsSync(path.join(resolved, 'outcomes', 'events.jsonl'))) return true;
-  const outcomeDir = path.join(resolved, 'outcomes');
-  try {
-    if (fs.statSync(outcomeDir).isDirectory()) return true;
-  } catch {}
   return resolved === canonicalPath(path.join(process.cwd(), '.seal'));
 }
 
@@ -6157,11 +6295,10 @@ function unmigratedV1Source() {
   const migration = repositoryMigrationEvent();
   const defaultLog = path.resolve(process.cwd(), '.intent-log', 'events.jsonl');
   const defaultDecisions = path.resolve(process.cwd(), '.decision-log');
-  const configuredLog = process.env.DRIFTSEAL_HOME
-    ? path.resolve(process.env.DRIFTSEAL_HOME, 'events.jsonl')
-    : null;
-  const configuredDecisions = process.env.DRIFTSEAL_DECISION_HOME
-    ? path.resolve(process.env.DRIFTSEAL_DECISION_HOME)
+  const home = v1HomeEnv();
+  const configuredLog = home ? path.resolve(home, 'events.jsonl') : null;
+  const configuredDecisions = v1DecisionHomeEnv()
+    ? path.resolve(v1DecisionHomeEnv())
     : defaultDecisions;
   const candidates = [{
     sourceLog: defaultLog,
@@ -6172,13 +6309,14 @@ function unmigratedV1Source() {
       sourceLog: configuredLog,
       sourceDecisions: configuredDecisions,
     });
-  } else if (process.env.DRIFTSEAL_DECISION_HOME) {
+  } else if (v1DecisionHomeEnv()) {
     candidates.push({
       sourceLog: defaultLog,
       sourceDecisions: configuredDecisions,
     });
   }
   const seen = new Set();
+  const found = [];
   for (const candidate of candidates) {
     const key = `${canonicalPath(candidate.sourceLog)}\0${canonicalPath(candidate.sourceDecisions)}`;
     if (seen.has(key)) continue;
@@ -6188,9 +6326,16 @@ function unmigratedV1Source() {
       migrationDecisionFiles(candidate.sourceDecisions).length > 0;
     if (!hasLog && !hasDecisions) continue;
     if (migration && migrationCoversCandidate(candidate, migration)) continue;
-    return candidate;
+    found.push({ ...candidate, hasLog, hasDecisions });
   }
-  return null;
+  if (found.length === 0) return null;
+  const withLog = found.filter((candidate) => candidate.hasLog);
+  const pool = withLog.length > 0 ? withLog : found;
+  if (configuredLog) {
+    const configured = pool.find((candidate) => canonicalPath(candidate.sourceLog) === canonicalPath(configuredLog));
+    if (configured) return configured;
+  }
+  return pool[0];
 }
 
 function staleInheritedSealHome() {
@@ -6206,31 +6351,48 @@ function staleInheritedSealHome() {
   };
 }
 
+function suggestedMigrationDestination(source) {
+  const configured = canonicalPath(sealRoot());
+  const defaultSeal = canonicalPath(path.join(process.cwd(), '.seal'));
+  if (
+    pathContains(source.sourceLog, configured) ||
+    pathContains(configured, source.sourceLog) ||
+    pathContains(source.sourceDecisions, configured) ||
+    pathContains(configured, source.sourceDecisions) ||
+    fs.existsSync(path.join(configured, 'events.jsonl'))
+  ) {
+    return defaultSeal;
+  }
+  return configured;
+}
+
+function unmigratedV1Message(source) {
+  const destination = suggestedMigrationDestination(source);
+  const staged = repositoryMigrationEvent();
+  const mismatch = staged
+    ? 'it does not match the already staged v1-to-v2 migration; v2 repository commands are disabled until the extra v1 source is removed\n'
+    : 'v2 repository commands are disabled until migration is staged\n';
+  const parked = legacyParkedIntent();
+  const parkHint = parked
+    ? `a parked v1 intent ${parked.id} is still open; close it first:\n` +
+      '  driftseal end --status abandoned --note "close parked v1 intent before migration"\n'
+    : '';
+  return (
+    `unmigrated v1 state detected at ${source.sourceLog} or ${source.sourceDecisions}; ` +
+    mismatch +
+    parkHint +
+    `run: driftseal migrate v1-to-v2 inspect --source-log ${JSON.stringify(source.sourceLog)} ` +
+      `--source-decisions ${JSON.stringify(source.sourceDecisions)} --destination ${JSON.stringify(destination)}\n` +
+    'if DRIFTSEAL_HOME points to v1 storage, unset or update it after migration'
+  );
+}
+
 function assertV2RepositoryReady(cmd, rest) {
   if (!usesV2RepositoryState(cmd, rest)) return;
+  if (cmd === 'absorb' && rest[0] === '--git') return;
+  if (['end', 'status', 'log'].includes(cmd) && legacyParkedIntent()) return;
   const source = unmigratedV1Source();
-  if (source) {
-    let destination = path.resolve(sealRoot());
-    if (
-      pathContains(source.sourceLog, destination) ||
-      pathContains(destination, source.sourceLog) ||
-      pathContains(source.sourceDecisions, destination) ||
-      pathContains(destination, source.sourceDecisions)
-    ) {
-      destination = path.resolve(process.cwd(), '.seal');
-    }
-    const staged = repositoryMigrationEvent();
-    const mismatch = staged
-      ? 'it does not match the already staged v1-to-v2 migration; v2 repository commands are disabled until the extra v1 source is removed\n'
-      : 'v2 repository commands are disabled until migration is staged\n';
-    fail(
-      `unmigrated v1 state detected at ${source.sourceLog} or ${source.sourceDecisions}; ` +
-        mismatch +
-        `run: driftseal migrate v1-to-v2 inspect --source-log ${JSON.stringify(source.sourceLog)} ` +
-        `--source-decisions ${JSON.stringify(source.sourceDecisions)} --destination ${JSON.stringify(destination)}\n` +
-        'if DRIFTSEAL_HOME points to v1 storage, unset or update it after migration'
-    );
-  }
+  if (source) fail(unmigratedV1Message(source));
   const staleHome = staleInheritedSealHome();
   if (!staleHome) return;
   fail(
@@ -6276,6 +6438,8 @@ function dispatch(argv) {
           const hookFile = hookLogFile();
           if (!hookFile) return { data: fn(rest), exitCode: 0 };
           resources = [path.dirname(hookFile)];
+        } else if (legacyParkedIntent()) {
+          resources = [path.dirname(legacyIntentLogFile())];
         } else {
           resources = [logDir()];
         }
@@ -6352,6 +6516,10 @@ function runCommand(argv, { root = process.cwd(), isolateStorage = false, captur
   try {
     process.chdir(fixedRoot);
     if (isolateStorage) {
+      isolatedV1Detection = {
+        home: process.env.DRIFTSEAL_HOME || null,
+        decisions: process.env.DRIFTSEAL_DECISION_HOME || null,
+      };
       delete process.env.DRIFTSEAL_HOME;
       delete process.env.DRIFTSEAL_DECISION_HOME;
     }
@@ -6372,6 +6540,7 @@ function runCommand(argv, { root = process.cwd(), isolateStorage = false, captur
   } finally {
     activeOutput = previousOutput;
     process.chdir(previousCwd);
+    isolatedV1Detection = null;
     if (previousIntentHome === undefined) delete process.env.DRIFTSEAL_HOME;
     else process.env.DRIFTSEAL_HOME = previousIntentHome;
     if (previousDecisionHome === undefined) delete process.env.DRIFTSEAL_DECISION_HOME;

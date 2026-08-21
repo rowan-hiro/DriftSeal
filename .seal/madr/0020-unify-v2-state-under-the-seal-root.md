@@ -45,3 +45,10 @@ Confirmed the unified v2 seal root while adding explicit migration source and de
 Status: Accepted → Accepted
 
 Kept CLI and API destination overrides while fixing MCP migration to the server repository seal root and making in-repository source identities portable.
+
+<!-- driftseal-reconciliation: 7f3fd124-8a0a-40dd-8f15-7b1207917bee -->
+### 2026-08-21T08:30:34.508Z — Outcome `2026-08-21-011`
+
+Status: Accepted → Accepted
+
+v2 runtime still ignores DRIFTSEAL_DECISION_HOME, but isolateStorage now preserves inherited HOME and DECISION_HOME for fail-closed v1 detection while writes stay at the repository seal root.
