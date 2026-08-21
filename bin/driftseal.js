@@ -4440,6 +4440,7 @@ function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap, hashMap = ne
 
 function repairDuplicateOutcomeRecords(records, decisionMap, hashMap = new Map()) {
   const seenBegins = new Set();
+  const seenLanes = new Set();
   const intentMap = new Map();
   const used = [];
   const mappings = [];
@@ -4447,6 +4448,10 @@ function repairDuplicateOutcomeRecords(records, decisionMap, hashMap = new Map()
   let incomingSide = false;
   for (const record of records) {
     let event = record.event;
+    if (event.type === 'lane_add') {
+      if (seenLanes.has(event.lane)) continue;
+      seenLanes.add(event.lane);
+    }
     if (isOutcomeStart(event) && seenBegins.has(event.id)) {
       incomingSide = true;
       const { date } = parseOutcomeId(event.id);
@@ -4536,8 +4541,12 @@ function resolveOpenIntents(
   abandon,
   { allowConflict = false, overlay = [], parkedOpen = null } = {}
 ) {
-  const oursOpen = openOutcome(fold(oursRecords.map((record) => record.event)));
-  const theirsOpen = openOutcome(fold(theirsRecords.map((record) => record.event)));
+  const oursOpen = openOutcome(
+    fold(oursRecords.map((record) => record.event), { allowUnknownLanes: true })
+  );
+  const theirsOpen = openOutcome(
+    fold(theirsRecords.map((record) => record.event), { allowUnknownLanes: true })
+  );
   try {
     openOutcome(fold([...result, ...overlay].map((record) => record.event)));
     return { abandoned: null, conflict: false, parkedClosed: false };

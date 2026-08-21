@@ -4812,10 +4812,8 @@ test('absorb drops a duplicate lane_add and keeps ours', () => {
   const laneAdds = events.filter((event) => event.type === 'lane_add');
   assert.equal(laneAdds.length, 1);
   assert.equal(laneAdds[0].description, 'ours');
-  assert.equal(
-    events.some((event) => event.type === 'begin' && event.outcome === 'theirs index work'),
-    true
-  );
+  const absorbed = events.find((event) => event.type === 'begin' && event.outcome === 'theirs index work');
+  assert.equal(absorbed.lane, 'index');
 });
 
 test('absorb refuses two in_progress outcomes unless an abandon flag is given', () => {
