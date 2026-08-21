@@ -1,14 +1,14 @@
 {
   "name": "driftseal",
-  "version": "1.4.0",
-  "description": "Seal intent, verification, and decisions into an auditable workflow for agentic coding",
+  "version": "2.0.0",
+  "description": "Seal outcomes, verification, and decisions into an auditable workflow for agentic coding",
   "keywords": [
     "driftseal",
     "agents",
     "agentic-coding",
     "agent-safety",
     "developer-tools",
-    "intent-log",
+    "outcome-log",
     "decision-log",
     "madr"
   ],
@@ -32,6 +32,7 @@
     "test": "test"
   },
   "files": [
+    "index.js",
     "bin",
     "skills",
     "README.md",

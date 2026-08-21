@@ -1,376 +1,242 @@
 # DriftSeal
 
-> **Seal the intent. Stop the drift.**
+> **Seal the outcome. Stop the drift.**
 
-[English](README.md)
-
-Agentic coding 可以很快。**DriftSeal 让这种快不以失控为代价。**
-
-在 agent 动手改代码之前，DriftSeal 先记下这一轮究竟要完成什么、准备如何证明完成；工作结束后，再记录实际发生了什么。这个轻量契约不会因为 context loss、范围悄悄膨胀，或者一句过于乐观的“完成了”而消失。
+DriftSeal 是一套跟随 repo 保存的协议与工具，用来让 coding agent 始终围绕一个
+完整的交付 outcome 工作。它要求在持久改动开始前记录 outcome，允许以 append-only
+方式补充同一 outcome 的后续步骤，把验证结果绑定到累计 contract，并只为确实需要
+长期保留理由的选择建立 MADR。
 
 ```text
-封存 intent → 执行工作 → 证明结果 → 关闭本轮
+开启 outcome → 扩展同一 outcome → 验证累计 contract → 关闭
 ```
 
-**一个 open intent，一份预先声明的验证标准，一条可靠留存的工作轨迹。** 不需要 service，也不需要 database；只有本地 Node.js tools，以及跟着 repo 一起走的普通文件。
+一个 worktree 只持有一个 open outcome。Git 记录最终落地了什么；DriftSeal 记录这轮
+工作想交付什么、如何证明完成，以及长期 decision 背后的理由。
 
-## 真正麻烦的不是慢，而是偏航
+## v2 的变化
 
-| 没有 DriftSeal | 使用 DriftSeal |
-| --- | --- |
-| 任务做到一半，范围悄悄扩大 | 当前轮次始终只有一个清晰可见的 intent |
-| 没有可靠证据，也可以宣布“完成” | 实现前就先声明 verification |
-| Context compaction 后忘记最初目标 | `status` 和 `log` 能准确找回 intent 与历史 |
-| 同一场架构争论被不同 agent 反复重演 | 克制使用的 [MADR](https://adr.github.io/madr/) 记录保留真正重要的理由 |
-| 并发或中断写入让状态变得可疑 | Lock、schema check、atomic write 与 recovery 让异常可检测、可恢复 |
+DriftSeal v2 从“按步骤记录 intent”改为“按交付记录 outcome”。
 
-DriftSeal 不会取代 Git，而是补上 Git 不负责记录的部分：intent 说明原本要做什么，decision log 保存为什么，commit 展示最终落地了什么。
+- 所有状态归到同一个 seal root：`.seal/outcomes/events.jsonl` 与 `.seal/madr/`。
+- `DRIFTSEAL_HOME` 覆盖整个 `.seal` root。v1 的
+  `DRIFTSEAL_DECISION_HOME` 只在定位 migration 输入时使用。
+- `driftseal extend` 可以向当前 outcome 追加步骤、acceptance、verifier 或 decision link。
+- 每次 extend 都会改变 contract hash，并让之前的 verification 失效。
+- event 使用 `logVersion: 2`、`schemaVersion: 1`。
+- `AGENTS.md` 的新协议版本从 `2.0` 开始，兼容改进依次使用 `2.1`、`2.2`。
+- CLI、Node API、MCP tool 与 resource 全部使用 outcome 命名；v1 名称和路径不会作为
+  runtime alias 保留。
 
-## 30 秒开始使用
+## 安装
+
+DriftSeal 需要 Node.js 18 或更高版本。
 
 ```sh
 npm install --global driftseal
-cd your-project
+driftseal --version
+```
+
+在源码 checkout 中使用：
+
+```sh
+npm install
+node bin/driftseal.js --version
+```
+
+让 repo 接入协议：
+
+```sh
 driftseal init
 ```
 
-`driftseal init` 会把协议写入 `AGENTS.md`（包括 worktree 撞号后如何 `absorb`），
-并配置 local git merge driver。重复运行不会产生副本。用 `--lang zh-CN`（或其他
-[BCP 47](https://www.rfc-editor.org/rfc/rfc5646.html) 标签）声明 agent 写入
-intent / decision 正文时应使用的语言，默认是 `en`。命令名、flag、status token、
-id 以及 MADR 小节标题仍保持英文。再次运行不带 `--lang` 的 `init` 会保留已声明
-的语言并升级协议。DriftSeal 需要 Node.js 18+。
+`init` 会写入或升级 `AGENTS.md` 中的 managed blocks，添加 outcome log 的 merge
+attribute，并配置本地 Git merge driver。Git config 不会随 clone 传播，因此新 clone
+需要再执行一次 `init`。
 
-从当前 checkout 本地开发时：
+`driftseal init --lang <BCP-47-tag>` 用来指定 outcome 与 MADR 正文的语言。
+`--local-log` 会让 `.seal/` 保持本地、不被跟踪；DriftSeal 只报告当前 tracked 状态，
+不会替你修改 `.gitignore` 或 Git index。
+
+## 基本工作流
+
+在修改持久项目内容前，先开启完整的交付 outcome：
 
 ```sh
-npm link
+driftseal begin "Ship account recovery" \
+  --accept "expired links are rejected" \
+  --accept "a valid link resets the password" \
+  --verify "npm test"
 ```
 
-## 推荐的 agent 配置
-
-默认组合是 `AGENTS.md` + 配套 skill + CLI：
-
-- `driftseal init` 写入的 `AGENTS.md` 是唯一的 policy 来源。
-- `skills/use-driftseal` 是不绑定特定 agent runtime 的轻量发现与恢复指南。
-- `driftseal` CLI 是默认执行入口。
-
-为指定平台安装 package 内置的 skill。默认使用项目级 scope：
+如果下一步仍属于同一个交付目标，就把它追加到当前 outcome：
 
 ```sh
-driftseal skill install --target codex
-driftseal skill install --target kimi-code --scope global
+driftseal extend "Document recovery-link expiry" \
+  --accept "the expiry behavior is documented" \
+  --verify "npm test && npm run docs:check"
 ```
 
-| Target | 项目级 scope | 全局 scope |
-| --- | --- | --- |
-| `codex` | `.agents/skills/use-driftseal` | `~/.agents/skills/use-driftseal` |
-| `kimi-code` | `.kimi-code/skills/use-driftseal` | `~/.kimi-code/skills/use-driftseal` |
-| `opencode` | `.opencode/skills/use-driftseal` | `~/.config/opencode/skills/use-driftseal` |
-| `claude-code` | `.claude/skills/use-driftseal` | `~/.claude/skills/use-driftseal` |
-| `cursor` | `.cursor/skills/use-driftseal` | `~/.cursor/skills/use-driftseal` |
+新增 acceptance 时，必须提供一个能证明完整累计 contract 的替代 verifier。没有新增
+acceptance 的 extend 可以沿用原 verifier，也可以替换它。任何 extend 都会让之前的
+machine evidence 失效。如果交付目标本身变了，应诚实关闭当前 outcome，再开启新的。
 
-如果不在目标 repository 中执行，用 `--root <repository>` 明确指定项目。
-重复安装相同内容不会产生改动；旧版本 DriftSeal 装下的 skill 会被直接原地升级，
-只有安装器从未写过的 skill 才需要显式传入 `--force`。
-MCP 与 lifecycle hook 都是可选适配层；只有确实存在 host 限制或提醒需求时
-才启用，不要把它们叠成额外的 policy 层。
-
-## 可选：通过 MCP 使用 DriftSeal
-
-同一个 package 还提供本地 stdio MCP server：`driftseal-mcp`。它为完整的
-intent 与 decision 工作流提供结构化 tools，并与 CLI 复用同一套锁、WAL、
-atomic write、schema 和 recovery 实现。server 不会启动 `driftseal` 子进程，
-也不需要解析 CLI 输出。
-
-启动时把 server 固定到一个 repository：
+完成前依次执行：
 
 ```sh
-driftseal-mcp --root /absolute/path/to/repository
-```
-
-选择对应 target，即可把 server 安装到当前 repository 的 agent 配置：
-
-```sh
-cd /path/to/repository
-driftseal mcp install --target codex
-driftseal mcp install --target kimi-code
-driftseal mcp install --target opencode
-driftseal mcp install --target claude-code
-driftseal mcp install --target cursor
-```
-
-默认使用项目级配置，因为每个 DriftSeal MCP server 都只属于一个 repository。
-所有 target 都会把 `--root` 固定为 repository 的规范化绝对路径，并且可以安全地
-重复执行。
-
-| Target | 项目级配置 | 全局配置 |
-| --- | --- | --- |
-| `codex` | `.codex/config.toml` | `~/.codex/config.toml` |
-| `kimi-code` | `.kimi-code/mcp.json` | `~/.kimi-code/mcp.json` 或 `$KIMI_CODE_HOME/mcp.json` |
-| `opencode` | `opencode.json` | `~/.config/opencode/opencode.json` |
-| `claude-code` | `.mcp.json` | `~/.claude.json` |
-| `cursor` | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
-
-在其他目录执行时可以显式传入 `--root <repository>`；也可以明确选择对应 agent
-的用户级配置：
-
-```sh
-driftseal mcp install --target <target> --scope global --root /absolute/path/to/repository
-```
-
-全局安装仍会固定到所选 repository。如果目标配置中已经存在不同的 DriftSeal
-server entry，安装器不会修改它；只有显式传入 `--force` 才会替换。其他 agent
-设置与 MCP servers 会被保留。
-
-root 只能在启动时配置，不是 tool input。MCP 模式也会忽略继承到进程中的
-`DRIFTSEAL_HOME` 和 `DRIFTSEAL_DECISION_HOME` override，因此 tool call 不能把
-写入重定向到所选 repository 之外。
-
-v1 server 提供：
-
-| MCP capability | 用途 |
-| --- | --- |
-| `driftseal_status`, `driftseal_log` | 读取当前 intent 和 intent 历史。 |
-| `driftseal_begin`, `driftseal_verify`, `driftseal_end` | 开启一轮工作、采集机器验证证据，并诚实关闭。 |
-| `driftseal_absorb` | 修复 merge 撞号，或吸收另一条 worktree 日志并重编号冲突 ID。 |
-| `driftseal_reclaim`, `driftseal_unreclaim` | 用 append-only 标记隐藏已无意义的已关闭记录，或将其恢复。 |
-| `driftseal_decision_list`, `driftseal_decision_show` | 查找并读取 MADR record。 |
-| `driftseal_decision_add`, `driftseal_decision_update` | 克制地增加 decision，并 reconcile 已关联的 decision。 |
-| `driftseal://intent/current` | 以 JSON resource 读取当前 intent。 |
-| `driftseal://intents/recent` | 以 JSON resource 读取最近十条 intent。 |
-| `driftseal://decisions` | 以 JSON resource 读取 decision catalog。 |
-
-`driftseal_absorb` 可以接收另一份 intent log、decision 目录、`ours` 或 `theirs`
-放弃策略，以及 dry-run 模式。传入的路径只作为只读来源；修复后的内容仍只会写入
-server 启动时固定的 repository。Git merge driver 形式仍是 CLI 专用的底层命令。
-
-MCP 只替换执行入口，不会在 repository 的 `AGENTS.md` 之外增加 policy；
-配套 skill 也仍只负责发现与恢复工作流。
-
-## 可选：用 hook 持续提醒 agent
-
-对于支持 lifecycle hook 的 agent，可以在每轮回答前（`UserPromptSubmit`）
-注入一条简短的 DriftSeal 提醒，并在回答完毕时（`Stop`）显示警告。提醒是
-建议性的——它提示是否需要开启 intent、是否还有未关闭的 intent 需要验证并
-`driftseal end`；它不会强制模型再跑一轮，并且在还没有 intent log 的
-repository 中保持沉默。
-
-安装方式：
-
-```sh
-cd /path/to/repository
-driftseal hook install --target kimi-code --scope global
-driftseal hook install --target claude-code
-driftseal hook install --target codex
-```
-
-| Target | 项目级配置 | 全局配置 |
-| --- | --- | --- |
-| `kimi-code` | 不支持 | `~/.kimi-code/config.toml` 或 `$KIMI_CODE_HOME/config.toml` |
-| `claude-code` | `.claude/settings.json` | `~/.claude/settings.json` |
-| `codex` | `.codex/hooks.json` | `~/.codex/hooks.json` |
-
-与 `mcp install` 一样，hook 安装器支持 `--scope global`、
-`--root <repository>` 和 `--force`，重复安装是幂等的，并保留无关的配置项。
-Kimi Code 只在全局 `config.toml` 中记录 hook，因此该 target 必须指定
-`--scope global`。Claude Code 的 prompt 提醒使用
-`hookSpecificOutput.additionalContext`，`Stop` 提醒则使用只显示在 UI 中的
-`systemMessage`，不会造成 continuation loop。Codex 只安装 prompt hook，
-因为它的 `Stop` 事件没有建议性上下文通道。Hook 命令会从当前目录开始向上
-查找 intent log。OpenCode 和 Cursor 目前还没有可用的 hook 入口。
-
-## 一轮标准工作流
-
-进行非 Git 改动前，先声明这轮工作的目标：
-
-```sh
-driftseal begin "add rate limiting to /api/login" \
-  --accept "the sixth login attempt within one minute receives HTTP 429" \
-  --verify "npm test test/rate-limit.test.js"
-```
-
-完成工作后，先 reconcile 所有关联 decision，再用 `driftseal status` 检查声明的
-命令，确认无误后才让 DriftSeal 执行：
-
-```sh
+driftseal status
 driftseal verify
+driftseal end --status completed --note "Shipped recovery with expiry documentation."
 ```
 
-`driftseal verify` 会把日志中保存的完整字符串交给操作系统 shell。这个命令可以
-读写文件、访问网络，也可以运行当前用户有权执行的任何程序；因此它是可执行代码，
-不是被动的日志数据。创建 intent 时，DriftSeal 会记录本地 provenance：默认 Git
-流程把 open intent park 在 Git metadata 中；非 Git 环境和自定义
-`DRIFTSEAL_HOME` 则在 intent log 之外保存一个很小的本地标记。这些本地创建的
-intent 可以直接验证。如果 open intent 只有 log 记录、没有匹配的本地 provenance，
-DriftSeal 就无法确认是谁选择了其中的命令。此时它会先把命令输出到 stderr 并拒绝
-执行；只有检查并信任该命令后，才能显式运行
-`driftseal verify --allow-tracked-command`。Programmatic API 和 MCP tool 中对应的显式
-开关是 `allowTrackedCommand`。intent 关闭时，本地 provenance 会被清理；如果它提前
-丢失，DriftSeal 会按安全方向处理，仍要求显式 opt in。非 Git marker 还会绑定本地
-log 文件的 identity，因此把 marker 和 log 一起复制到别处也不会转移信任。
+acceptance-bound outcome 只有在最新 verification 成功后才能关闭为 `completed`。证据
+同时绑定 contract hash 与 Git-visible workspace fingerprint。若 verification command
+只来自 tracked log、没有匹配的本地 provenance，检查后还必须显式使用
+`--allow-tracked-command`。
 
-验证事件会记录 exit status、耗时、输出摘要及字节数、Git HEAD，以及当前所有
-tracked 和未被 ignore 的 untracked 文件的内容指纹（intent event log 除外）。
-验证后只要这些内容发生变化，成功证据就会过期，必须重新运行；否则 DriftSeal
-会拒绝把 intent 关闭为 `completed`。命令输出会先写入临时 spool 文件，而不是
-受固定大小的内存 buffer 限制；命令退出后再回放并删除。因此 DriftSeal 不再限制
-输出大小，但实际容量仍受可用磁盘空间约束。被 ignore 的文件不在指纹范围内。
-如果当前目录不是 Git worktree，指纹不可用；此时 gate 只能证明记录到的 exit
-status，无法发现之后发生的内容变化。
-
-这只能证明预先声明的命令在记录的内容上通过，不能证明 acceptance criterion
-或测试本身足够可靠。为兼容旧记录，没有 `--accept` 的 intent 仍沿用手动验证流程。
-如果验证器也由同一个 agent 编写、结果带有主观判断，或改动风险较高，应再使用
-受保护的 CI、独立 review 或人工确认。
-
-最后记录实际结果：
+发生 context loss 或 handoff 后，先重新锚定：
 
 ```sh
-driftseal end \
-  --status completed \
-  --note "Added the limiter and covered the failure path" \
-  --verify-result "4 tests pass"
+driftseal status
+driftseal log --last 3
 ```
 
-如果范围发生变化，先把当前 intent 以 `partial` 或 `abandoned` 关闭，再开启新的 intent。发生 context loss 后，用 `driftseal status` 和 `driftseal log --last 3` 重新锚定当前目标。
+## 哪些工作需要 outcome
 
-需要记录 intent 的是准备作为项目内容长期保留的改动，包括代码、配置、文档、依赖及同类
-项目文件。这个边界不取决于 Git：在 worktree 中，它包括准备提交的内容；在非 Git 项目中，
-它包括要长期保留的项目文件。其余操作一律免记。Git 会自行维护操作历史，因此查看状态、
-管理 branch 或 worktree、stage、commit、merge、rebase、cherry-pick、tag 和 push 都
-不需要单独开启 intent，但仍须遵守正常的授权与安全要求。编译、跑测试等单步构建或检查也
-不需要 intent。结果不会成为持久项目内容的辅助文件或 shell 操作——比如 `rsync` 临时拷贝、
-临时脚手架——同样免记。远程机器或本机环境的状态变更，只要不把持久项目内容写入当前
-workspace，也不属于 intent log；如果外部操作确实把持久内容带进项目，记录的是落入项目的
-内容改动，而不是外部操作本身。
+准备长期留在项目中的代码、配置、文档、依赖及同类文件改动需要 outcome。Git 操作、
+检查命令、临时辅助工作，以及不会把持久内容写进项目的外部状态变化都不需要。
 
-多 agent 协作时，intent 的作用域属于 worktree，而不是写入者。一个 worktree 只能有一个
-open intent；在那里改动持久项目内容的所有 agent 和 subagent 都要先重新锚定，再继续同一个
-匹配的 intent。不同 worktree 各自持有 intent；非 Git 项目的 configured root 同样只持有
-一个。只通过 Git 或共享 worktree 接收其他 agent 变更的一方不另记 receiving intent，交给
-`verify` 暴露不一致。handoff 文件在被 ignore 或以其他方式排除在持久项目内容之外时免记，
-一旦转为正式项目内容就需要 intent。在同一个 root 中途接手工作属于重新锚定而非边界：目标
-仍然匹配就继续沿用 open intent。
+作用域属于 worktree，而不是某一个 agent process。同一 worktree 内的 agent 与
+subagent 重新锚定并继续匹配的 open outcome；不同 worktree 各自持有 outcome。
 
-## 命令速览
+## Decision 与 MADR
 
-| Command | 用途 |
-| --- | --- |
-| `driftseal begin "<intent>" [--accept "<outcome>"] [-v "<command>"] [--decision id] [--force]` | 开启一轮工作。可重复使用 `--accept` 声明可观察的完成条件；一旦声明，就必须同时提供验证命令。 |
-| `driftseal verify [--allow-tracked-command]` | 执行 acceptance-bound intent 预先声明的命令，并把机器证据绑定到当前 Git 可见的工作区内容；没有匹配本地 provenance 的命令必须显式 opt in。 |
-| `driftseal end [id] [-s status] [-n note] [-r verify-result]` | 诚实地关闭 intent。 |
-| `driftseal status` | 查看当前进行中的 intent。 |
-| `driftseal log [-n N] [--all]` | 查看 intent 历史（`--all` 包含已回收的记录）。 |
-| `driftseal reclaim [id ...] --reason "..." [--older-than days] [--force] [--dry-run]` | 用 append-only 标记隐藏已无意义的已关闭记录。 |
-| `driftseal unreclaim <id> --reason "..."` | 把已回收的记录恢复到可见历史中。 |
-| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs \| --abandon-ours] [--dry-run]` | 合并另一条 worktree 的日志，并给撞号的 intent / decision id 重新编号。 |
-| `driftseal absorb --git <base> <ours> <theirs>` | `.intent-log/events.jsonl` 的 git merge driver。 |
-| `driftseal decision add "<title>" -c "..." -o "..."` | 写入编号化的 MADR decision。 |
-| `driftseal decision update <id> [-s status] -n "..."` | 在当前 intent 中 reconcile 已关联的 decision。 |
-| `driftseal decision list [-s status] [--last N \| --count]` | 列出或统计 decision records，也可按 status 筛选。 |
-| `driftseal decision show <id>` | 查看单条 decision record。 |
-| `driftseal skill install --target TARGET [--scope project\|global] [--root path] [--force]` | 为 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor 安装内置 skill。 |
-| `driftseal mcp install --target TARGET [--scope project\|global] [--root path] [--force]` | 把固定到 repository 的 MCP server 安装到 Codex、Kimi Code、OpenCode、Claude Code 或 Cursor。 |
-| `driftseal hook install --target TARGET [--scope project\|global] [--root path] [--force]` | 把建议性的 lifecycle 提醒安装到 Kimi Code、Claude Code 或 Codex。 |
-| `driftseal hook prompt\|stop [--format plain\|claude-code]` | 输出 lifecycle hook 注入的提醒；绝不阻断。 |
-| `driftseal init [--lang <tag>] [--local-log]` | 把接入协议写入 `AGENTS.md`，并配置 git merge driver。`--lang` 设置 intent / decision log 的语言（BCP 47，默认 `en`）。`--local-log` 让日志保持本地、不入库，不随代码提交；如果日志已被 git 跟踪，init 会打印警告和处理建议，但不会改动 index 或 `.gitignore`。 |
-| `driftseal --version` 或 `driftseal -V` | 输出当前安装的 DriftSeal 版本。 |
-| `driftseal help` | 查看 CLI 用法。 |
-
-如果 `begin` 通过一个或多个 `--decision <id>` 声明了关联，那么 intent
-以 `completed` 或 `partial` 关闭前，必须用 `driftseal decision update` reconcile
-每一条关联 decision。update 可以改变当前 status，并会追加一条包含时间和
-intent ID 的 history。没有关联 decision 的 intent 仍沿用普通流程。对于
-acceptance-bound linked intent，所有 decision update 都必须发生在
-`driftseal verify` 之前，因为 update 会改变 workspace fingerprint；顺序应当是
-reconcile、verify、end。
-
-## 回收已无意义的记录
-
-有些已关闭的记录会随着时间失去意义：harness 或 sandbox 导致的失败会被如实记录为
-`failed`，但它与项目本身无关。`driftseal reclaim` 可以在不改写历史的前提下让这类
-记录退场——它只是向同一个 append-only log 追加一条 `reclaim` 标记（必须附带
-`--reason`），被回收的记录会从 `driftseal log` 和 `driftseal status` 的输出中隐藏，
-但仍保留在 `events.jsonl` 中，并可通过 `log --all` 查看。若事后发现某条记录仍然
-重要，用 `driftseal unreclaim <id> --reason "..."` 恢复。
-
-不带 id 的批量模式只回收已关闭、未关联 decision、且早于 `--older-than` 天（默认 7
-天）的 `failed`/`abandoned` 记录；可以先用 `--dry-run` 预览。`completed` 和 `partial`
-记录，以及任何关联了 decision 的记录，只能按显式 id 加 `--force` 回收。
-
-## 一致性与恢复
-
-DriftSeal 会对配置后的 intent log 与 decision log 根目录加锁，并按固定顺序获取这些
-lock，从而串行执行 mutating commands。Decision reconciliation 会先写 prepare
-event，再以 atomic replacement 更新 MADR，最后写 commit event。如果进程在中间
-停止，下一次 linked `decision update` 或 successful `end` 会根据 content hash
-恢复 transaction。linked intent 成功关闭前，还会验证 decision 文件自最近一次
-reconciliation 后没有发生变化。未关联 decision 的 intent 不会解析 decision log；
-当 decision recovery 无法完成时，`failed` 与 `abandoned` 仍可作为退出路径。
-这两个 terminal status 会取消对应 pending transaction 的后续 recovery；同时，
-recovery 只处理当前 intent，因此历史冲突不会阻塞之后的 decision 工作。
-
-新 event 带有 schema version。遇到更高且不支持的版本时，DriftSeal 会拒绝继续；如果
-旧 client 未经 reconciliation 就关闭 linked intent，新 client 也会 fail closed。
-`driftseal init` 会写入带版本的 managed blocks，并且只升级内容完全匹配的已知旧版本。
-当前版本的 block 如果只是 log language 不同，也会被识别，因此可以用 `--lang`
-改语言而不必手改协议。遇到更新的协议版本、无法识别的 block 或自定义内容时，
-它会保持 `AGENTS.md` 不变并拒绝继续。
-
-`--count` 只输出 status 筛选后的记录总数。它不能与 `--last` 一起使用，以免
-“先限制再计数”造成歧义。Decision 文件名会构成一个轻量的内存索引：`show` 只
-解析目标 record；不带 status 的 `--count` 完全不读取 MADR 正文。按 status 筛选
-时仍需解析全部 records，因为 status 保存在各个 MADR 文档中；DriftSeal 不维护容易
-滞后的 sidecar index。
-
-## 合并 worktree
-
-两条 worktree 各自按本地日志分配 intent / decision id，同一天并行 `begin` 或 `decision add`，分支合并时就会撞号。`driftseal absorb` 保留我方编号、给进来的一侧重编号，并打印对照表。单线 WAL 仍然只追加；absorb 是唯一允许的跨谱系重写。
+只有当 outcome log 与 Git 无法还原重要上下文时才建立 MADR，例如值得以后重访的
+rejected/deferred 路径、长期且难回退的选择理由，或 deprecated/superseded decision。
 
 ```sh
-driftseal absorb ../other-worktree/.intent-log/events.jsonl \
-  --decisions ../other-worktree/.decision-log
+driftseal decision add "Expire recovery links after one hour" \
+  --context "Recovery links are security-sensitive bearer tokens." \
+  --outcome "Use a one-hour lifetime and reject older links." \
+  --driver "Limit token exposure" \
+  --option "No expiry" \
+  --option "One-hour expiry" \
+  --consequence "Users must request another link after expiry."
 ```
 
-不带 path 时，`absorb` 修复当前日志里的冲突标记或已经拼在一起的重复 id。两边都还有未关闭 intent 时，必须加上 `--abandon-theirs` 或 `--abandon-ours`。共享 base 里已经存在、又被两边同时改过的 decision，不会自动合并。
+通过 `begin` 或 `extend` 的 `--decision <id>` 关联已有 MADR。outcome 关闭为
+`completed` 或 `partial` 前，必须 reconcile 每一条关联记录：
 
-`driftseal init` 会把这条 absorb 规则写入 `AGENTS.md`，同时写入 `.gitattributes`
-并配置 local git merge driver，让 `events.jsonl` 走 `absorb --git`。decision id
-撞号时，driver 会先中止 merge，避免 Git 提交语义不明确的 decision catalog；运行
-`driftseal absorb`、stage 修复后的 intent / decision logs，再继续 merge。clone
-之后需要再跑一次 `init`，因为 driver 只存在于 local git config。
+```sh
+driftseal decision update 1 --status accepted --note "Confirmed by the final implementation."
+```
 
-在 Git worktree 里，`begin` 会把未关闭的 intent 停在 Git 元数据中，而不是追加到
-已跟踪的 `events.jsonl`。因此工作树保持干净，`git merge` 可以在 intent 仍进行中
-时执行，不必为了清工作树而多做一个只含日志的提交。`end` 会先把停放的记录移入跟踪
-日志，再把关闭记录写在那里，而不会写进 Git 元数据；因此 `end` 中途失败时，intent
-只是以未关闭状态留在日志里，重跑一次即可。如果停放中的 intent id 与合并进来的事件
-撞号，DriftSeal 会按 `absorb` 同样的规则重编号。
+## 命令速查
 
-合并带进来第二个未关闭的 intent 时，`absorb --abandon-ours` 会关闭停放的那一个并
-写入跟踪日志，`absorb --abandon-theirs` 则关闭合并进来的那一个、保留自己的停放
-状态。也可以用 `end <id>` 直接关闭合并进来的 intent，或用 `begin --force` 一次性
-放弃所有未关闭的 intent。
+| 命令 | 用途 |
+|---|---|
+| `driftseal begin "<outcome>" [--accept "..."] [--verify "..."] [--decision id] [--force]` | 开启一个完整 outcome。 |
+| `driftseal extend "<addition>" [--accept "..."] [--verify "..."] [--decision id]` | 向同一 outcome 追加内容，并让旧 verification 失效。 |
+| `driftseal verify [--allow-tracked-command]` | 执行累计 verifier 并绑定证据。 |
+| `driftseal end [id] [-s status] [-n note] [-r verify-result]` | 诚实关闭 outcome。 |
+| `driftseal status` | 查看进行中的 outcome。 |
+| `driftseal log [--last N] [--all]` | 查看 outcome 历史。 |
+| `driftseal reclaim [id ...] --reason "..." [--force]` | 通过 append-only marker 隐藏无意义的已关闭记录。 |
+| `driftseal unreclaim <id> --reason "..."` | 恢复 reclaimed record。 |
+| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | 合并另一条 lineage 并处理撞号。 |
+| `driftseal decision add\|update\|list\|show` | 管理 MADR。 |
+| `driftseal migrate v1-to-v2 inspect --json` | 规范化 v1 状态，供模型分组。 |
+| `driftseal migrate v1-to-v2 apply --plan <file>` | 校验分组计划，并把 `.seal/` 放在 v1 数据旁边。 |
+| `driftseal migrate v1-to-v2 check` | 校验 migration 结果并报告 review/deletion gate。 |
+| `driftseal init [--lang tag] [--local-log]` | 安装或升级 repo 协议。 |
 
-## 数据保存在哪里
+完整语法以及 skill、MCP、hook 的安装 target 请查看 `driftseal help`。
 
-- `.intent-log/events.jsonl`：append-only intent log。所有读写都必须经过 `driftseal`（CLI 或 MCP）——不要直接读取、修改、移动或删除该文件；需要让无意义的记录退场时使用 `driftseal reclaim`，而不是删除日志行。合并撞号时用 `driftseal absorb`，不要手改这个文件。
-- `.decision-log/`：编号化的 MADR decision records。
-- 设置 `DRIFTSEAL_HOME` 或 `DRIFTSEAL_DECISION_HOME`，即可把对应 log 放到当前项目之外。
+## 从 v1 migration
 
-Intent event、克制使用的 decision record 和 Git commit 共同构成分层的项目日志：intent event 说明一轮工作准备做什么、将如何验证；decision record 保存其他两层无法重建的理由、被拒绝路径或暂缓选择；commit 则展示最终实际落地的完整改动。DriftSeal 是对 Git history 的补充，不是对它的重复或替代。
+把按步骤记录的 intent 合并为真正交付的 outcome 需要语义判断，因此 migration 特意
+采用 model-assisted 流程。
 
-建议把 DriftSeal logs 和代码一起放进 version control，让项目的工作约定与决策轨迹能够共同演进。npm package 使用显式文件白名单，因此项目本地的 agent log 不会被发布到 npm。
+1. 先关闭所有 v1 intent；只要还有 parked v1 intent，migration 就会拒绝继续。
+2. 读取规范化后的源数据：
 
-## 开发与贡献
+   ```sh
+   driftseal migrate v1-to-v2 inspect --json > /tmp/driftseal-inspection.json
+   ```
+
+3. 让模型生成 `driftseal-v1-to-v2-plan` JSON。所有可见 v1 record 必须按原顺序组成
+   完整 partition。只有已经在 v1 中 reclaimed 的记录可以排除，而且每项都要给出理由。
+4. 用户审阅 outcome 分组后，应用认可的 plan：
+
+   ```sh
+   driftseal migrate v1-to-v2 apply --plan /tmp/driftseal-plan.json
+   driftseal migrate v1-to-v2 check
+   ```
+
+`apply` 会为 source 计算 fingerprint，校验 partition 与 staged v2 log，并逐字节复制
+所有 v1 MADR。它只会在 `.intent-log/`、`.decision-log/` 旁边新建 `.seal/`，绝不删除
+v1 数据。用户审阅并明确认可后，再手动移除旧 tracked paths；随后执行 `check` 会报告
+migration 已完成。
+
+## Git 与 merge
+
+在 Git worktree 中，`begin` 会把 open outcome park 到 Git metadata，避免弄脏 tracked
+log；`end` 再把完整 lineage 写入 `.seal/outcomes/events.jsonl`。正常工作期间 event log
+保持 append-only。
+
+发生 merge collision 后执行：
+
+```sh
+driftseal absorb
+```
+
+不要手改 JSONL。`absorb` 会给撞号的 outcome 与 decision id 重新编号，重新绑定受影响的
+contract hash，并拒绝自动合并 shared MADR 的并发编辑。若两条 lineage 都处于 open
+状态，必须显式选择 `--abandon-theirs` 或 `--abandon-ours`。
+
+## Node API 与 MCP
+
+```js
+const { createApi } = require('driftseal');
+
+const seal = createApi({ root: process.cwd(), isolateStorage: true });
+seal.begin({
+  outcome: 'Ship account recovery',
+  acceptance: ['the recovery tests pass'],
+  verify: 'npm test',
+});
+seal.extend({ extension: 'Document token expiry' });
+```
+
+API 还提供 `status`、`verify`、`end`、`log`、`absorb`、reclaim、decision、init 与
+migration 方法。
+
+stdio MCP server 会把所有操作固定在一个 repo root。v2 tools 包括
+`driftseal_status`、`driftseal_begin`、`driftseal_extend`、`driftseal_verify`、
+`driftseal_end`、outcome history/absorb、MADR，以及三个 migration tools。resources 为：
+
+- `driftseal://outcome/current`
+- `driftseal://outcomes/recent`
+- `driftseal://madr`
+
+## 存储与信任边界
+
+- `.seal/outcomes/events.jsonl` 是 append-only outcome log。通过 DriftSeal 访问它；
+  需要调整可见性或处理 merge 时使用 `reclaim`、`unreclaim`、`absorb`，不要手改。
+- `.seal/madr/` 保存编号化 MADR。
+- `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
+- advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
+
+DriftSeal 不会替你判断 verification command 是否安全，也不会判断测试本身是否充分。
+执行前应检查命令，并继续遵守正常的 repo 授权与安全规则。
+
+## 开发
 
 ```sh
 npm test
+node --check bin/driftseal.js
+node --check bin/driftseal-mcp.js
+npm pack --dry-run
 ```
 
-欢迎贡献。请尽量保持改动聚焦；如果改变了行为，请补充 regression coverage，并在提交 pull request 前运行测试。
-
-## License
-
-MIT，详见 [`LICENSE`](LICENSE)。
+使用 MIT License。

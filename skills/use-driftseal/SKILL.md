@@ -1,6 +1,6 @@
 ---
 name: use-driftseal
-description: Follow DriftSeal-managed repository work when AGENTS.md requires `driftseal`, the user invokes DriftSeal, or an interrupted intent must be resumed. Use this skill to locate the authoritative repository policy, re-anchor state after context loss, and choose the execution surface; prefer the `driftseal` CLI, using MCP only when the repository or user explicitly selects it.
+description: Follow DriftSeal-managed repository work when AGENTS.md requires `driftseal`, the user invokes DriftSeal, or an interrupted outcome must be resumed. Use this skill to locate the authoritative repository policy, re-anchor state after context loss, and choose the execution surface; prefer the `driftseal` CLI, using MCP only when the repository or user explicitly selects it.
 ---
 
 # Use DriftSeal
@@ -23,15 +23,16 @@ the policy.
 
 ## Re-anchor When Needed
 
-After context loss or when intent state is uncertain, run:
+After context loss or when outcome state is uncertain, run:
 
 ```sh
 driftseal status
 driftseal log --last 3
 ```
 
-Then resume, replace, verify, or close the intent exactly as `AGENTS.md`
-requires. For command syntax, run:
+Then resume, extend, replace, verify, or close the outcome exactly as
+`AGENTS.md` requires. Use `extend` only when the additional work still delivers
+the same coherent outcome. For command syntax, run:
 
 ```sh
 driftseal help
@@ -39,17 +40,22 @@ driftseal help
 
 ## After a merge
 
-If `status` or `log` fails with a duplicate id or with `multiple intents in
-progress`, or the intent log has conflict markers, run `driftseal absorb`
-instead of editing `.intent-log/events.jsonl`. When both sides still have an
-open intent, add `--abandon-theirs` or `--abandon-ours`; this works whether your
-open intent sits in the log or is parked in Git metadata. `driftseal init` also
+If `status` or `log` fails with a duplicate id or with `multiple outcomes in
+progress`, or the outcome log has conflict markers, run `driftseal absorb`
+instead of editing `.seal/outcomes/events.jsonl`. When both sides still have an
+open outcome, add `--abandon-theirs` or `--abandon-ours`; this works whether your
+open outcome sits in the log or is parked in Git metadata. `driftseal init` also
 configures the local git merge driver; clones need `init` again for that driver.
 
-In a Git worktree, `begin` does not dirty the tracked intent log, so `git merge`
-can run with an intent still in progress. `end` writes the closed record to
-`.intent-log/events.jsonl`; if it is interrupted, the intent stays open there
-and `end` can be run again.
+In a Git worktree, `begin` does not dirty the tracked outcome log, so `git merge`
+can run with an outcome still in progress. `end` writes the closed record to
+`.seal/outcomes/events.jsonl`; if it is interrupted, the outcome stays open
+there and `end` can be run again.
+
+For a v1 repository, do not reinterpret or delete the old logs directly. Use
+`driftseal migrate v1-to-v2 inspect`, prepare a reviewed grouping plan, apply
+it, and run `check`. Migration stages `.seal/` beside v1 and never removes the
+old paths; their removal requires explicit user approval.
 
 Do not treat this skill, MCP descriptions, or lifecycle-hook reminders as
 additional policy. If they conflict with `AGENTS.md`, follow `AGENTS.md`.

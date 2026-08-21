@@ -79,14 +79,25 @@ function registerTools(server, api, z) {
     stdoutBytes: z.number().int().nonnegative(),
     stderrBytes: z.number().int().nonnegative(),
     workspace: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    contractHash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
     head: z.string().nullable(),
     ranAt: z.string(),
   });
-  const intentRecord = z.object({
-    id: z.string(),
-    intent: z.string(),
+  const extensionRecord = z.object({
+    extension: z.string(),
     acceptance: z.array(z.string()),
     verify: z.string().nullable(),
+    decisions: z.array(z.string()),
+    extendedAt: z.string(),
+    head: z.string().nullable(),
+  });
+  const outcomeRecord = z.object({
+    id: z.string(),
+    outcome: z.string(),
+    extensions: z.array(extensionRecord),
+    acceptance: z.array(z.string()),
+    verify: z.string().nullable(),
+    contractHash: z.string().regex(/^[a-f0-9]{64}$/),
     verification: verificationRecord.nullable(),
     decisions: z.array(z.string()),
     status: z.enum(END_STATUSES).or(z.literal('in_progress')),
@@ -99,6 +110,10 @@ function registerTools(server, api, z) {
     reclaimed: z.boolean(),
     reclaimReason: z.string().nullable(),
     reclaimedAt: z.string().nullable(),
+    imported: z.object({
+      sourceIds: z.array(z.string()),
+      sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    }).nullable(),
     readOnly: z.boolean().optional(),
   });
   const decisionRecord = z.object({
@@ -111,7 +126,7 @@ function registerTools(server, api, z) {
   const absorbResult = z.object({
     mappings: z.array(
       z.object({
-        kind: z.enum(['intent', 'decision']),
+        kind: z.enum(['outcome', 'decision']),
         from: z.string(),
         to: z.string(),
       })
@@ -131,27 +146,27 @@ function registerTools(server, api, z) {
   server.registerTool(
     'driftseal_status',
     {
-      title: 'Get current DriftSeal intent',
+      title: 'Get current DriftSeal outcome',
       description:
-        'Inspect the one intent currently in progress before repository work or after context loss. Returns null when no intent is open.',
+        'Inspect the one outcome currently in progress before repository work or after context loss. Returns null when no outcome is open.',
       inputSchema: {},
       outputSchema: {
         root: z.string(),
-        intent: intentRecord.nullable(),
+        outcome: outcomeRecord.nullable(),
         readOnly: z.boolean().optional(),
       },
       annotations: readOnly,
     },
     async () =>
       guarded(() => {
-        const intent = api.status();
+        const outcome = api.status();
         const readOnly = api.readOnly;
-        const snapshot = intent && readOnly ? { ...intent, readOnly: true } : intent;
+        const snapshot = outcome && readOnly ? { ...outcome, readOnly: true } : outcome;
         const summary = snapshot
-          ? `Intent ${snapshot.id} is ${snapshot.status}.`
-          : 'No DriftSeal intent is in progress.';
+          ? `Outcome ${snapshot.id} is ${snapshot.status}.`
+          : 'No DriftSeal outcome is in progress.';
         return success(
-          { root: api.root, intent: snapshot, ...(readOnly ? { readOnly: true } : {}) },
+          { root: api.root, outcome: snapshot, ...(readOnly ? { readOnly: true } : {}) },
           readOnly ? `${summary} ${READ_ONLY_SUFFIX}` : summary
         );
       })
@@ -160,11 +175,11 @@ function registerTools(server, api, z) {
   server.registerTool(
     'driftseal_begin',
     {
-      title: 'Begin a DriftSeal intent',
+      title: 'Begin a DriftSeal outcome',
       description:
-        'Open one focused work-round intent before making repository changes. Fails if another intent is already open; close it explicitly first.',
+        'Open one coherent delivery outcome before making durable project changes. Fails if another outcome is already open.',
       inputSchema: {
-        intent: nonEmpty.describe('Outcome this work round will accomplish.'),
+        outcome: nonEmpty.describe('Coherent delivery outcome this work will accomplish.'),
         acceptance: z
           .array(nonEmpty)
           .default([])
@@ -175,13 +190,35 @@ function registerTools(server, api, z) {
           .default([])
           .describe('Existing decision IDs this round may change or explicitly confirm.'),
       },
-      outputSchema: { root: z.string(), intent: intentRecord },
+      outputSchema: { root: z.string(), outcome: outcomeRecord },
       annotations: localWrite,
     },
     async (input) =>
       guarded(() => {
-        const intent = api.begin(input);
-        return success({ root: api.root, intent }, `Opened DriftSeal intent ${intent.id}.`);
+        const outcome = api.begin(input);
+        return success({ root: api.root, outcome }, `Opened DriftSeal outcome ${outcome.id}.`);
+      })
+  );
+
+  server.registerTool(
+    'driftseal_extend',
+    {
+      title: 'Extend the current DriftSeal outcome',
+      description:
+        'Append another scoped step to the same coherent outcome. Added acceptance requires a replacement verifier for the cumulative contract, and every extension invalidates earlier verification.',
+      inputSchema: {
+        extension: nonEmpty,
+        acceptance: z.array(nonEmpty).default([]),
+        verify: nonEmpty.optional(),
+        decisions: z.array(decisionId).default([]),
+      },
+      outputSchema: { root: z.string(), outcome: outcomeRecord },
+      annotations: localWrite,
+    },
+    async (input) =>
+      guarded(() => {
+        const outcome = api.extend(input);
+        return success({ root: api.root, outcome }, `Extended DriftSeal outcome ${outcome.id}.`);
       })
   );
 
@@ -190,18 +227,18 @@ function registerTools(server, api, z) {
     {
       title: 'Run the declared DriftSeal verification',
       description:
-        'Execute the current acceptance-bound intent\'s predeclared shell command and record machine evidence bound to the resulting Git-visible workspace contents. Inspect the command with driftseal_status first. A command sourced from the repository intent log is untrusted and requires allowTrackedCommand.',
+        'Execute the current acceptance-bound outcome\'s cumulative verifier and bind evidence to its contract hash and Git-visible workspace. Inspect it with driftseal_status first; provenance-less commands require allowTrackedCommand.',
       inputSchema: {
         allowTrackedCommand: z
           .boolean()
           .default(false)
           .describe(
-            'Explicitly allow a command sourced from the repository intent log after inspecting and trusting it.'
+            'Explicitly allow a command without matching local outcome provenance after inspection.'
           ),
       },
       outputSchema: {
         root: z.string(),
-        intent: intentRecord,
+        outcome: outcomeRecord,
         verification: verificationRecord,
         exitCode: z.number().int().nonnegative(),
       },
@@ -212,7 +249,7 @@ function registerTools(server, api, z) {
         const result = api.verify({ allowTrackedCommand: input.allowTrackedCommand });
         return success(
           { root: api.root, ...result },
-          `Machine verification ${result.verification.passed ? 'passed' : 'failed'} for intent ${result.intent.id}.`
+          `Machine verification ${result.verification.passed ? 'passed' : 'failed'} for outcome ${result.outcome.id}.`
         );
       })
   );
@@ -220,49 +257,49 @@ function registerTools(server, api, z) {
   server.registerTool(
     'driftseal_end',
     {
-      title: 'Close a DriftSeal intent',
+      title: 'Close a DriftSeal outcome',
       description:
-        'Close the current work-round intent with an honest terminal status, note, and verification result. Reconcile linked decisions before running final verification. Acceptance-bound intents require fresh successful machine verification before completed closure.',
+        'Close the current outcome honestly. Reconcile linked decisions before final verification; completed acceptance-bound outcomes require fresh contract- and workspace-bound evidence.',
       inputSchema: {
-        id: z.string().optional().describe('Intent ID; omit to close the current open intent.'),
+        id: z.string().optional().describe('Outcome ID; omit to close the current open outcome.'),
         status: closedStatus.default('completed'),
         note: nonEmpty.optional().describe('What actually happened in the round.'),
         verifyResult: nonEmpty.optional().describe('Concise, honest result of the declared verification.'),
       },
-      outputSchema: { root: z.string(), intent: intentRecord },
+      outputSchema: { root: z.string(), outcome: outcomeRecord },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input) =>
       guarded(() => {
-        const intent = api.end(input);
-        return success({ root: api.root, intent }, `Closed DriftSeal intent ${intent.id} as ${intent.status}.`);
+        const outcome = api.end(input);
+        return success({ root: api.root, outcome }, `Closed DriftSeal outcome ${outcome.id} as ${outcome.status}.`);
       })
   );
 
   server.registerTool(
     'driftseal_log',
     {
-      title: 'List DriftSeal intent history',
+      title: 'List DriftSeal outcome history',
       description:
-        'Review recent or complete DriftSeal intent history to re-anchor work and understand prior outcomes. Reclaimed records are hidden unless includeReclaimed is set.',
+        'Review recent or complete DriftSeal outcome history. Reclaimed records are hidden unless includeReclaimed is set.',
       inputSchema: {
         last: z.number().int().positive().max(100).optional(),
         includeReclaimed: z.boolean().default(false),
       },
       outputSchema: {
         root: z.string(),
-        intents: z.array(intentRecord),
+        outcomes: z.array(outcomeRecord),
         readOnly: z.boolean().optional(),
       },
       annotations: readOnly,
     },
     async (input) =>
       guarded(() => {
-        const intents = api.log({ last: input.last, all: input.includeReclaimed });
+        const outcomes = api.log({ last: input.last, all: input.includeReclaimed });
         const readOnly = api.readOnly;
-        const summary = `Found ${intents.length} DriftSeal intent records.`;
+        const summary = `Found ${outcomes.length} DriftSeal outcome records.`;
         return success(
-          { root: api.root, intents, ...(readOnly ? { readOnly: true } : {}) },
+          { root: api.root, outcomes, ...(readOnly ? { readOnly: true } : {}) },
           readOnly ? `${summary} ${READ_ONLY_SUFFIX}` : summary
         );
       })
@@ -273,7 +310,7 @@ function registerTools(server, api, z) {
     {
       title: 'Absorb another DriftSeal lineage',
       description:
-        'Repair the fixed repository after a merge collision or absorb another worktree\'s intent and decision logs, remapping colliding IDs. Omit otherLog to repair the current repository. This rewrites only the fixed repository; incoming paths are read-only sources.',
+        'Repair the fixed repository after a merge collision or absorb another worktree\'s outcome and MADR logs, remapping colliding IDs.',
       inputSchema: {
         otherLog: z
           .string()
@@ -286,7 +323,7 @@ function registerTools(server, api, z) {
         abandon: z
           .enum(['ours', 'theirs'])
           .optional()
-          .describe('Side whose open intent to abandon when both lineages have one in progress.'),
+          .describe('Side whose open outcome to abandon when both lineages have one in progress.'),
         dryRun: z.boolean().default(false),
       },
       outputSchema: { root: z.string(), result: absorbResult },
@@ -306,14 +343,14 @@ function registerTools(server, api, z) {
   server.registerTool(
     'driftseal_reclaim',
     {
-      title: 'Reclaim DriftSeal intent records',
+      title: 'Reclaim DriftSeal outcome records',
       description:
-        'Hide meaningless closed intent records (for example harness- or sandbox-caused failures) by appending reclaim markers. Never deletes log lines. Without ids, reclaims failed/abandoned, decision-unlinked records older than olderThan days.',
+        'Hide meaningless closed outcome records behind append-only markers. Never deletes log lines.',
       inputSchema: {
         ids: z
           .array(z.string())
           .default([])
-          .describe('Intent IDs to reclaim; omit for batch mode by age.'),
+          .describe('Outcome IDs to reclaim; omit for batch mode by age.'),
         reason: nonEmpty.describe('Why these records are meaningless (required, kept in the log).'),
         olderThan: z
           .number()
@@ -327,12 +364,12 @@ function registerTools(server, api, z) {
           .describe('Allow reclaiming partial/completed or decision-linked records by explicit id.'),
         dryRun: z.boolean().default(false),
       },
-      outputSchema: { root: z.string(), intents: z.array(intentRecord) },
+      outputSchema: { root: z.string(), outcomes: z.array(outcomeRecord) },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
     async (input) =>
       guarded(() => {
-        const intents = api.reclaim({
+        const outcomes = api.reclaim({
           ids: input.ids,
           reason: input.reason,
           olderThan: input.olderThan,
@@ -340,10 +377,10 @@ function registerTools(server, api, z) {
           dryRun: input.dryRun,
         });
         return success(
-          { root: api.root, intents },
+          { root: api.root, outcomes },
           input.dryRun
-            ? `${intents.length} DriftSeal intent records match.`
-            : `Reclaimed ${intents.length} DriftSeal intent records.`
+            ? `${outcomes.length} DriftSeal outcome records match.`
+            : `Reclaimed ${outcomes.length} DriftSeal outcome records.`
         );
       })
   );
@@ -351,19 +388,19 @@ function registerTools(server, api, z) {
   server.registerTool(
     'driftseal_unreclaim',
     {
-      title: 'Restore a reclaimed DriftSeal intent record',
-      description: 'Restore one reclaimed intent record to the visible log by appending an unreclaim marker.',
+      title: 'Restore a reclaimed DriftSeal outcome record',
+      description: 'Restore one reclaimed outcome record to the visible log by appending an unreclaim marker.',
       inputSchema: {
         id: z.string(),
         reason: nonEmpty.describe('Why this record is being restored (required, kept in the log).'),
       },
-      outputSchema: { root: z.string(), intent: intentRecord },
+      outputSchema: { root: z.string(), outcome: outcomeRecord },
       annotations: localWrite,
     },
     async (input) =>
       guarded(() => {
-        const intent = api.unreclaim(input);
-        return success({ root: api.root, intent }, `Restored DriftSeal intent ${intent.id}.`);
+        const outcome = api.unreclaim(input);
+        return success({ root: api.root, outcome }, `Restored DriftSeal outcome ${outcome.id}.`);
       })
   );
 
@@ -408,7 +445,7 @@ function registerTools(server, api, z) {
     {
       title: 'Add a DriftSeal decision',
       description:
-        'Create a MADR record only for durable rationale, rejected paths, deferred choices, or costly-to-reverse decisions that Git and the intent log cannot recover.',
+        'Create a MADR record only for durable rationale, rejected paths, deferred choices, or costly-to-reverse decisions that Git and the outcome log cannot recover.',
       inputSchema: {
         title: nonEmpty,
         context: nonEmpty,
@@ -433,7 +470,7 @@ function registerTools(server, api, z) {
     {
       title: 'Reconcile a DriftSeal decision',
       description:
-        'Reconcile one decision linked to the current open intent, updating or explicitly confirming its status with a history note.',
+        'Reconcile one decision linked to the current open outcome, updating or explicitly confirming its status with a history note.',
       inputSchema: {
         id: decisionId,
         status: decisionStatus.optional(),
@@ -447,6 +484,59 @@ function registerTools(server, api, z) {
         const decision = api.decisionUpdate(input);
         return success({ root: api.root, decision }, `Reconciled DriftSeal decision ${decision.id}.`);
       })
+  );
+
+  const migrationPlan = z.object({
+    format: z.literal('driftseal-v1-to-v2-plan'),
+    sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    groups: z.array(z.object({
+      outcome: nonEmpty,
+      summary: nonEmpty,
+      sourceIds: z.array(z.string()).min(1),
+    })).min(1),
+    excluded: z.array(z.object({ sourceId: z.string(), reason: nonEmpty })).default([]),
+  });
+  server.registerTool(
+    'driftseal_migration_inspect',
+    {
+      title: 'Inspect a DriftSeal v1 repository for v2 migration',
+      description: 'Read and normalize the fixed repository v1 logs for model-assisted grouping. Makes no changes.',
+      inputSchema: {},
+      outputSchema: { root: z.string(), inspection: z.unknown() },
+      annotations: readOnly,
+    },
+    async () => guarded(() => {
+      const inspection = api.migrationInspect();
+      return success({ root: api.root, inspection }, `Found ${inspection.records.length} closed v1 intent records.`);
+    })
+  );
+  server.registerTool(
+    'driftseal_migration_apply',
+    {
+      title: 'Stage a validated DriftSeal v1-to-v2 migration',
+      description: 'Validate a model-generated ordered grouping plan, create .seal side-by-side, copy MADRs byte-for-byte, and never delete v1 data.',
+      inputSchema: { plan: migrationPlan },
+      outputSchema: { root: z.string(), result: z.unknown() },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ plan }) => guarded(() => {
+      const result = api.migrationApply({ plan });
+      return success({ root: api.root, result }, 'Staged DriftSeal v2 without deleting v1 data.');
+    })
+  );
+  server.registerTool(
+    'driftseal_migration_check',
+    {
+      title: 'Check a staged DriftSeal v1-to-v2 migration',
+      description: 'Validate the staged outcome log and byte-identical MADRs, then report whether v1 still awaits manual removal.',
+      inputSchema: {},
+      outputSchema: { root: z.string(), result: z.unknown() },
+      annotations: readOnly,
+    },
+    async () => guarded(() => {
+      const result = api.migrationCheck();
+      return success({ root: api.root, result }, result.complete ? 'Migration complete.' : 'Migration valid; v1 remains for user review.');
+    })
   );
 }
 
@@ -464,22 +554,22 @@ function registerResources(server, api) {
   };
 
   registerJson(
-    'current-intent',
-    'driftseal://intent/current',
-    'Current DriftSeal intent',
-    'The work-round intent currently in progress for the fixed repository.',
-    () => ({ root: api.root, intent: api.status() })
+    'current-outcome',
+    'driftseal://outcome/current',
+    'Current DriftSeal outcome',
+    'The delivery outcome currently in progress for the fixed repository.',
+    () => ({ root: api.root, outcome: api.status() })
   );
   registerJson(
-    'recent-intents',
-    'driftseal://intents/recent',
-    'Recent DriftSeal intents',
-    'The ten most recent work-round intent records for the fixed repository.',
-    () => ({ root: api.root, intents: api.log({ last: 10 }) })
+    'recent-outcomes',
+    'driftseal://outcomes/recent',
+    'Recent DriftSeal outcomes',
+    'The ten most recent outcome records for the fixed repository.',
+    () => ({ root: api.root, outcomes: api.log({ last: 10 }) })
   );
   registerJson(
     'decision-catalog',
-    'driftseal://decisions',
+    'driftseal://madr',
     'DriftSeal decision catalog',
     'All MADR decision summaries for the fixed repository.',
     () => ({ root: api.root, decisions: api.decisionList() })
@@ -498,7 +588,7 @@ async function createServer({ root }) {
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       instructions:
-        'Use driftseal_status before repository changes or after context loss. Open one focused intent with driftseal_begin before changes. Reconcile every linked decision before verification. When the intent declares acceptance criteria, inspect its command and use driftseal_verify to capture machine evidence before completed closure; a command sourced from the repository log requires explicit allowTrackedCommand after it is trusted. Otherwise run the declared check directly. Close honestly with driftseal_end.',
+        'Use driftseal_status before durable project changes or after context loss. Open one coherent outcome with driftseal_begin and append same-outcome steps with driftseal_extend. Reconcile linked decisions after the final extension, inspect the cumulative verifier, use driftseal_verify for fresh contract-bound evidence, and close honestly with driftseal_end.',
     }
   );
   registerTools(server, api, z);

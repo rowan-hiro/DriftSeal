@@ -2,24 +2,26 @@
 'use strict';
 
 /**
- * DriftSeal — Seal the intent. Stop the drift.
+ * DriftSeal — Seal the outcome. Stop the drift.
  *
- * Intent-level write-ahead log and MADR decision log for agentic coding sessions.
+ * Outcome-level write-ahead log and MADR decision log for agentic coding sessions.
  *
  * Protocol per work round:
- *   1. driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"]
- *   2. execute the intent
+ *   1. driftseal begin "<outcome>" [--accept "<observable result>"] [--verify "<command>"]
+ *   2. execute the outcome, using driftseal extend for same-outcome additions
  *   3. driftseal verify   (for acceptance-bound machine evidence)
- *   4. driftseal end [--status ...] [--note ...] [--verify-result ...]  (reconcile against intent)
+ *   4. driftseal end [--status ...] [--note ...] [--verify-result ...]
  *
  * Events are appended to an append-only JSONL log (WAL semantics):
- *   { "type": "begin", "id", "ts", "intent", "acceptance", "verify" }
+ *   { "type": "begin",  "id", "ts", "outcome", "acceptance", "verify" }
+ *   { "type": "extend", "id", "ts", "extension", "acceptance", "verify" }
  *   { "type": "verify", "id", "ts", "command", "passed", "workspace" }
  *   { "type": "end",   "id", "ts", "status", "note", "verifyResult" }
  *
- * Intent log: $DRIFTSEAL_HOME/events.jsonl, or .intent-log/events.jsonl in cwd.
- * In a Git worktree, an open intent is parked in Git metadata until end.
- * Decision log: $DRIFTSEAL_DECISION_HOME, or .decision-log/ in cwd.
+ * Seal root: $DRIFTSEAL_HOME, or .seal in cwd.
+ * Outcome log: <seal-root>/outcomes/events.jsonl.
+ * In a Git worktree, an open outcome is parked in Git metadata until end.
+ * MADR records: <seal-root>/madr/.
  */
 
 const fs = require('fs');
@@ -40,10 +42,12 @@ const DECISION_STATUSES = [
   'deprecated',
   'superseded',
 ];
-const EVENT_SCHEMA_VERSION = 4;
-const PROTOCOL_VERSION = 14;
+const LOG_VERSION = 2;
+const EVENT_SCHEMA_VERSION = 1;
+const LEGACY_EVENT_SCHEMA_VERSION = 4;
+const PROTOCOL_VERSION = '2.0';
 const DEFAULT_LOG_LANGUAGE = 'en';
-const IN_PROGRESS_GIT_PATH = 'driftseal-in-progress.jsonl';
+const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repair skipped)';
@@ -52,7 +56,7 @@ const MAX_DECISION_SLUG_LENGTH = 180;
 const VERIFICATION_OUTPUT_CHUNK_BYTES = 64 * 1024;
 const CAPTURE_OUTPUT_EDGE_CHARACTERS = 32 * 1024;
 const CAPTURE_OUTPUT_OMISSION = '\n... [driftseal captured output truncated] ...\n';
-const LOCAL_INTENT_PROVENANCE_FILE = '.driftseal-local-intent.json';
+const LOCAL_OUTCOME_PROVENANCE_FILE = '.driftseal-local-outcome.json';
 
 class DriftSealError extends Error {
   constructor(message) {
@@ -74,7 +78,9 @@ class HelpRequested extends DriftSealError {
 function usageFor(key) {
   const lines = {
     begin:
-      'usage: driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"] [--decision <id>] [--force]',
+      'usage: driftseal begin "<outcome>" [--accept "<observable result>"] [--verify "<command>"] [--decision <id>] [--force]',
+    extend:
+      'usage: driftseal extend "<same-outcome addition>" [--accept "<observable result>"] [--verify "<command>"] [--decision <id>]',
     verify: 'usage: driftseal verify [--allow-tracked-command]',
     end: 'usage: driftseal end [id] [options]',
     status: 'usage: driftseal status',
@@ -84,6 +90,8 @@ function usageFor(key) {
     unreclaim: 'usage: driftseal unreclaim <id> --reason "<why>"',
     absorb: absorbUsage(),
     init: 'usage: driftseal init [--lang <tag>] [--local-log]',
+    migrate:
+      'usage: driftseal migrate v1-to-v2 inspect|apply|check [--source-log <file>] [--source-decisions <dir>] [--plan <file>] [--json]',
     decision: 'usage: driftseal decision add|update|list|show (run: driftseal help)',
     'decision add':
       'usage: driftseal decision add "<title>" --context "..." --outcome "..." [options]',
@@ -174,8 +182,12 @@ if (process.env._DRIFTSEAL_TEST_UMASK) {
   process.umask(Number.parseInt(process.env._DRIFTSEAL_TEST_UMASK, 8));
 }
 
+function sealRoot() {
+  return process.env.DRIFTSEAL_HOME || path.join(process.cwd(), '.seal');
+}
+
 function logDir() {
-  return process.env.DRIFTSEAL_HOME || path.join(process.cwd(), '.intent-log');
+  return path.join(sealRoot(), 'outcomes');
 }
 
 function logFile() {
@@ -183,7 +195,7 @@ function logFile() {
 }
 
 function decisionDir() {
-  return process.env.DRIFTSEAL_DECISION_HOME || path.join(process.cwd(), '.decision-log');
+  return path.join(sealRoot(), 'madr');
 }
 
 // A corrupt log line must not wedge reads; a non-string head degrades to null.
@@ -195,23 +207,29 @@ function normalizeEvent(event, line) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) {
     fail(`invalid event object on log line ${line}`);
   }
+  const logVersion = event.logVersion === undefined ? 1 : event.logVersion;
+  if (!Number.isSafeInteger(logVersion) || logVersion < 1 || logVersion > LOG_VERSION) {
+    fail(`invalid or unsupported log version on log line ${line}`);
+  }
+  const supportedSchema = logVersion === LOG_VERSION ? EVENT_SCHEMA_VERSION : LEGACY_EVENT_SCHEMA_VERSION;
   if (
     event.schemaVersion !== undefined &&
     (!Number.isSafeInteger(event.schemaVersion) || event.schemaVersion < 1)
   ) {
     fail(`invalid event schema version on log line ${line}`);
   }
-  if (event.schemaVersion > EVENT_SCHEMA_VERSION) {
+  if (event.schemaVersion > supportedSchema) {
     fail(
-      `event schema ${event.schemaVersion} requires a newer DriftSeal client (supported: ${EVENT_SCHEMA_VERSION})`
+      `event schema ${event.schemaVersion} requires a newer DriftSeal client (supported: ${supportedSchema})`
     );
   }
   if (typeof event.type !== 'string' || typeof event.id !== 'string' || event.id.length === 0) {
-    fail(`invalid event type or intent id on log line ${line}`);
+    fail(`invalid event type or outcome id on log line ${line}`);
   }
 
   if (event.type === 'begin') {
-    if (typeof event.intent !== 'string' || event.intent.trim().length === 0) {
+    const outcome = logVersion === LOG_VERSION ? event.outcome : event.intent;
+    if (typeof outcome !== 'string' || outcome.trim().length === 0) {
       fail(`invalid begin event on log line ${line}`);
     }
     if (!Array.isArray(event.decisions) && event.decisions !== undefined) {
@@ -231,7 +249,35 @@ function normalizeEvent(event, line) {
     if (new Set(decisions).size !== decisions.length) {
       fail(`duplicate linked decision on log line ${line}`);
     }
-    return { ...event, acceptance, decisions, head: normalizeHead(event.head) };
+    return { ...event, logVersion, outcome, acceptance, decisions, head: normalizeHead(event.head) };
+  }
+
+  if (event.type === 'extend') {
+    if (logVersion !== LOG_VERSION || typeof event.extension !== 'string' || event.extension.trim().length === 0) {
+      fail(`invalid extend event on log line ${line}`);
+    }
+    if (!Array.isArray(event.decisions) && event.decisions !== undefined) {
+      fail(`invalid extend decisions list on log line ${line}`);
+    }
+    if (!Array.isArray(event.acceptance) && event.acceptance !== undefined) {
+      fail(`invalid extend acceptance list on log line ${line}`);
+    }
+    const acceptance = event.acceptance || [];
+    if (acceptance.some((criterion) => typeof criterion !== 'string' || criterion.trim().length === 0)) {
+      fail(`invalid extend acceptance criterion on log line ${line}`);
+    }
+    if (acceptance.length > 0 && (typeof event.verify !== 'string' || event.verify.trim().length === 0)) {
+      fail(`acceptance-extending event has no replacement verification command on log line ${line}`);
+    }
+    if (event.verify !== null && event.verify !== undefined &&
+      (typeof event.verify !== 'string' || event.verify.trim().length === 0)) {
+      fail(`invalid extend verification command on log line ${line}`);
+    }
+    const decisions = (event.decisions || []).map(normalizeDecisionId);
+    if (new Set(decisions).size !== decisions.length) {
+      fail(`duplicate linked decision on log line ${line}`);
+    }
+    return { ...event, logVersion, acceptance, decisions, verify: event.verify || null, head: normalizeHead(event.head) };
   }
 
   if (event.type === 'verify') {
@@ -253,11 +299,13 @@ function normalizeEvent(event, line) {
       !/^[a-f0-9]{64}$/.test(event.outputHash) ||
       (event.workspace !== null &&
         (typeof event.workspace !== 'string' || !/^[a-f0-9]{64}$/.test(event.workspace))) ||
+      (logVersion === LOG_VERSION &&
+        (typeof event.contractHash !== 'string' || !/^[a-f0-9]{64}$/.test(event.contractHash))) ||
       event.passed !== (event.exitCode === 0 && event.signal === null)
     ) {
       fail(`invalid verification event on log line ${line}`);
     }
-    return { ...event, head: normalizeHead(event.head) };
+    return { ...event, logVersion, head: normalizeHead(event.head) };
   }
 
   if (event.type === 'end') {
@@ -276,14 +324,52 @@ function normalizeEvent(event, line) {
     ) {
       fail(`invalid end workspace on log line ${line}`);
     }
-    return { ...event, head: normalizeHead(event.head) };
+    if (logVersion === LOG_VERSION && event.status === 'completed' &&
+      (typeof event.contractHash !== 'string' || !/^[a-f0-9]{64}$/.test(event.contractHash))) {
+      fail(`completed outcome has no contract hash on log line ${line}`);
+    }
+    return { ...event, logVersion, head: normalizeHead(event.head) };
+  }
+
+  if (event.type === 'import') {
+    if (
+      logVersion !== LOG_VERSION ||
+      typeof event.outcome !== 'string' || event.outcome.trim().length === 0 ||
+      !END_STATUSES.includes(event.status) ||
+      !Array.isArray(event.sources) || event.sources.length === 0 ||
+      !Array.isArray(event.decisions) ||
+      typeof event.sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(event.sourceFingerprint)
+    ) {
+      fail(`invalid imported outcome on log line ${line}`);
+    }
+    const decisions = event.decisions.map(normalizeDecisionId);
+    if (new Set(decisions).size !== decisions.length) {
+      fail(`duplicate linked decision on log line ${line}`);
+    }
+    if (event.sources.some((source) => !source || typeof source !== 'object' ||
+      typeof source.id !== 'string' || source.id.length === 0)) {
+      fail(`invalid imported outcome source on log line ${line}`);
+    }
+    return { ...event, logVersion, decisions, head: normalizeHead(event.head) };
+  }
+
+  if (event.type === 'migration') {
+    if (
+      logVersion !== LOG_VERSION ||
+      typeof event.sourceFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(event.sourceFingerprint) ||
+      typeof event.planDigest !== 'string' || !/^[a-f0-9]{64}$/.test(event.planDigest) ||
+      !Array.isArray(event.excluded)
+    ) {
+      fail(`invalid migration event on log line ${line}`);
+    }
+    return { ...event, logVersion };
   }
 
   if (event.type === 'reclaim' || event.type === 'unreclaim') {
     if (typeof event.reason !== 'string' || event.reason.trim().length === 0) {
       fail(`invalid ${event.type} event on log line ${line}`);
     }
-    return event;
+    return { ...event, logVersion };
   }
 
   if (
@@ -294,7 +380,9 @@ function normalizeEvent(event, line) {
     event.type === 'decision_reconcile_cancel'
   ) {
     const schemaVersion = event.schemaVersion || 1;
-    if (event.type === 'decision_reconcile' && schemaVersion >= 2) {
+    const outcomeStatus = logVersion === LOG_VERSION ? event.outcomeStatus : event.intentStatus;
+    if (event.type === 'decision_reconcile' &&
+      (logVersion === LOG_VERSION || schemaVersion >= 2)) {
       fail(`legacy decision reconciliation is not valid in schema ${schemaVersion} on log line ${line}`);
     }
     if (
@@ -330,11 +418,11 @@ function normalizeEvent(event, line) {
     }
     if (
       event.type === 'decision_reconcile_cancel' &&
-      !['failed', 'abandoned'].includes(event.intentStatus)
+      !['failed', 'abandoned'].includes(outcomeStatus)
     ) {
       fail(`invalid reconciliation cancellation on log line ${line}`);
     }
-    return { ...event, decisionId };
+    return { ...event, logVersion, decisionId, ...(event.type === 'decision_reconcile_cancel' ? { outcomeStatus } : {}) };
   }
 
   fail(`unknown event type "${event.type}" on log line ${line}`);
@@ -352,22 +440,22 @@ function worktreeInProgressFile(cwd = process.cwd()) {
   return path.resolve(cwd, gitPath);
 }
 
-function isParkableIntentLog() {
+function isParkableOutcomeLog() {
   if (process.env.DRIFTSEAL_HOME) return false;
   const root = gitWorktreeRoot();
   if (!root) return false;
-  return path.resolve(logFile()) === path.resolve(root, '.intent-log', 'events.jsonl');
+  return path.resolve(logFile()) === path.resolve(root, '.seal', 'outcomes', 'events.jsonl');
 }
 
 function inProgressFile() {
-  if (!isParkableIntentLog()) return null;
+  if (!isParkableOutcomeLog()) return null;
   return worktreeInProgressFile();
 }
 
-function liveWorktreeIntentLog() {
+function liveWorktreeOutcomeLog() {
   const root = gitWorktreeRoot();
   if (!root) return null;
-  return path.resolve(root, '.intent-log', 'events.jsonl');
+  return path.resolve(root, '.seal', 'outcomes', 'events.jsonl');
 }
 
 function sameResolvedPath(left, right) {
@@ -376,7 +464,7 @@ function sameResolvedPath(left, right) {
 
 function shouldAttachInProgress(file) {
   if (process.env.DRIFTSEAL_HOME) return false;
-  const live = liveWorktreeIntentLog();
+  const live = liveWorktreeOutcomeLog();
   return live !== null && sameResolvedPath(file, live);
 }
 
@@ -499,13 +587,17 @@ function readEvents({ repairTail = false, readOnly = false, file = logFile() } =
   }
 }
 
-function parseJsonlRecords(content, source = 'log') {
+function parseJsonlRecords(content, source = 'log', { allowLegacy = false } = {}) {
   return content
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line, i) => {
       try {
-        return { raw: line, event: normalizeEvent(JSON.parse(line), i + 1) };
+        const event = normalizeEvent(JSON.parse(line), i + 1);
+        if (!allowLegacy && event.logVersion !== LOG_VERSION) {
+          fail(`v1 intent log cannot be used as a v2 outcome log; run driftseal migrate v1-to-v2 inspect`);
+        }
+        return { raw: line, event };
       } catch (err) {
         if (err instanceof DriftSealError) throw err;
         fail(`corrupt log line ${i + 1} in ${source}`);
@@ -542,7 +634,7 @@ function ensureDirectoryDurable(directory) {
 function appendEventTo(file, event) {
   ensureDirectoryDurable(path.dirname(file));
   const existed = fs.existsSync(file);
-  const storedEvent = { schemaVersion: EVENT_SCHEMA_VERSION, ...event };
+  const storedEvent = { logVersion: LOG_VERSION, schemaVersion: EVENT_SCHEMA_VERSION, ...event };
   const line = Buffer.from(`${JSON.stringify(storedEvent)}\n`, 'utf8');
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
   try {
@@ -571,7 +663,7 @@ function appendEventTo(file, event) {
  * Move the parked records into the tracked log. Safe to retry: a remap is persisted to the
  * park first, the log is written before the park file is dropped, so an interruption either
  * leaves nothing committed or leaves the overlay recognizable as already committed.
- * Returns the intent ids it had to remap.
+ * Returns the outcome ids it had to remap.
  */
 function flushInProgressLog() {
   const park = inProgressFile();
@@ -593,26 +685,26 @@ function flushInProgressLog() {
   writeJsonl(logFile(), [...committedRecords, ...plan.records]);
   discardInProgressLog(park);
   return new Map(
-    plan.mappings.filter((mapping) => mapping.kind === 'intent').map((mapping) => [mapping.from, mapping.to])
+    plan.mappings.filter((mapping) => mapping.kind === 'outcome').map((mapping) => [mapping.from, mapping.to])
   );
 }
 
-function parkedOpenIntent(park) {
+function parkedOpenOutcome(park) {
   if (!fs.existsSync(park)) return null;
   const records = readJsonlRecordsFromFile(park, { repairTail: true });
-  return openIntent(fold(records.map((record) => record.event)));
+  return openOutcome(fold(records.map((record) => record.event)));
 }
 
 function appendEvent(event) {
   const park = inProgressFile();
   if (!park) {
     const stored = appendEventTo(logFile(), event);
-    if (event.type === 'begin') writeLocalIntentProvenance(stored);
-    if (event.type === 'end') clearLocalIntentProvenance(event.id);
+    if (event.type === 'begin') writeLocalOutcomeProvenance(stored);
+    if (event.type === 'end') clearLocalOutcomeProvenance(event.id);
     return stored;
   }
 
-  const open = parkedOpenIntent(park);
+  const open = parkedOpenOutcome(park);
   // A park with nothing open left in it belongs in the log; an interrupted end retries here.
   if (!open) flushInProgressLog();
 
@@ -632,15 +724,15 @@ function contentHash(content) {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-function localIntentProvenanceFile() {
+function localOutcomeProvenanceFile() {
   const root = gitWorktreeRoot();
   const key = contentHash(path.resolve(logFile())).slice(0, 16);
-  if (!root) return path.join(logDir(), LOCAL_INTENT_PROVENANCE_FILE);
-  const gitPath = gitCapture(['rev-parse', '--git-path', `driftseal-local-intent-${key}.json`]);
+  if (!root) return path.join(logDir(), LOCAL_OUTCOME_PROVENANCE_FILE);
+  const gitPath = gitCapture(['rev-parse', '--git-path', `driftseal-local-outcome-${key}.json`]);
   return gitPath ? path.resolve(process.cwd(), gitPath) : null;
 }
 
-function localIntentLogIdentity() {
+function localOutcomeLogIdentity() {
   try {
     const stat = fs.statSync(logFile(), { bigint: true });
     return contentHash(JSON.stringify([String(stat.dev), String(stat.ino), String(stat.birthtimeNs)]));
@@ -649,12 +741,12 @@ function localIntentLogIdentity() {
   }
 }
 
-function localIntentProvenanceFingerprint({ id, ts, verify }) {
+function localOutcomeProvenanceFingerprint({ id, ts, verify }) {
   return contentHash(JSON.stringify([id, ts, verify || null]));
 }
 
-function writeLocalIntentProvenance(event) {
-  const file = localIntentProvenanceFile();
+function writeLocalOutcomeProvenance(event) {
+  const file = localOutcomeProvenanceFile();
   if (!file) return;
   ensureDirectoryDurable(path.dirname(file));
   atomicWriteFile(
@@ -662,15 +754,15 @@ function writeLocalIntentProvenance(event) {
     JSON.stringify({
       version: 1,
       id: event.id,
-      fingerprint: localIntentProvenanceFingerprint(event),
-      logIdentity: localIntentLogIdentity(),
+      fingerprint: localOutcomeProvenanceFingerprint(event),
+      logIdentity: localOutcomeLogIdentity(),
     }) + '\n',
     0o600
   );
 }
 
-function readLocalIntentProvenance() {
-  const file = localIntentProvenanceFile();
+function readLocalOutcomeProvenance() {
+  const file = localOutcomeProvenanceFile();
   if (!file || !fs.existsSync(file)) return null;
   try {
     const provenance = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -688,24 +780,24 @@ function readLocalIntentProvenance() {
   }
 }
 
-function hasMatchingLocalIntentProvenance(intent) {
-  const provenance = readLocalIntentProvenance();
+function hasMatchingLocalOutcomeProvenance(outcome) {
+  const provenance = readLocalOutcomeProvenance();
   return (
     provenance !== null &&
-    provenance.id === intent.id &&
-    provenance.logIdentity === localIntentLogIdentity() &&
+    provenance.id === outcome.id &&
+    provenance.logIdentity === localOutcomeLogIdentity() &&
     provenance.fingerprint ===
-      localIntentProvenanceFingerprint({
-        id: intent.id,
-        ts: intent.tsBegin,
-        verify: intent.verify,
+      localOutcomeProvenanceFingerprint({
+        id: outcome.id,
+        ts: outcome.tsBegin,
+        verify: outcome.verify,
       })
   );
 }
 
-function clearLocalIntentProvenance(id) {
-  const file = localIntentProvenanceFile();
-  const provenance = readLocalIntentProvenance();
+function clearLocalOutcomeProvenance(id) {
+  const file = localOutcomeProvenanceFile();
+  const provenance = readLocalOutcomeProvenance();
   if (!file || !provenance || provenance.id !== id) return;
   fs.unlinkSync(file);
   fsyncDirectory(path.dirname(file));
@@ -988,105 +1080,161 @@ function withMutationLocks(resources, action, { tryWaitMs } = {}) {
   }
 }
 
-/** Fold the event stream into one record per intent. */
+function outcomeContractHash(record) {
+  return contentHash(JSON.stringify({
+    outcome: record.outcome,
+    extensions: record.extensions.map(({ extension, acceptance, verify, decisions }) => ({
+      extension,
+      acceptance,
+      verify,
+      decisions,
+    })),
+    acceptance: record.acceptance,
+    verify: record.verify,
+    decisions: record.decisions,
+  }));
+}
+
+function newOutcomeRecord(ev) {
+  const record = {
+    id: ev.id,
+    tsBegin: ev.ts,
+    outcome: ev.outcome,
+    extensions: [],
+    acceptance: Array.isArray(ev.acceptance) ? ev.acceptance : [],
+    verify: ev.verify || null,
+    beginHead: ev.head || null,
+    decisions: Array.isArray(ev.decisions) ? ev.decisions : [],
+    logVersion: ev.logVersion || 1,
+    schemaVersion: ev.schemaVersion || 1,
+    decisionPrepares: [],
+    decisionTerminals: [],
+    decisionUpdates: [],
+    verificationAttempts: [],
+    verification: null,
+    status: 'in_progress',
+    tsEnd: null,
+    note: null,
+    verifyResult: null,
+    endHead: null,
+    reclaimed: false,
+    reclaimReason: null,
+    reclaimedAt: null,
+    imported: null,
+    contractHash: null,
+  };
+  record.contractHash = outcomeContractHash(record);
+  return record;
+}
+
+/** Fold the event stream into one record per outcome. Legacy v1 events are accepted for migration. */
 function fold(events) {
   const records = new Map();
   const reconciliations = new Map();
   const order = [];
   for (const ev of events) {
     if (ev.type === 'begin') {
-      if (records.has(ev.id)) fail(`duplicate begin event for intent id: ${ev.id}`);
-      records.set(ev.id, {
-        id: ev.id,
-        tsBegin: ev.ts,
-        intent: ev.intent,
-        acceptance: Array.isArray(ev.acceptance) ? ev.acceptance : [],
-        verify: ev.verify || null,
-        beginHead: ev.head || null,
-        decisions: Array.isArray(ev.decisions) ? ev.decisions : [],
-        schemaVersion: ev.schemaVersion || 1,
-        decisionPrepares: [],
-        decisionTerminals: [],
-        decisionUpdates: [],
-        verificationAttempts: [],
-        verification: null,
-        status: 'in_progress',
-        tsEnd: null,
-        note: null,
-        verifyResult: null,
-        endHead: null,
-        reclaimed: false,
-        reclaimReason: null,
-        reclaimedAt: null,
-      });
+      if (records.has(ev.id)) fail(`duplicate begin event for outcome id: ${ev.id}`);
+      records.set(ev.id, newOutcomeRecord(ev));
       order.push(ev.id);
+    } else if (ev.type === 'import') {
+      if (records.has(ev.id)) fail(`duplicate imported outcome id: ${ev.id}`);
+      const record = newOutcomeRecord({
+        ...ev,
+        ts: ev.beganAt,
+        acceptance: [],
+        verify: null,
+      });
+      record.status = ev.status;
+      record.tsEnd = ev.endedAt;
+      record.note = ev.summary || null;
+      record.reclaimed = ev.reclaimed === true;
+      record.reclaimReason = ev.reclaimReason || null;
+      record.reclaimedAt = ev.reclaimedAt || null;
+      record.imported = {
+        sourceIds: ev.sources.map((source) => source.id),
+        sourceFingerprint: ev.sourceFingerprint,
+        sources: ev.sources,
+      };
+      records.set(ev.id, record);
+      order.push(ev.id);
+    } else if (ev.type === 'migration') {
+      continue;
+    } else if (ev.type === 'extend') {
+      const rec = records.get(ev.id);
+      if (!rec) fail(`extension references unknown outcome id: ${ev.id}`);
+      if (rec.status !== 'in_progress') fail(`extension occurred after outcome ${ev.id} was closed`);
+      rec.extensions.push({
+        extension: ev.extension,
+        acceptance: ev.acceptance,
+        verify: ev.verify,
+        decisions: ev.decisions,
+        extendedAt: ev.ts,
+        head: ev.head || null,
+      });
+      rec.acceptance = [...new Set([...rec.acceptance, ...ev.acceptance])];
+      if (ev.verify) rec.verify = ev.verify;
+      rec.decisions = [...new Set([...rec.decisions, ...ev.decisions])];
+      rec.contractHash = outcomeContractHash(rec);
+      rec.verification = null;
     } else if (ev.type === 'verify') {
       const rec = records.get(ev.id);
-      if (!rec) fail(`verification event references unknown intent id: ${ev.id}`);
-      if (rec.status !== 'in_progress') {
-        fail(`verification occurred after intent ${ev.id} was closed`);
-      }
+      if (!rec) fail(`verification event references unknown outcome id: ${ev.id}`);
+      if (rec.status !== 'in_progress') fail(`verification occurred after outcome ${ev.id} was closed`);
       if (rec.acceptance.length === 0 || !rec.verify) {
-        fail(`verification event references intent ${ev.id} without acceptance criteria`);
+        fail(`verification event references outcome ${ev.id} without acceptance criteria`);
       }
-      if (ev.command !== rec.verify) {
-        fail(`verification command does not match intent ${ev.id}`);
+      if (ev.command !== rec.verify) fail(`verification command does not match outcome ${ev.id}`);
+      if (rec.logVersion === LOG_VERSION && ev.contractHash !== rec.contractHash) {
+        fail(`verification contract does not match outcome ${ev.id}`);
       }
       rec.verificationAttempts.push(ev);
       rec.verification = ev;
     } else if (ev.type === 'reclaim' || ev.type === 'unreclaim') {
       const rec = records.get(ev.id);
-      if (!rec) fail(`${ev.type} event references unknown intent id: ${ev.id}`);
+      if (!rec) fail(`${ev.type} event references unknown outcome id: ${ev.id}`);
       if (ev.type === 'reclaim') {
-        if (rec.status === 'in_progress') {
-          fail(`cannot reclaim intent ${ev.id} while it is in_progress`);
-        }
-        if (rec.reclaimed) fail(`duplicate reclaim event for intent id: ${ev.id}`);
+        if (rec.status === 'in_progress') fail(`cannot reclaim outcome ${ev.id} while it is in_progress`);
+        if (rec.reclaimed) fail(`duplicate reclaim event for outcome id: ${ev.id}`);
         rec.reclaimed = true;
         rec.reclaimReason = ev.reason;
         rec.reclaimedAt = ev.ts;
       } else {
-        if (!rec.reclaimed) fail(`unreclaim event for intent id that is not reclaimed: ${ev.id}`);
+        if (!rec.reclaimed) fail(`unreclaim event for outcome id that is not reclaimed: ${ev.id}`);
         rec.reclaimed = false;
         rec.reclaimReason = null;
         rec.reclaimedAt = null;
       }
     } else if (ev.type === 'end') {
       const rec = records.get(ev.id);
-      if (!rec) fail(`end event references unknown intent id: ${ev.id}`);
-      if (rec.status !== 'in_progress') {
-        fail(`duplicate end event for intent id: ${ev.id}`);
-      }
+      if (!rec) fail(`end event references unknown outcome id: ${ev.id}`);
+      if (rec.status !== 'in_progress') fail(`duplicate end event for outcome id: ${ev.id}`);
       const conflictingCancellation = rec.decisionTerminals.find(
-        (terminal) =>
-          terminal.type === 'decision_reconcile_cancel' &&
-          terminal.intentStatus !== ev.status
+        (terminal) => terminal.type === 'decision_reconcile_cancel' && terminal.outcomeStatus !== ev.status
       );
       if (conflictingCancellation) {
-        fail(
-          `intent ${ev.id} was closed as ${ev.status} after reconciliation recovery was cancelled for ${conflictingCancellation.intentStatus}`
-        );
+        fail(`outcome ${ev.id} was closed as ${ev.status} after reconciliation recovery was cancelled for ${conflictingCancellation.outcomeStatus}`);
       }
       if (
         ['completed', 'partial'].includes(ev.status) &&
         rec.decisions.length > 0 &&
-        ((rec.schemaVersion >= 2 && (ev.schemaVersion || 1) < 2) ||
-          rec.decisions.some(
-            (decisionId) => qualifyingDecisionUpdates(rec, decisionId).length === 0
-          ))
+        ((rec.logVersion === 1 && rec.schemaVersion >= 2 && (ev.schemaVersion || 1) < 2) ||
+          rec.decisions.some((decisionId) => qualifyingDecisionUpdates(rec, decisionId).length === 0))
       ) {
-        fail(`linked intent ${ev.id} was closed without reconciling every declared decision`);
+        fail(`linked outcome ${ev.id} was closed without reconciling every declared decision`);
       }
       if (ev.status === 'completed' && rec.acceptance.length > 0) {
         if (!rec.verification || !rec.verification.passed) {
-          fail(`acceptance-bound intent ${ev.id} was completed without successful machine verification`);
+          fail(`acceptance-bound outcome ${ev.id} was completed without successful machine verification`);
         }
         if (
-          (ev.schemaVersion || 1) < 4 ||
+          (rec.logVersion === 1 && (ev.schemaVersion || 1) < 4) ||
           ev.verificationId !== rec.verification.verificationId ||
-          (ev.workspace ?? null) !== rec.verification.workspace
+          (ev.workspace ?? null) !== rec.verification.workspace ||
+          (rec.logVersion === LOG_VERSION &&
+            (ev.contractHash !== rec.contractHash || rec.verification.contractHash !== rec.contractHash))
         ) {
-          fail(`acceptance-bound intent ${ev.id} was completed with stale machine verification`);
+          fail(`acceptance-bound outcome ${ev.id} was completed with stale machine verification`);
         }
       }
       rec.status = ev.status;
@@ -1096,26 +1244,18 @@ function fold(events) {
       rec.endHead = ev.head || null;
     } else if (ev.type === 'decision_reconcile_prepare') {
       const rec = records.get(ev.id);
-      if (!rec) fail(`decision reconciliation references unknown intent id: ${ev.id}`);
-      if (rec.status !== 'in_progress') {
-        fail(`decision reconciliation occurred after intent ${ev.id} was closed`);
-      }
-      if (!rec.decisions.includes(ev.decisionId)) {
-        fail(`decision reconciliation references unlinked decision ${ev.decisionId}`);
-      }
-      if (reconciliations.has(ev.reconciliationId)) {
-        fail(`duplicate reconciliation id: ${ev.reconciliationId}`);
-      }
+      if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
+      if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
+      if (!rec.decisions.includes(ev.decisionId)) fail(`decision reconciliation references unlinked decision ${ev.decisionId}`);
+      if (reconciliations.has(ev.reconciliationId)) fail(`duplicate reconciliation id: ${ev.reconciliationId}`);
       rec.decisionPrepares.push(ev);
       reconciliations.set(ev.reconciliationId, { prepare: ev, terminal: null });
     } else if (ev.type === 'decision_reconcile') {
       const rec = records.get(ev.id);
-      if (!rec) fail(`decision reconciliation references unknown intent id: ${ev.id}`);
-      if (rec.status !== 'in_progress') {
-        fail(`decision reconciliation occurred after intent ${ev.id} was closed`);
-      }
-      if (rec.schemaVersion >= 2) {
-        fail(`linked schema-v2 intent ${rec.id} contains a legacy decision reconciliation`);
+      if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
+      if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
+      if (rec.logVersion === 1 && rec.schemaVersion >= 2) {
+        fail(`linked legacy schema-v2 outcome ${rec.id} contains a legacy decision reconciliation`);
       }
       rec.decisionUpdates.push(ev);
     } else if (
@@ -1125,29 +1265,14 @@ function fold(events) {
     ) {
       const rec = records.get(ev.id);
       const reconciliation = reconciliations.get(ev.reconciliationId);
-      if (rec && rec.status !== 'in_progress') {
-        fail(`decision reconciliation occurred after intent ${ev.id} was closed`);
-      }
-      if (
-        !rec ||
-        !reconciliation ||
-        reconciliation.prepare.id !== ev.id ||
-        reconciliation.prepare.decisionId !== ev.decisionId
-      ) {
+      if (rec && rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
+      if (!rec || !reconciliation || reconciliation.prepare.id !== ev.id || reconciliation.prepare.decisionId !== ev.decisionId) {
         fail(`decision reconciliation terminal has no matching prepare: ${ev.reconciliationId}`);
       }
-      if (reconciliation.terminal) {
-        fail(`decision reconciliation already has a terminal event: ${ev.reconciliationId}`);
-      }
-      const priorCancellation = rec.decisionTerminals.find(
-        (terminal) => terminal.type === 'decision_reconcile_cancel'
-      );
-      if (
-        ev.type === 'decision_reconcile_cancel' &&
-        priorCancellation &&
-        priorCancellation.intentStatus !== ev.intentStatus
-      ) {
-        fail(`intent ${ev.id} has conflicting reconciliation cancellation statuses`);
+      if (reconciliation.terminal) fail(`decision reconciliation already has a terminal event: ${ev.reconciliationId}`);
+      const priorCancellation = rec.decisionTerminals.find((terminal) => terminal.type === 'decision_reconcile_cancel');
+      if (ev.type === 'decision_reconcile_cancel' && priorCancellation && priorCancellation.outcomeStatus !== ev.outcomeStatus) {
+        fail(`outcome ${ev.id} has conflicting reconciliation cancellation statuses`);
       }
       if (
         ev.type === 'decision_reconcile_commit' &&
@@ -1168,24 +1293,24 @@ function fold(events) {
 function qualifyingDecisionUpdates(record, decisionId) {
   return record.decisionUpdates.filter((update) => {
     if (update.decisionId !== decisionId) return false;
-    if (record.schemaVersion < 2) return true;
+    if (record.logVersion === 1 && record.schemaVersion < 2) return true;
     return (
       update.type === 'decision_reconcile_commit' &&
-      (update.schemaVersion || 1) >= 2 &&
+      (update.logVersion === LOG_VERSION || (update.schemaVersion || 1) >= 2) &&
       typeof update.fileHash === 'string'
     );
   });
 }
 
-function openIntent(records) {
+function openOutcome(records) {
   const open = records.filter((record) => record.status === 'in_progress');
-  if (open.length > 1) fail(`multiple intents in progress: ${open.map((record) => record.id).join(', ')}`);
+  if (open.length > 1) fail(`multiple outcomes in progress: ${open.map((record) => record.id).join(', ')}`);
   return open[0] || null;
 }
 
-function parseIntentId(id) {
+function parseOutcomeId(id) {
   const match = String(id).match(/^(\d{4}-\d{2}-\d{2})-(\d+)$/);
-  if (!match) fail(`invalid intent id: ${id}`);
+  if (!match) fail(`invalid outcome id: ${id}`);
   return { date: match[1], seq: Number.parseInt(match[2], 10) };
 }
 
@@ -1193,7 +1318,7 @@ function nextIdForDate(date, events) {
   let maxSeq = 0;
   const prefix = `${date}-`;
   for (const ev of events) {
-    if (ev.type === 'begin' && typeof ev.id === 'string' && ev.id.startsWith(prefix)) {
+    if ((ev.type === 'begin' || ev.type === 'import') && typeof ev.id === 'string' && ev.id.startsWith(prefix)) {
       const seq = Number.parseInt(ev.id.slice(prefix.length), 10);
       if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
     }
@@ -1338,7 +1463,7 @@ function renderDecision({ id, title, date, status, context, outcome, drivers, op
   ].join('\n\n') + '\n';
 }
 
-function prepareDecisionReconciliation(decision, intentId, status, note) {
+function prepareDecisionReconciliation(decision, outcomeId, status, note) {
   const target = path.join(decisionDir(), decision.file);
   const fromStatus = decision.status;
   const reconciliationId = crypto.randomUUID();
@@ -1351,12 +1476,12 @@ function prepareDecisionReconciliation(decision, intentId, status, note) {
   const normalizedNote = note.trim().replace(/\r\n|\r|\n/g, eol);
   const hasDriftSealHistory = /^<!-- [a-z][a-z0-9-]*-reconciliation: [^>\r\n]+ -->\r?$/m.test(updated);
   const historyHeading = hasDriftSealHistory ? '' : `## Decision History${eol}${eol}`;
-  const history = `${historyHeading}<!-- driftseal-reconciliation: ${reconciliationId} -->${eol}### ${ts} — Intent \`${intentId}\`${eol}${eol}Status: ${titleCase(fromStatus)} → ${titleCase(status)}${eol}${eol}${normalizedNote}${eol}`;
+  const history = `${historyHeading}<!-- driftseal-reconciliation: ${reconciliationId} -->${eol}### ${ts} — Outcome \`${outcomeId}\`${eol}${eol}Status: ${titleCase(fromStatus)} → ${titleCase(status)}${eol}${eol}${normalizedNote}${eol}`;
   const separator = updated.endsWith(eol + eol) ? '' : updated.endsWith(eol) ? eol : eol + eol;
   const nextContent = updated + separator + history;
   return {
     type: 'decision_reconcile_prepare',
-    id: intentId,
+    id: outcomeId,
     decisionId: decision.id,
     reconciliationId,
     ts,
@@ -1384,11 +1509,11 @@ function reconciliationEvent(type, prepare) {
   };
 }
 
-function pendingReconciliations(events, intentId) {
+function pendingReconciliations(events, outcomeId) {
   const prepares = new Map();
   const finished = new Set();
   for (const event of events) {
-    if (event.id !== intentId) continue;
+    if (event.id !== outcomeId) continue;
     if (event.type === 'decision_reconcile_prepare') {
       prepares.set(event.reconciliationId, event);
     } else if (
@@ -1405,8 +1530,8 @@ function pendingReconciliations(events, intentId) {
   );
 }
 
-function recoverPendingReconciliations(events, intentId) {
-  const pending = pendingReconciliations(events, intentId);
+function recoverPendingReconciliations(events, outcomeId) {
+  const pending = pendingReconciliations(events, outcomeId);
   if (pending.length === 0) return events;
   const index = decisionIndex();
   for (const prepare of pending) {
@@ -1434,16 +1559,16 @@ function recoverPendingReconciliations(events, intentId) {
   return events;
 }
 
-function cancelPendingReconciliations(events, intentId, intentStatus) {
-  for (const prepare of pendingReconciliations(events, intentId)) {
+function cancelPendingReconciliations(events, outcomeId, outcomeStatus) {
+  for (const prepare of pendingReconciliations(events, outcomeId)) {
     const cancellation = {
       type: 'decision_reconcile_cancel',
       id: prepare.id,
       decisionId: prepare.decisionId,
       reconciliationId: prepare.reconciliationId,
       ts: new Date().toISOString(),
-      intentStatus,
-      note: `automatic recovery cancelled because intent closed as ${intentStatus}`,
+      outcomeStatus,
+      note: `automatic recovery cancelled because outcome closed as ${outcomeStatus}`,
     };
     events.push(appendEvent(cancellation));
   }
@@ -1454,7 +1579,7 @@ function escapeCancellationStatus(record) {
   const cancellation = record.decisionTerminals.find(
     (terminal) => terminal.type === 'decision_reconcile_cancel'
   );
-  return cancellation ? cancellation.intentStatus : null;
+  return cancellation ? cancellation.outcomeStatus : null;
 }
 
 function closeIntentAsEscape(events, record, requestedStatus, note, verifyResult) {
@@ -1546,7 +1671,8 @@ function parseArgs(argv, spec, usageKey) {
 
 function render(rec) {
   const lines = [`[${rec.id}] ${rec.status}`];
-  lines.push(`  intent: ${rec.intent}`);
+  lines.push(`  outcome: ${rec.outcome}`);
+  for (const extension of rec.extensions) lines.push(`  extend: ${extension.extension}`);
   for (const criterion of rec.acceptance) lines.push(`  accept: ${criterion}`);
   if (rec.decisions.length > 0) lines.push(`  decisions: ${rec.decisions.join(', ')}`);
   if (rec.verify) lines.push(`  verify: ${rec.verify}`);
@@ -1567,6 +1693,7 @@ function render(rec) {
   }
   lines.push(`  began: ${rec.tsBegin}` + (rec.tsEnd ? `  ended: ${rec.tsEnd}` : ''));
   if (rec.reclaimed) lines.push(`  reclaimed: ${rec.reclaimReason}`);
+  if (rec.imported) lines.push(`  imported-from: ${rec.imported.sourceIds.join(', ')}`);
   return lines.join('\n');
 }
 
@@ -1582,18 +1709,21 @@ function publicVerification(verification) {
     stdoutBytes: verification.stdoutBytes,
     stderrBytes: verification.stderrBytes,
     workspace: verification.workspace,
+    contractHash: verification.contractHash || null,
     head: verification.head,
     ranAt: verification.ts,
   };
 }
 
-function publicIntent(rec) {
+function publicOutcome(rec) {
   if (!rec) return null;
   return {
     id: rec.id,
-    intent: rec.intent,
+    outcome: rec.outcome,
+    extensions: rec.extensions.map((extension) => ({ ...extension })),
     acceptance: [...rec.acceptance],
     verify: rec.verify,
+    contractHash: rec.contractHash,
     verification: publicVerification(rec.verification),
     decisions: [...rec.decisions],
     status: rec.status,
@@ -1606,6 +1736,12 @@ function publicIntent(rec) {
     reclaimed: rec.reclaimed,
     reclaimReason: rec.reclaimReason,
     reclaimedAt: rec.reclaimedAt,
+    imported: rec.imported
+      ? {
+          sourceIds: [...rec.imported.sourceIds],
+          sourceFingerprint: rec.imported.sourceFingerprint,
+        }
+      : null,
   };
 }
 
@@ -1859,7 +1995,66 @@ function stripDecisionLogLanguage(block, language = DEFAULT_LOG_LANGUAGE) {
     .replace(`\n${decisionLogLanguageParagraph(language)}\n`, '');
 }
 
+function outcomeLogLanguageParagraph(language) {
+  return `**Log language:** \`${language}\`. Write outcome-log prose (outcome, extension, note,
+verify-result, and reclaim/unreclaim reason) in that language. Keep command
+names, flags, status tokens, and ids in English.`;
+}
+
 function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  return `${INTENT_PROTOCOL_MARKER}
+<!-- driftseal-version: ${version} -->
+<!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
+
+## Agent protocol: outcome write-ahead log
+
+This repository uses DriftSeal (\`driftseal\`) to prevent agent drift. This
+\`AGENTS.md\` protocol is the source of truth; use the CLI by default, with MCP
+and lifecycle hooks as optional adapters.
+
+${outcomeLogLanguageParagraph(language)}
+
+1. **Write the outcome first**, before changing durable project content:
+   \`driftseal begin "<coherent delivery outcome>" --accept "<observable result>" --verify "<exact command that proves the cumulative contract>"\`.
+   Repeat \`--accept\` for independently observable criteria and add one
+   \`--decision <id>\` for each existing MADR this outcome may change.
+   Record outcomes for changes intended to persist in the project: code,
+   configuration, documentation, dependencies, and equivalent files, inside or
+   outside Git. Git operations, checks, temporary auxiliary work, and external
+   state changes are exempt when they do not write durable project content here.
+2. **Extend only the same outcome.** For another step toward the same coherent
+   delivery goal, append \`driftseal extend "<addition>"\`. It may add
+   \`--accept\`, \`--decision\`, and a replacement \`--verify\`; adding acceptance
+   requires a replacement verifier that proves the complete accumulated contract.
+   Every extension invalidates earlier verification. If the delivery goal changes,
+   close the current outcome honestly and begin a new one.
+   One open outcome belongs to one worktree, or one configured non-Git project
+   root. Every agent changing durable content in the same root re-anchors and
+   continues it; separate worktrees hold separate outcomes.
+3. **Reconcile, verify, then close.** After the final extension, reconcile every
+   linked MADR with \`driftseal decision update\`. Inspect \`driftseal status\`,
+   then run \`driftseal verify\` for an acceptance-bound outcome. A verifier
+   without matching local provenance is untrusted and requires
+   \`--allow-tracked-command\` after inspection. Finish with
+   \`driftseal end -s completed|partial|failed|abandoned -n "<what happened>"\`.
+   Completed outcomes require fresh successful verification bound to both the
+   current contract hash and Git-visible workspace. Never report success without
+   closing the outcome.
+4. **Re-anchor after context loss or handoff:** run \`driftseal status\` and
+   \`driftseal log --last 3\` before changing durable content. Resume the open
+   outcome when it still matches; otherwise close it and begin a new one.
+
+**Log access goes only through DriftSeal.** Never read, edit, move, or delete
+\`.seal/outcomes/events.jsonl\` (or its configured equivalent) directly. Use
+\`reclaim\`/\`unreclaim\` for visibility markers and \`absorb\` after merge
+collisions. These operations preserve append-only single-lineage history.
+
+Seal root: \`.seal/\` (override with \`$DRIFTSEAL_HOME\`); outcome log:
+\`.seal/outcomes/events.jsonl\`; ${localLog ? 'keep `.seal/` local and untracked.' : 'commit `.seal/` with the code.'}
+${INTENT_PROTOCOL_END}`;
+}
+
+function v1IntentProtocolBlock(version = 14, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   return `${INTENT_PROTOCOL_MARKER}
 <!-- driftseal-version: ${version} -->
 <!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
@@ -1949,7 +2144,7 @@ ${INTENT_PROTOCOL_END}`;
 }
 
 function previousIntentProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  const v13 = intentProtocolBlock(version, language, localLog)
+  const v13 = v1IntentProtocolBlock(version, language, localLog)
     .replace(
       '1. **Write intent first**, before changing durable project content:\n' +
         '   `driftseal begin "<what this round will accomplish>" --accept "<observable outcome>" --verify "<exact command that proves it>"`.\n' +
@@ -2157,6 +2352,31 @@ function decisionProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LO
 
 ## Agent protocol: decision log
 
+Record a MADR only when it preserves context that the outcome log and Git cannot
+recover: rejected or deferred paths worth revisiting, non-obvious rationale for
+long-lived or costly-to-reverse choices, and deprecated or superseded decisions.
+Do not record routine, local, readily reversible choices.
+
+${decisionLogLanguageParagraph(language)}
+
+\`driftseal decision add "<title>" --context "<problem and constraints>" --outcome "<decision and rationale>" --driver "<decision driver>" --option "<considered option>" --consequence "<result>"\`
+
+Use \`proposed|accepted|rejected|deferred|deprecated|superseded\` statuses. Link
+existing MADRs from \`begin\` or \`extend\`, then reconcile each linked record
+with \`driftseal decision update\` before successful or partial closure. After a
+merge, \`driftseal absorb\` remaps colliding ids; it never auto-merges concurrent
+edits of a shared MADR.
+${localLog ? 'Keep `.seal/madr/` local and untracked.' : 'Commit `.seal/madr/` with the code.'}
+${DECISION_PROTOCOL_END}`;
+}
+
+function v1DecisionProtocolBlock(version = 14, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  return `${DECISION_PROTOCOL_MARKER}
+<!-- driftseal-decisions-version: ${version} -->
+<!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
+
+## Agent protocol: decision log
+
 Record a MADR document only when it preserves decision context that cannot be
 recovered from the intent log and Git history: a rejected or deferred path worth
 revisiting, non-obvious rationale behind a long-lived or costly-to-reverse accepted
@@ -2233,8 +2453,8 @@ Commit \`.decision-log/\` with the code.`;
 }
 
 function previousDecisionProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  if (version >= 11) return decisionProtocolBlock(version, language, localLog);
-  const v10 = stripDecisionLogLanguage(decisionProtocolBlock(version, language, localLog), language);
+  if (version >= 11) return v1DecisionProtocolBlock(version, language, localLog);
+  const v10 = stripDecisionLogLanguage(v1DecisionProtocolBlock(version, language, localLog), language);
   if (version >= 9) return v10;
   const v8 = v10.replace(
     '\nAfter a merge, colliding decision ids are remapped with `driftseal absorb`;\n' +
@@ -2268,11 +2488,17 @@ function upgradeManagedBlock({
     if (!versionMatch) {
       fail(`cannot safely upgrade unversioned managed protocol block beginning with ${marker}`);
     }
-    const version = Number(versionMatch[1]);
-    if (!Number.isSafeInteger(version) || version < 1) {
+    const version = versionMatch[1];
+    if (!/^\d+(?:\.\d+)?$/.test(version)) {
       fail(`invalid protocol version in block beginning with ${marker}`);
     }
-    if (version > PROTOCOL_VERSION) {
+    const futureV2 = version.includes('.') && (() => {
+      const [major, minor] = version.split('.').map(Number);
+      const [supportedMajor, supportedMinor] = PROTOCOL_VERSION.split('.').map(Number);
+      return major > supportedMajor || (major === supportedMajor && minor > supportedMinor);
+    })();
+    const futureV1 = !version.includes('.') && Number(version) > 14;
+    if (futureV2 || futureV1) {
       fail(
         `protocol version ${version} requires a newer DriftSeal client (supported: ${PROTOCOL_VERSION})`
       );
@@ -2543,7 +2769,8 @@ const SKILL_RELEASE_DIGESTS = new Set([
   'cc98b9348ec222320bfcd285ba3f1f499a42d15b31e9b1d83c35f0206b2d5ba9', // ca16785 CLI-first skill integration
   '0fd870f8c1b81f8386d986d64742679d56cd1d317c02890830c81876eb9227d6', // da8afd2 1.1.0 absorb
   '72ddea79940bdf2bce66d491888f11423ae1bd383e1b511028fda617e6f6fb27', // f395778 1.1.6 parked intents
-  'df8bc7035de1a19faf307c92f9bb0f4052e683d1a94881c2c5d5cbef48b67568', // dc9899d 1.1.7 parked intents in absorb (current)
+  'df8bc7035de1a19faf307c92f9bb0f4052e683d1a94881c2c5d5cbef48b67568', // dc9899d 1.1.7 parked intents in absorb
+  '42a0549dff21483c0508ea4a79658e7bf05cd98f8af4238c95dbd23cdcde7ee6', // 2.0.0 outcome workflow
 ]);
 
 function skillInstallUsage() {
@@ -2964,7 +3191,7 @@ function hookLogFile() {
   let current = path.resolve(process.cwd());
   const root = gitWorktreeRoot(current);
   while (true) {
-    const candidate = path.join(current, '.intent-log', 'events.jsonl');
+    const candidate = path.join(current, '.seal', 'outcomes', 'events.jsonl');
     if (fs.existsSync(candidate)) return candidate;
     if (root && path.resolve(root) === current) {
       const park = worktreeInProgressFile(current);
@@ -2976,7 +3203,7 @@ function hookLogFile() {
   }
 }
 
-/** Advisory reminder text; null when no ancestor has an intent log yet. */
+/** Advisory reminder text; null when no ancestor has an outcome log yet. */
 function hookReminder(event, { readOnly = false } = {}) {
   const file = hookLogFile();
   if (!file) return null;
@@ -2984,27 +3211,27 @@ function hookReminder(event, { readOnly = false } = {}) {
     return (
       'DriftSeal reminder: if this round will change durable project content in this workspace ' +
       '(code, configuration, documentation, dependencies), ' +
-      'begin an intent first: driftseal begin "<intent>" --accept "<observable outcome>" ' +
+      'begin an outcome first: driftseal begin "<coherent outcome>" --accept "<observable result>" ' +
       '--verify "<command>". ' +
       'Questions, read-only exploration, single-step checks, temporary work outside durable ' +
       'project content, and external state changes that do not write project content here need ' +
-      'no intent — skip this reminder when it does not apply.'
+      'no outcome — skip this reminder when it does not apply.'
     );
   }
-  const open = openIntent(fold(readEvents({ file, readOnly })));
+  const open = openOutcome(fold(readEvents({ file, readOnly })));
   if (open) {
     const reconciliation = open.decisions.length > 0 ? 'reconcile every linked decision, then ' : '';
     const verification = open.acceptance.length > 0
       ? `${reconciliation}inspect and run driftseal verify, then close it with driftseal end`
       : `${reconciliation}run the declared verification, then close it with driftseal end`;
     return (
-      `DriftSeal reminder: intent ${open.id} is still in_progress: "${open.intent}". ` +
+      `DriftSeal reminder: outcome ${open.id} is still in_progress: "${open.outcome}". ` +
       `If its work is done, ${verification}; ` +
       'if this turn was unrelated, ignore this reminder.'
     );
   }
   return (
-    'DriftSeal reminder: no intent is open. If this round changed files without one, consider ' +
+    'DriftSeal reminder: no outcome is open. If this round changed files without one, consider ' +
     'whether the work should have been logged; ignore this reminder when nothing changed.'
   );
 }
@@ -3078,7 +3305,7 @@ function isGitWorkTree(cwd = process.cwd()) {
  * Hash the material Git-visible workspace contents rather than trusting the
  * current commit alone. Any tracked or untracked (non-ignored) content change
  * makes the verification stale.
- * The intent event log is excluded because recording verification and closure
+ * The outcome event log is excluded because recording verification and closure
  * necessarily appends to it.
  */
 function workspaceFingerprint(cwd = process.cwd()) {
@@ -3148,8 +3375,8 @@ function workspaceFingerprint(cwd = process.cwd()) {
  *
  * Paths are read from `ls-files -z` with `:(literal)` pathspecs because git's
  * human-readable listing C-quotes non-ASCII names and treats `*?[\` as
- * wildcards. The printed remediation uses the fixed names `.intent-log` and
- * `.decision-log` and is meant to be run from this directory: git resolves
+ * wildcards. The printed remediation uses the fixed name `.seal` and is meant
+ * to be run from this directory: git resolves
  * those pathspecs against the init cwd, so the command stays paste-safe in
  * POSIX shells, cmd.exe, and PowerShell without embedding the repo-relative
  * prefix or any shell quoting.
@@ -3160,7 +3387,7 @@ function warnIfDefaultLogsTracked(cwd = process.cwd()) {
   if (!root) return;
   const prefix = gitCaptureLine(['rev-parse', '--show-prefix'], cwd);
   if (prefix === null) return;
-  const logNames = ['.intent-log', '.decision-log'];
+  const logNames = ['.seal'];
   const logDirs = logNames.map((name) => `${prefix}${name}`);
   const listing = gitCaptureRaw(
     ['ls-files', '-z', '--', ...logDirs.map((name) => `:(literal)${name}`)],
@@ -3223,7 +3450,7 @@ function gitMergeParents(cwd = process.cwd()) {
 }
 
 function gitDecisionIds(treeish, cwd = process.cwd()) {
-  const out = gitCapture(['ls-tree', '-r', '--name-only', treeish, '.decision-log'], cwd);
+  const out = gitCapture(['ls-tree', '-r', '--name-only', treeish, '.seal/madr'], cwd);
   if (!out) return new Set();
   const ids = new Set();
   for (const file of out.split('\n')) {
@@ -3234,7 +3461,7 @@ function gitDecisionIds(treeish, cwd = process.cwd()) {
 }
 
 function gitDecisionEntries(treeish, cwd = process.cwd()) {
-  const out = gitCapture(['ls-tree', '-r', '--name-only', treeish, '.decision-log'], cwd);
+  const out = gitCapture(['ls-tree', '-r', '--name-only', treeish, '.seal/madr'], cwd);
   if (!out) return [];
   const entries = [];
   for (const file of out.split('\n')) {
@@ -3253,9 +3480,9 @@ function gitDecisionEntries(treeish, cwd = process.cwd()) {
   return entries;
 }
 
-function gitIntentRecords(treeish, cwd = process.cwd()) {
-  const content = gitReadFile(treeish, '.intent-log/events.jsonl', cwd);
-  return content === null ? [] : parseJsonlRecords(content, `${treeish}:.intent-log/events.jsonl`);
+function gitOutcomeRecords(treeish, cwd = process.cwd()) {
+  const content = gitReadFile(treeish, '.seal/outcomes/events.jsonl', cwd);
+  return content === null ? [] : parseJsonlRecords(content, `${treeish}:.seal/outcomes/events.jsonl`);
 }
 
 function canonicalEvent(event) {
@@ -3374,10 +3601,14 @@ function hasDuplicateDecisionIds(entries) {
   return false;
 }
 
-function hasDuplicateIntentBegins(records) {
+function isOutcomeStart(event) {
+  return event.type === 'begin' || event.type === 'import';
+}
+
+function hasDuplicateOutcomeStarts(records) {
   const seen = new Set();
   for (const record of records) {
-    if (record.event.type !== 'begin') continue;
+    if (!isOutcomeStart(record.event)) continue;
     if (seen.has(record.event.id)) return true;
     seen.add(record.event.id);
   }
@@ -3500,26 +3731,57 @@ function remapEvent(event, intentMap, decisionMap, hashMap = new Map()) {
   return next;
 }
 
+function rebindV2ContractHashes(records) {
+  const contracts = new Map();
+  return records.map((record) => {
+    let event = record.event;
+    if (event.type === 'begin' && event.logVersion === LOG_VERSION) {
+      contracts.set(event.id, newOutcomeRecord(event));
+    } else if (event.type === 'extend' && event.logVersion === LOG_VERSION) {
+      const state = contracts.get(event.id);
+      if (state) {
+        state.extensions.push({
+          extension: event.extension,
+          acceptance: event.acceptance,
+          verify: event.verify,
+          decisions: event.decisions,
+        });
+        state.acceptance = [...new Set([...state.acceptance, ...event.acceptance])];
+        if (event.verify) state.verify = event.verify;
+        state.decisions = [...new Set([...state.decisions, ...event.decisions])];
+        state.contractHash = outcomeContractHash(state);
+      }
+    } else if (event.logVersion === LOG_VERSION &&
+      (event.type === 'verify' || (event.type === 'end' && event.status === 'completed'))) {
+      const state = contracts.get(event.id);
+      if (state && event.contractHash !== state.contractHash) {
+        event = { ...event, contractHash: state.contractHash };
+      }
+    }
+    return event === record.event ? record : { event };
+  });
+}
+
 function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap, hashMap = new Map()) {
   const intentMap = new Map();
   const mappings = [];
   const used = [...oursUsedEvents];
   const records = theirsNew.map((record) => {
     let event = record.event;
-    if (event.type === 'begin' && used.some((item) => item.type === 'begin' && item.id === event.id)) {
-      const { date } = parseIntentId(event.id);
+    if (isOutcomeStart(event) && used.some((item) => isOutcomeStart(item) && item.id === event.id)) {
+      const { date } = parseOutcomeId(event.id);
       const newId = nextIdForDate(date, used);
       intentMap.set(event.id, newId);
-      mappings.push({ kind: 'intent', from: event.id, to: newId });
+      mappings.push({ kind: 'outcome', from: event.id, to: newId });
     }
     event = remapEvent(event, intentMap, decisionMap, hashMap);
     used.push(event);
     return { event };
   });
-  return { records, mappings };
+  return { records: rebindV2ContractHashes(records), mappings };
 }
 
-function repairDuplicateIntentRecords(records, decisionMap, hashMap = new Map()) {
+function repairDuplicateOutcomeRecords(records, decisionMap, hashMap = new Map()) {
   const seenBegins = new Set();
   const intentMap = new Map();
   const used = [];
@@ -3528,13 +3790,13 @@ function repairDuplicateIntentRecords(records, decisionMap, hashMap = new Map())
   let incomingSide = false;
   for (const record of records) {
     let event = record.event;
-    if (event.type === 'begin' && seenBegins.has(event.id)) {
+    if (isOutcomeStart(event) && seenBegins.has(event.id)) {
       incomingSide = true;
-      const { date } = parseIntentId(event.id);
+      const { date } = parseOutcomeId(event.id);
       const newId = nextIdForDate(date, used);
       intentMap.set(event.id, newId);
-      mappings.push({ kind: 'intent', from: event.id, to: newId });
-    } else if (event.type === 'begin') {
+      mappings.push({ kind: 'outcome', from: event.id, to: newId });
+    } else if (isOutcomeStart(event)) {
       seenBegins.add(event.id);
     }
     const remapped = remapEvent(
@@ -3547,7 +3809,7 @@ function repairDuplicateIntentRecords(records, decisionMap, hashMap = new Map())
     result.push(changed ? { event: remapped } : record);
     used.push(result.at(-1).event);
   }
-  return { records: result, mappings, incomingSide };
+  return { records: rebindV2ContractHashes(result), mappings, incomingSide };
 }
 
 function serializeRecords(records) {
@@ -3575,19 +3837,19 @@ function applyDecisionCopies(copies, dryRun) {
   }
 }
 
-function countAbsorbedIntents(records) {
-  return records.filter((record) => record.event.type === 'begin').length;
+function countAbsorbedOutcomes(records) {
+  return records.filter((record) => ['begin', 'import'].includes(record.event.type)).length;
 }
 
-function printAbsorbReport({ mappings, abandoned, intentCount }) {
-  const remappedIntents = mappings.filter((mapping) => mapping.kind === 'intent').length;
+function printAbsorbReport({ mappings, abandoned, outcomeCount }) {
+  const remappedOutcomes = mappings.filter((mapping) => mapping.kind === 'outcome').length;
   const remappedDecisions = mappings.filter((mapping) => mapping.kind === 'decision').length;
   printLine(
-    `absorbed ${intentCount} intent(s), remapped ${remappedIntents} intent id(s), ${remappedDecisions} decision id(s)`
+    `absorbed ${outcomeCount} outcome(s), remapped ${remappedOutcomes} outcome id(s), ${remappedDecisions} decision id(s)`
   );
   for (const mapping of mappings) {
     const side = mapping.side || 'theirs';
-    if (mapping.kind === 'intent') printLine(`${mapping.from} (${side}) -> ${mapping.to}`);
+    if (mapping.kind === 'outcome') printLine(`${mapping.from} (${side}) -> ${mapping.to}`);
     else printLine(`decision ${mapping.from} (${side}) -> ${mapping.to}`);
   }
   if (abandoned) printLine(`abandoned ${abandoned} during absorb`);
@@ -3596,6 +3858,7 @@ function printAbsorbReport({ mappings, abandoned, intentCount }) {
 function abandonOpenIntent(records, targetId, side) {
   records.push({
     event: {
+      logVersion: LOG_VERSION,
       schemaVersion: EVENT_SCHEMA_VERSION,
       type: 'end',
       id: targetId,
@@ -3616,13 +3879,13 @@ function resolveOpenIntents(
   abandon,
   { allowConflict = false, overlay = [], parkedOpen = null } = {}
 ) {
-  const oursOpen = openIntent(fold(oursRecords.map((record) => record.event)));
-  const theirsOpen = openIntent(fold(theirsRecords.map((record) => record.event)));
+  const oursOpen = openOutcome(fold(oursRecords.map((record) => record.event)));
+  const theirsOpen = openOutcome(fold(theirsRecords.map((record) => record.event)));
   try {
-    openIntent(fold([...result, ...overlay].map((record) => record.event)));
+    openOutcome(fold([...result, ...overlay].map((record) => record.event)));
     return { abandoned: null, conflict: false, parkedClosed: false };
   } catch (err) {
-    if (!(err instanceof DriftSealError) || !/multiple intents in progress/.test(err.message)) {
+    if (!(err instanceof DriftSealError) || !/multiple outcomes in progress/.test(err.message)) {
       throw err;
     }
     if (abandon === 'theirs' && theirsOpen) {
@@ -3666,19 +3929,25 @@ function mergeRecordStreams(ours, theirs, baseRecords) {
 }
 
 function GITATTRIBUTES_MERGE_LINE() {
-  return '.intent-log/events.jsonl merge=driftseal';
+  return '.seal/outcomes/events.jsonl merge=driftseal';
 }
 
 function ensureGitAttributes() {
   const target = path.join(process.cwd(), '.gitattributes');
   const line = GITATTRIBUTES_MERGE_LINE();
+  const legacyLine = '.intent-log/events.jsonl merge=driftseal';
   const existed = fs.existsSync(target);
   const current = existed ? fs.readFileSync(target, 'utf8') : '';
   const eol = current.includes('\r\n') ? '\r\n' : '\n';
   const lines = current.split(/\r?\n/);
-  if (lines.some((entry) => entry.trim() === line)) return { changed: false, target };
-  const prefix = current.length === 0 || current.endsWith('\n') || current.endsWith('\r\n') ? '' : eol;
-  const next = `${current}${prefix}${line}${eol}`;
+  const filtered = lines.filter((entry) => entry.trim() !== legacyLine);
+  if (!filtered.some((entry) => entry.trim() === line)) {
+    const insertion = filtered.length > 0 && filtered.at(-1) === '' ? filtered.length - 1 : filtered.length;
+    filtered.splice(insertion, 0, line);
+  }
+  let next = filtered.join(eol);
+  if (!next.endsWith(eol)) next += eol;
+  if (next === current) return { changed: false, target };
   atomicWriteFile(target, next);
   return { changed: true, target };
 }
@@ -3687,7 +3956,7 @@ function ensureGitMergeDriver() {
   if (!isGitWorkTree()) return { changed: false, configured: false };
   const name = gitCapture(['config', '--local', '--get', 'merge.driftseal.name']);
   const driver = gitCapture(['config', '--local', '--get', 'merge.driftseal.driver']);
-  const expectedName = 'DriftSeal intent log merge';
+  const expectedName = 'DriftSeal outcome log merge';
   const expectedDriver = 'driftseal absorb --git %O %A %B';
   if (name === expectedName && driver === expectedDriver) {
     return { changed: false, configured: true };
@@ -3711,7 +3980,7 @@ function absorbUsage() {
 function loadAbsorbSide(file, label, { repairTail = false, allowMissing = false } = {}) {
   if (!fs.existsSync(file)) {
     if (allowMissing) return { records: [], conflict: false };
-    fail(`intent log not found: ${file}`);
+    fail(`outcome log not found: ${file}`);
   }
   let content = fs.readFileSync(file, 'utf8');
   if (repairTail && !/^<<<<<<< /m.test(content)) {
@@ -3738,18 +4007,18 @@ function finishAbsorb({
   abandon,
   dryRun,
   outputFile,
-  intentCount,
+  outcomeCount,
   allowConflict = false,
   followupMessage = null,
 }) {
-  // An intent parked in Git metadata is part of our side even though the log never saw it.
+  // An outcome parked in Git metadata is part of our side even though the log never saw it.
   const park = shouldAttachInProgress(outputFile) ? inProgressFile() : null;
   const plan = planInProgressOverlay(result.map((record) => record.event), park, {
     repairTail: true,
   });
   const overlay = plan && !plan.alreadyCommitted ? plan.records : [];
   const parkedOpen =
-    overlay.length > 0 ? openIntent(fold(overlay.map((record) => record.event))) : null;
+    overlay.length > 0 ? openOutcome(fold(overlay.map((record) => record.event))) : null;
   const parkMappings = plan
     ? plan.mappings.map((mapping) => ({ ...mapping, side: 'parked' }))
     : [];
@@ -3767,7 +4036,7 @@ function finishAbsorb({
   const merged = flushOverlay ? [...result, ...overlay] : result;
   const effective = [...result, ...overlay].map((record) => record.event);
   fold(effective);
-  if (!conflict) openIntent(fold(effective));
+  if (!conflict) openOutcome(fold(effective));
   if (!dryRun) {
     writeJsonl(outputFile, merged);
     applyDecisionCopies(copies, dryRun);
@@ -3777,7 +4046,7 @@ function finishAbsorb({
     }
   }
   if (
-    intentCount === 0 &&
+    outcomeCount === 0 &&
     allMappings.length === 0 &&
     copies.length === 0 &&
     !abandoned &&
@@ -3788,11 +4057,11 @@ function finishAbsorb({
     printAbsorbReport({
       mappings: allMappings,
       abandoned,
-      intentCount,
+      outcomeCount,
     });
   }
   if (conflict) {
-    printLine('multiple intents remain in progress; re-run with --abandon-theirs or --abandon-ours');
+    printLine('multiple outcomes remain in progress; re-run with --abandon-theirs or --abandon-ours');
   }
   if (followupMessage) printLine(followupMessage);
   return {
@@ -3830,7 +4099,7 @@ function absorbFromStreams(ours, theirs, baseRecords, options) {
     outputFile: options.outputFile,
     allowConflict: options.allowConflict,
     followupMessage: options.followupMessage,
-    intentCount: streams.theirsNew.filter((record) => record.event.type === 'begin').length,
+    outcomeCount: streams.theirsNew.filter((record) => ['begin', 'import'].includes(record.event.type)).length,
   });
 }
 
@@ -3843,7 +4112,7 @@ function gitAbsorbRepairContext(records, decisionEntries) {
       base: gitMergeBaseFor('HEAD', pending),
     };
   }
-  if (!hasDuplicateDecisionIds(decisionEntries) && !hasDuplicateIntentBegins(records)) return null;
+  if (!hasDuplicateDecisionIds(decisionEntries) && !hasDuplicateOutcomeStarts(records)) return null;
   const parents = gitMergeParents();
   if (!parents) return null;
   return {
@@ -3853,10 +4122,10 @@ function gitAbsorbRepairContext(records, decisionEntries) {
 }
 
 function absorbFromGitContext(context, { abandon, dryRun, outputFile }) {
-  const baseRecords = context.base ? gitIntentRecords(context.base) : [];
+  const baseRecords = context.base ? gitOutcomeRecords(context.base) : [];
   return absorbFromStreams(
-    gitIntentRecords(context.ours),
-    gitIntentRecords(context.theirs),
+    gitOutcomeRecords(context.ours),
+    gitOutcomeRecords(context.theirs),
     baseRecords,
     {
       abandon,
@@ -3913,21 +4182,21 @@ function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
       baseEntries: gitBase ? gitDecisionEntries(gitBase) : [],
       baseIds: gitBase ? gitDecisionIds(gitBase) : new Set(),
     });
-    const repaired = repairDuplicateIntentRecords(
+    const repaired = repairDuplicateOutcomeRecords(
       loaded.records,
       decisionPlan.decisionMap,
       decisionPlan.hashMap
     );
     if (decisionPlan.mappings.length > 0 && !repaired.incomingSide) {
       fail(
-        'cannot determine which intent records own the duplicate decision; ' +
+        'cannot determine which outcome records own the duplicate decision; ' +
           'run absorb during the merge or provide the incoming log and decision directory'
       );
     }
     const result = repaired.records;
     const mappings = [...repaired.mappings, ...decisionPlan.mappings];
     const remappedIds = new Set(
-      mappings.filter((mapping) => mapping.kind === 'intent').map((mapping) => mapping.to)
+      mappings.filter((mapping) => mapping.kind === 'outcome').map((mapping) => mapping.to)
     );
     const oursRecords = result.filter((record) => !remappedIds.has(record.event.id));
     return finishAbsorb({
@@ -3939,13 +4208,13 @@ function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
       abandon,
       dryRun,
       outputFile: oursFile,
-      intentCount: remappedIds.size,
+      outcomeCount: remappedIds.size,
     });
   }
 
   const theirs = loadAbsorbSide(otherFile, otherFile);
   if (theirs.conflict) fail(`incoming log still contains conflict markers: ${otherFile}`);
-  const otherRoot = path.resolve(path.dirname(otherFile), '..');
+  const otherRoot = path.resolve(path.dirname(otherFile), '..', '..');
   const otherHead = isGitWorkTree(otherRoot) ? gitCapture(['rev-parse', 'HEAD'], otherRoot) : null;
   const gitBase = otherHead ? gitCapture(['merge-base', 'HEAD', otherHead]) : gitMergeBase();
   const baseDecisionIds = gitBase
@@ -3960,7 +4229,7 @@ function absorbLogs(otherFile, otherDecisions, { abandon, dryRun }) {
     dryRun,
     outputFile: oursFile,
     oursDecisionEntries: listDecisionEntries(decisionDir()),
-    theirsDecisionEntries: listDecisionEntries(otherDecisions || path.join(path.dirname(otherFile), '..', '.decision-log')),
+    theirsDecisionEntries: listDecisionEntries(otherDecisions || path.join(path.dirname(otherFile), '..', 'madr')),
     baseDecisionEntries: gitBase ? gitDecisionEntries(gitBase) : [],
     baseDecisionIds,
   });
@@ -3974,7 +4243,7 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
     fail('git merge driver received a log that still contains conflict markers');
   }
   const otherHead =
-    gitOtherHead() || gitFindCommitForFile(theirsFile, '.intent-log/events.jsonl');
+    gitOtherHead() || gitFindCommitForFile(theirsFile, '.seal/outcomes/events.jsonl');
   const mergeBase = otherHead ? gitMergeBaseFor('HEAD', otherHead) : null;
   let followupMessage = null;
   if (!otherHead) {
@@ -4103,20 +4372,21 @@ function executeVerificationCommand(command) {
 
 function runMachineVerification({ allowTrackedCommand = false } = {}) {
   const snapshot = withMutationLocks([logDir()], () => {
-    const intent = openIntent(fold(readEvents({ repairTail: true })));
-    if (!intent) fail('no intent in progress; nothing to verify');
-    if (intent.acceptance.length === 0) {
-      fail(`intent ${intent.id} has no acceptance criteria; declare them with driftseal begin --accept`);
+    const outcome = openOutcome(fold(readEvents({ repairTail: true })));
+    if (!outcome) fail('no outcome in progress; nothing to verify');
+    if (outcome.acceptance.length === 0) {
+      fail(`outcome ${outcome.id} has no acceptance criteria; declare them with driftseal begin --accept`);
     }
-    if (!intent.verify) fail(`intent ${intent.id} has no verification command`);
+    if (!outcome.verify) fail(`outcome ${outcome.id} has no verification command`);
     const park = inProgressFile();
-    const parked = park ? parkedOpenIntent(park) : null;
-    const locallyProvenanced = hasMatchingLocalIntentProvenance(intent);
+    const parked = park ? parkedOpenOutcome(park) : null;
+    const locallyProvenanced = hasMatchingLocalOutcomeProvenance(outcome);
     return {
-      id: intent.id,
-      command: intent.verify,
+      id: outcome.id,
+      command: outcome.verify,
+      contractHash: outcome.contractHash,
       requiresExplicitTrust:
-        (!parked || parked.id !== intent.id) && !locallyProvenanced,
+        (!parked || parked.id !== outcome.id) && !locallyProvenanced,
     };
   });
 
@@ -4125,7 +4395,7 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
   if (snapshot.requiresExplicitTrust && !allowTrackedCommand) {
     fail(
       `refusing to execute a verification command that DriftSeal cannot confirm was created locally: ${displayedCommand}\n` +
-        'no matching local intent provenance was found; ' +
+        'no matching local outcome provenance was found; ' +
         'inspect the command, then re-run with --allow-tracked-command only if you trust it'
     );
   }
@@ -4141,6 +4411,7 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
     verificationId: crypto.randomUUID(),
     ts: new Date().toISOString(),
     command: snapshot.command,
+    contractHash: snapshot.contractHash,
     passed,
     exitCode,
     signal,
@@ -4152,20 +4423,332 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
     head: gitCapture(['rev-parse', 'HEAD']),
   };
 
-  const intent = withMutationLocks([logDir()], () => {
+  const outcome = withMutationLocks([logDir()], () => {
     const events = readEvents({ repairTail: true });
-    const current = openIntent(fold(events));
-    if (!current || current.id !== snapshot.id || current.verify !== snapshot.command) {
-      fail(`intent ${snapshot.id} changed while its verification command was running`);
+    const current = openOutcome(fold(events));
+    if (!current || current.id !== snapshot.id || current.verify !== snapshot.command ||
+      current.contractHash !== snapshot.contractHash) {
+      fail(`outcome ${snapshot.id} changed while its verification command was running`);
     }
     events.push(appendEvent(verificationEvent));
     return fold(events).find((candidate) => candidate.id === snapshot.id);
   });
   printLine(`${snapshot.id} verification ${passed ? 'passed' : 'failed'} (exit ${exitCode})`);
   return {
-    intent: publicIntent(intent),
-    verification: publicVerification(intent.verification),
+    outcome: publicOutcome(outcome),
+    verification: publicVerification(outcome.verification),
     exitCode,
+  };
+}
+
+const MIGRATION_PLAN_FORMAT = 'driftseal-v1-to-v2-plan';
+
+function migrationPaths(flags = {}) {
+  const sourceLog = path.resolve(
+    flags['source-log'] || path.join(process.cwd(), '.intent-log', 'events.jsonl')
+  );
+  const sourceDecisions = path.resolve(
+    flags['source-decisions'] ||
+      process.env.DRIFTSEAL_DECISION_HOME ||
+      path.join(process.cwd(), '.decision-log')
+  );
+  return { sourceLog, sourceDecisions, destination: path.resolve(sealRoot()) };
+}
+
+function legacyParkFile() {
+  if (!isGitWorkTree()) return null;
+  const gitPath = gitCapture(['rev-parse', '--git-path', 'driftseal-in-progress.jsonl']);
+  return gitPath ? path.resolve(process.cwd(), gitPath) : null;
+}
+
+function migrationDecisionFiles(directory) {
+  if (!fs.existsSync(directory)) return [];
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+    .map((entry) => {
+      const file = path.join(directory, entry.name);
+      return { name: entry.name, file, bytes: fs.readFileSync(file) };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function migrationSourceSnapshot(flags = {}) {
+  const paths = migrationPaths(flags);
+  if (!fs.existsSync(paths.sourceLog)) fail(`v1 intent log not found: ${paths.sourceLog}`);
+  const park = legacyParkFile();
+  if (park && fs.existsSync(park)) {
+    fail('v1 migration requires no open intent; close the parked v1 intent first');
+  }
+  const rawLog = fs.readFileSync(paths.sourceLog, 'utf8');
+  const records = fold(
+    parseJsonlRecords(rawLog, paths.sourceLog, { allowLegacy: true })
+      .map((record) => record.event)
+  );
+  if (records.some((record) => record.logVersion !== 1)) {
+    fail('migration source is not a v1 intent log');
+  }
+  const open = records.filter((record) => record.status === 'in_progress');
+  if (open.length > 0) {
+    fail(`v1 migration requires every intent to be closed; still open: ${open.map((record) => record.id).join(', ')}`);
+  }
+  const decisions = migrationDecisionFiles(paths.sourceDecisions);
+  const hash = crypto.createHash('sha256');
+  hash.update(paths.sourceLog);
+  hash.update('\0');
+  hash.update(rawLog);
+  for (const decision of decisions) {
+    hash.update('\0');
+    hash.update(decision.name);
+    hash.update('\0');
+    hash.update(decision.bytes);
+  }
+  return {
+    ...paths,
+    rawLog,
+    records,
+    decisions,
+    sourceFingerprint: hash.digest('hex'),
+  };
+}
+
+function migrationInspection(snapshot) {
+  return {
+    format: MIGRATION_PLAN_FORMAT,
+    sourceFingerprint: snapshot.sourceFingerprint,
+    source: {
+      log: snapshot.sourceLog,
+      decisions: snapshot.sourceDecisions,
+    },
+    destination: snapshot.destination,
+    records: snapshot.records.map(publicOutcome),
+    decisions: snapshot.decisions.map((decision) => ({ name: decision.name })),
+    planSchema: {
+      format: MIGRATION_PLAN_FORMAT,
+      sourceFingerprint: snapshot.sourceFingerprint,
+      groups: [
+        {
+          outcome: 'One coherent delivered outcome',
+          summary: 'What the grouped v1 work ultimately achieved',
+          sourceIds: ['YYYY-MM-DD-NNN'],
+        },
+      ],
+      excluded: [
+        {
+          sourceId: 'YYYY-MM-DD-NNN',
+          reason: 'Only already-reclaimed v1 noise may be excluded from visible outcomes',
+        },
+      ],
+    },
+  };
+}
+
+function readMigrationPlan(file, inline) {
+  if (!file && !inline) fail('migration apply requires --plan <file>');
+  if (file && inline) fail('migration apply accepts only one of --plan or structured plan input');
+  let plan;
+  try {
+    plan = JSON.parse(inline || fs.readFileSync(path.resolve(file), 'utf8'));
+  } catch (error) {
+    fail(`cannot read migration plan: ${error.message}`);
+  }
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) fail('migration plan must be a JSON object');
+  return plan;
+}
+
+function validateMigrationPlan(plan, snapshot) {
+  if (plan.format !== MIGRATION_PLAN_FORMAT) fail(`migration plan format must be ${MIGRATION_PLAN_FORMAT}`);
+  if (plan.sourceFingerprint !== snapshot.sourceFingerprint) {
+    fail('migration plan source fingerprint does not match the current v1 source');
+  }
+  if (!Array.isArray(plan.groups) || plan.groups.length === 0) fail('migration plan requires at least one group');
+  if (!Array.isArray(plan.excluded)) fail('migration plan excluded must be an array');
+  const byId = new Map(snapshot.records.map((record) => [record.id, record]));
+  const excluded = new Map();
+  for (const item of plan.excluded) {
+    if (!item || typeof item.sourceId !== 'string' || typeof item.reason !== 'string' || !item.reason.trim()) {
+      fail('each migration exclusion requires sourceId and a non-empty reason');
+    }
+    const record = byId.get(item.sourceId);
+    if (!record) fail(`migration exclusion references unknown v1 intent: ${item.sourceId}`);
+    if (!record.reclaimed) fail(`only reclaimed v1 intents may be excluded: ${item.sourceId}`);
+    if (excluded.has(item.sourceId)) fail(`duplicate migration exclusion: ${item.sourceId}`);
+    excluded.set(item.sourceId, item.reason.trim());
+  }
+  const expected = snapshot.records.filter((record) => !excluded.has(record.id)).map((record) => record.id);
+  const actual = [];
+  const groups = plan.groups.map((group, index) => {
+    if (!group || typeof group.outcome !== 'string' || !group.outcome.trim() ||
+      typeof group.summary !== 'string' || !group.summary.trim() ||
+      !Array.isArray(group.sourceIds) || group.sourceIds.length === 0) {
+      fail(`migration group ${index + 1} requires outcome, summary, and sourceIds`);
+    }
+    const sourceIds = group.sourceIds.map(String);
+    for (const id of sourceIds) {
+      if (!byId.has(id)) fail(`migration group ${index + 1} references unknown v1 intent: ${id}`);
+      if (excluded.has(id)) fail(`migration source ${id} is both grouped and excluded`);
+      actual.push(id);
+    }
+    return { outcome: group.outcome.trim(), summary: group.summary.trim(), sourceIds };
+  });
+  if (actual.length !== new Set(actual).size) fail('migration groups contain a duplicate v1 intent');
+  if (!isDeepStrictEqual(actual, expected)) {
+    fail('migration groups must form an ordered, complete partition of all non-excluded v1 intents');
+  }
+  return {
+    groups,
+    excluded: [...excluded].map(([sourceId, reason]) => ({ sourceId, reason })),
+    planDigest: contentHash(JSON.stringify({
+      format: plan.format,
+      sourceFingerprint: plan.sourceFingerprint,
+      groups,
+      excluded: [...excluded].map(([sourceId, reason]) => ({ sourceId, reason })),
+    })),
+  };
+}
+
+function storedV2Event(event) {
+  return { logVersion: LOG_VERSION, schemaVersion: EVENT_SCHEMA_VERSION, ...event };
+}
+
+function migrationEvents(snapshot, validated) {
+  const byId = new Map(snapshot.records.map((record) => [record.id, record]));
+  const events = [];
+  for (const group of validated.groups) {
+    const sources = group.sourceIds.map((id) => byId.get(id));
+    const first = sources[0];
+    const last = sources.at(-1);
+    const date = /^\d{4}-\d{2}-\d{2}/.test(first.tsBegin) ? first.tsBegin.slice(0, 10) : new Date().toISOString().slice(0, 10);
+    const id = nextIdForDate(date, events);
+    const decisions = [...new Set(sources.flatMap((source) => source.decisions))];
+    events.push(storedV2Event({
+      type: 'import',
+      id,
+      ts: new Date().toISOString(),
+      outcome: group.outcome,
+      summary: group.summary,
+      status: last.status,
+      beganAt: first.tsBegin,
+      endedAt: last.tsEnd,
+      decisions,
+      sources: sources.map(publicOutcome),
+      sourceFingerprint: snapshot.sourceFingerprint,
+      reclaimed: sources.every((source) => source.reclaimed),
+      reclaimReason: sources.every((source) => source.reclaimed)
+        ? sources.map((source) => source.reclaimReason).filter(Boolean).join('; ') || 'reclaimed in v1'
+        : null,
+      reclaimedAt: sources.every((source) => source.reclaimed) ? last.reclaimedAt : null,
+      head: last.endHead || first.beginHead || null,
+    }));
+  }
+  events.push(storedV2Event({
+    type: 'migration',
+    id: 'v1-to-v2',
+    ts: new Date().toISOString(),
+    sourceFingerprint: snapshot.sourceFingerprint,
+    planDigest: validated.planDigest,
+    excluded: validated.excluded.map((item) => ({
+      ...item,
+      source: publicOutcome(byId.get(item.sourceId)),
+    })),
+  }));
+  fold(events);
+  return events;
+}
+
+function findMigrationEvent(file) {
+  if (!fs.existsSync(file)) return null;
+  return readEvents({ file, repairTail: false, readOnly: true })
+    .find((event) => event.type === 'migration' && event.id === 'v1-to-v2') || null;
+}
+
+function validateStagedMigration(directory, snapshot) {
+  const stagedLog = path.join(directory, 'outcomes', 'events.jsonl');
+  fold(readEvents({ file: stagedLog, readOnly: true }));
+  for (const decision of snapshot.decisions) {
+    const staged = path.join(directory, 'madr', decision.name);
+    if (!fs.existsSync(staged) || !fs.readFileSync(staged).equals(decision.bytes)) {
+      fail(`staged MADR does not match v1 byte-for-byte: ${decision.name}`);
+    }
+  }
+}
+
+function applyMigration(snapshot, validated) {
+  const destination = snapshot.destination;
+  const destinationLog = path.join(destination, 'outcomes', 'events.jsonl');
+  if (fs.existsSync(destination)) {
+    const existing = findMigrationEvent(destinationLog);
+    if (existing && existing.sourceFingerprint === snapshot.sourceFingerprint &&
+      existing.planDigest === validated.planDigest) {
+      validateStagedMigration(destination, snapshot);
+      printLine('v1-to-v2 migration is already staged with the same source and plan');
+      return { changed: false, destination, sourceFingerprint: snapshot.sourceFingerprint, planDigest: validated.planDigest };
+    }
+    fail(`migration destination already exists with different content: ${destination}`);
+  }
+  ensureDirectoryDurable(path.dirname(destination));
+  const temporary = fs.mkdtempSync(path.join(path.dirname(destination), `.${path.basename(destination)}.migrate-`));
+  try {
+    const outcomeDirectory = path.join(temporary, 'outcomes');
+    const madrDirectory = path.join(temporary, 'madr');
+    ensureDirectoryDurable(outcomeDirectory);
+    ensureDirectoryDurable(madrDirectory);
+    writeJsonl(path.join(outcomeDirectory, 'events.jsonl'), migrationEvents(snapshot, validated).map((event) => ({ event })));
+    for (const decision of snapshot.decisions) {
+      fs.copyFileSync(decision.file, path.join(madrDirectory, decision.name));
+    }
+    validateStagedMigration(temporary, snapshot);
+    fs.renameSync(temporary, destination);
+    fsyncDirectory(path.dirname(destination));
+  } catch (error) {
+    try { fs.rmSync(temporary, { recursive: true, force: true }); } catch {}
+    throw error;
+  }
+  const initResult = commands.init([]);
+  printLine(`staged v1-to-v2 migration at ${destination}`);
+  printLine('DriftSeal did not delete v1 data; review the staged outcome log, then remove the old paths manually.');
+  return {
+    changed: true,
+    destination,
+    sourceFingerprint: snapshot.sourceFingerprint,
+    planDigest: validated.planDigest,
+    importedOutcomes: validated.groups.length,
+    excluded: validated.excluded.length,
+    init: initResult,
+  };
+}
+
+function checkMigration(snapshot, { sourceMissing = false } = {}) {
+  const destinationLog = path.join(snapshot.destination, 'outcomes', 'events.jsonl');
+  const migration = findMigrationEvent(destinationLog);
+  if (!migration) fail(`no staged v1-to-v2 migration found at ${snapshot.destination}`);
+  fold(readEvents({ file: destinationLog, readOnly: true }));
+  const migratedMadr = path.join(snapshot.destination, 'madr');
+  for (const decision of snapshot.decisions) {
+    const migrated = path.join(migratedMadr, decision.name);
+    if (!fs.existsSync(migrated) || !fs.readFileSync(migrated).equals(decision.bytes)) {
+      fail(`migrated MADR does not match v1 byte-for-byte: ${decision.name}`);
+    }
+  }
+  if (!sourceMissing && migration.sourceFingerprint !== snapshot.sourceFingerprint) {
+    fail('staged migration no longer matches the v1 source fingerprint');
+  }
+  if (sourceMissing) {
+    printLine('v1-to-v2 migration complete; v1 source paths are absent and the v2 log is valid');
+  } else {
+    printLine('v1-to-v2 migration is valid and staged side-by-side with v1');
+    if (snapshot.sourceLog === path.resolve(process.cwd(), '.intent-log', 'events.jsonl') &&
+      snapshot.sourceDecisions === path.resolve(process.cwd(), '.decision-log')) {
+      printLine('after explicit user approval, remove the tracked v1 paths manually: git rm -r -- .intent-log .decision-log');
+    } else {
+      printLine(`after explicit user approval, remove the v1 source paths manually: ${snapshot.sourceLog} and ${snapshot.sourceDecisions}`);
+    }
+  }
+  return {
+    valid: true,
+    complete: sourceMissing,
+    destination: snapshot.destination,
+    sourceFingerprint: migration.sourceFingerprint,
+    planDigest: migration.planDigest,
   };
 }
 
@@ -4177,8 +4760,8 @@ const commands = {
       decision: 'multiple',
       force: 'boolean',
     }, 'begin');
-    const intent = positionals.join(' ').trim();
-    if (!intent) {
+    const outcome = positionals.join(' ').trim();
+    if (!outcome) {
       fail(usageFor('begin'));
     }
     const acceptance = [...new Set((flags.accept || []).map((criterion) => criterion.trim()))];
@@ -4196,18 +4779,18 @@ const commands = {
 
     const events = readEvents({ repairTail: true });
     const records = fold(events);
-    // A parked intent and a merged-in one can both be open; --force clears every one of them.
+    // A parked outcome and a merged-in one can both be open; --force clears every one of them.
     const open = records.filter((record) => record.status === 'in_progress');
     if (open.length > 1 && !flags.force) {
       fail(
-        `multiple intents in progress: ${open.map((record) => record.id).join(', ')}\n` +
+          `multiple outcomes in progress: ${open.map((record) => record.id).join(', ')}\n` +
           'resolve them with driftseal absorb --abandon-ours or --abandon-theirs, ' +
           'or re-run with --force to abandon all of them'
       );
     }
     if (open.length === 1 && !flags.force) {
       fail(
-        `intent ${open[0].id} is still in_progress: "${open[0].intent}"\n` +
+        `outcome ${open[0].id} is still in_progress: "${open[0].outcome}"\n` +
           `end it first (driftseal end) or re-run with --force to abandon it`
       );
     }
@@ -4227,7 +4810,7 @@ const commands = {
       type: 'begin',
       id,
       ts: new Date().toISOString(),
-      intent,
+      outcome,
       acceptance,
       verify: flags.verify || null,
       decisions,
@@ -4235,7 +4818,44 @@ const commands = {
     }));
     const record = fold(events).find((candidate) => candidate.id === id);
     printLine(id);
-    return publicIntent(record);
+    return publicOutcome(record);
+  },
+
+  extend(argv) {
+    const { positionals, flags } = parseArgs(argv, {
+      accept: 'multiple',
+      verify: '-v',
+      decision: 'multiple',
+    }, 'extend');
+    const extension = positionals.join(' ').trim();
+    if (!extension) fail(usageFor('extend'));
+    const acceptance = [...new Set((flags.accept || []).map((criterion) => criterion.trim()))];
+    if (acceptance.some((criterion) => criterion.length === 0)) {
+      fail('--accept requires a non-empty observable result');
+    }
+    if (acceptance.length > 0 && (!flags.verify || flags.verify.trim().length === 0)) {
+      fail('extending acceptance requires --verify with a cumulative verification command');
+    }
+    const events = readEvents({ repairTail: true });
+    const current = openOutcome(fold(events));
+    if (!current) fail('no outcome in progress; begin one before extending it');
+    const requestedDecisions = flags.decision || [];
+    const index = requestedDecisions.length > 0 ? decisionIndex() : [];
+    const decisions = [...new Set(requestedDecisions.map((id) => findDecision(id, index).id))]
+      .filter((id) => !current.decisions.includes(id));
+    events.push(appendEvent({
+      type: 'extend',
+      id: current.id,
+      ts: new Date().toISOString(),
+      extension,
+      acceptance: acceptance.filter((criterion) => !current.acceptance.includes(criterion)),
+      verify: flags.verify || null,
+      decisions,
+      head: gitCapture(['rev-parse', 'HEAD']),
+    }));
+    const record = fold(events).find((candidate) => candidate.id === current.id);
+    printLine(`${current.id} extended`);
+    return publicOutcome(record);
   },
 
   verify(argv) {
@@ -4265,11 +4885,11 @@ const commands = {
     let target;
     if (positionals.length > 0) {
       target = records.find((r) => r.id === positionals[0]);
-      if (!target) fail(`unknown intent id: ${positionals[0]}`);
-      if (target.status !== 'in_progress') fail(`intent ${target.id} already closed (${target.status})`);
+      if (!target) fail(`unknown outcome id: ${positionals[0]}`);
+      if (target.status !== 'in_progress') fail(`outcome ${target.id} already closed (${target.status})`);
     } else {
-      target = openIntent(records);
-      if (!target) fail('no intent in progress; nothing to end');
+      target = openOutcome(records);
+      if (!target) fail('no outcome in progress; nothing to end');
     }
 
     let completionWorkspace = null;
@@ -4277,14 +4897,15 @@ const commands = {
     if (status === 'completed' && target.acceptance.length > 0) {
       if (!target.verification || !target.verification.passed) {
         fail(
-          `cannot complete acceptance-bound intent ${target.id} without successful machine verification; ` +
+          `cannot complete acceptance-bound outcome ${target.id} without successful machine verification; ` +
             'run: driftseal verify'
         );
       }
       completionWorkspace = workspaceFingerprint();
-      if (completionWorkspace !== target.verification.workspace) {
+      if (completionWorkspace !== target.verification.workspace ||
+        target.verification.contractHash !== target.contractHash) {
         fail(
-          `cannot complete acceptance-bound intent ${target.id}: workspace changed after machine verification; ` +
+          `cannot complete acceptance-bound outcome ${target.id}: contract or workspace changed after machine verification; ` +
             'run: driftseal verify'
         );
       }
@@ -4301,7 +4922,7 @@ const commands = {
       );
       const record = fold(events).find((candidate) => candidate.id === target.id);
       printLine(`${target.id} ${terminalStatus}`);
-      return publicIntent(record);
+      return publicOutcome(record);
     }
 
     if (['completed', 'partial'].includes(status) && target.decisions.length > 0) {
@@ -4331,7 +4952,7 @@ const commands = {
       }
       if (problems.length > 0) {
         fail(
-          `cannot close linked intent ${target.id} as ${status}:\n` +
+          `cannot close linked outcome ${target.id} as ${status}:\n` +
             problems.map((problem) => `  - ${problem}`).join('\n') +
             `\nrun: driftseal decision update <id> --note "<what changed or was confirmed>"`
         );
@@ -4347,23 +4968,24 @@ const commands = {
       verifyResult: flags['verify-result'] || null,
       verificationId: completionVerificationId,
       workspace: completionWorkspace,
+      contractHash: target.contractHash,
       head: gitCapture(['rev-parse', 'HEAD']),
     }));
     const record = fold(events).find((candidate) => candidate.id === target.id);
     printLine(`${target.id} ${status}`);
-    return publicIntent(record);
+    return publicOutcome(record);
   },
 
   status(argv, { readOnly = false } = {}) {
     const { positionals } = parseArgs(argv, {}, 'status');
     if (positionals.length > 0) fail(usageFor('status'));
-    const open = openIntent(fold(readEvents({ repairTail: true, readOnly })));
+    const open = openOutcome(fold(readEvents({ repairTail: true, readOnly })));
     if (!open) {
-      printLine('no intent in progress');
+      printLine('no outcome in progress');
       return null;
     }
     printLine(render(open));
-    return publicIntent(open);
+    return publicOutcome(open);
   },
 
   log(argv, { readOnly = false } = {}) {
@@ -4380,7 +5002,7 @@ const commands = {
       return [];
     }
     printLine(records.map(render).join('\n\n'));
-    return records.map(publicIntent);
+    return records.map(publicOutcome);
   },
 
   reclaim(argv) {
@@ -4405,16 +5027,16 @@ const commands = {
       const ids = [...new Set(positionals)];
       targets = ids.map((id) => {
         const record = records.find((candidate) => candidate.id === id);
-        if (!record) fail(`unknown intent id: ${id}`);
+        if (!record) fail(`unknown outcome id: ${id}`);
         if (record.status === 'in_progress') {
-          fail(`cannot reclaim intent ${id} while it is in_progress`);
+          fail(`cannot reclaim outcome ${id} while it is in_progress`);
         }
-        if (record.reclaimed) fail(`intent ${id} is already reclaimed`);
+        if (record.reclaimed) fail(`outcome ${id} is already reclaimed`);
         const routine = ['failed', 'abandoned'].includes(record.status) &&
           record.decisions.length === 0;
         if (!routine && !flags.force) {
           fail(
-            `intent ${id} is ${record.status}` +
+            `outcome ${id} is ${record.status}` +
               (record.decisions.length > 0 ? ' and linked to decisions' : '') +
               '; re-run with --force to reclaim it anyway'
           );
@@ -4422,7 +5044,7 @@ const commands = {
         return record;
       });
     } else {
-      if (flags.force) fail('--force requires explicit intent ids');
+      if (flags.force) fail('--force requires explicit outcome ids');
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
       targets = records.filter(
         (record) =>
@@ -4433,14 +5055,14 @@ const commands = {
           Date.parse(record.tsEnd) < cutoff
       );
       if (targets.length === 0) {
-        printLine('no reclaimable intents');
+        printLine('no reclaimable outcomes');
         return [];
       }
     }
 
     if (flags['dry-run']) {
-      printLine(targets.map((record) => `${record.id} ${record.status} — ${record.intent}`).join('\n'));
-      return targets.map(publicIntent);
+      printLine(targets.map((record) => `${record.id} ${record.status} — ${record.outcome}`).join('\n'));
+      return targets.map(publicOutcome);
     }
 
     let events = readEvents({ repairTail: true });
@@ -4458,7 +5080,7 @@ const commands = {
       targets.some((target) => target.id === record.id)
     );
     printLine(targets.map((record) => `${record.id} reclaimed`).join('\n'));
-    return reclaimed.map(publicIntent);
+    return reclaimed.map(publicOutcome);
   },
 
   unreclaim(argv) {
@@ -4469,8 +5091,8 @@ const commands = {
     }
     const events = readEvents({ repairTail: true });
     const record = fold(events).find((candidate) => candidate.id === positionals[0]);
-    if (!record) fail(`unknown intent id: ${positionals[0]}`);
-    if (!record.reclaimed) fail(`intent ${positionals[0]} is not reclaimed`);
+    if (!record) fail(`unknown outcome id: ${positionals[0]}`);
+    if (!record.reclaimed) fail(`outcome ${positionals[0]} is not reclaimed`);
     events.push(
       appendEvent({
         type: 'unreclaim',
@@ -4481,7 +5103,7 @@ const commands = {
     );
     const restored = fold(events).find((candidate) => candidate.id === record.id);
     printLine(`${record.id} unreclaimed`);
-    return publicIntent(restored);
+    return publicOutcome(restored);
   },
 
   decision(argv) {
@@ -4537,22 +5159,22 @@ const commands = {
 
       let events = readEvents({ repairTail: true });
       let records = fold(events);
-      let intent = openIntent(records);
-      if (!intent) fail('decision update requires an intent in progress');
-      events = recoverPendingReconciliations(events, intent.id);
+      let outcome = openOutcome(records);
+      if (!outcome) fail('decision update requires an outcome in progress');
+      events = recoverPendingReconciliations(events, outcome.id);
       records = fold(events);
-      intent = openIntent(records);
+      outcome = openOutcome(records);
       const index = decisionIndex();
       const decision = findDecision(positionals[0], index);
-      if (!intent.decisions.includes(decision.id)) {
-        fail(`decision ${decision.id} is not linked to intent ${intent.id}; declare it with driftseal begin --decision ${decision.id}`);
+      if (!outcome.decisions.includes(decision.id)) {
+        fail(`decision ${decision.id} is not linked to outcome ${outcome.id}; declare it with driftseal begin or extend --decision ${decision.id}`);
       }
 
       const status = (flags.status || decision.status).toLowerCase();
       if (!DECISION_STATUSES.includes(status)) {
         fail(`invalid decision status "${status}" (expected: ${DECISION_STATUSES.join(', ')})`);
       }
-      const update = prepareDecisionReconciliation(decision, intent.id, status, note);
+      const update = prepareDecisionReconciliation(decision, outcome.id, status, note);
       const { target, content, ...prepareEvent } = update;
       appendEvent(prepareEvent);
       if (process.env._DRIFTSEAL_TEST_CRASH_AFTER_RECONCILIATION_PREPARE === '1') {
@@ -4564,7 +5186,7 @@ const commands = {
       }
       appendEvent(reconciliationEvent('decision_reconcile_commit', update));
       const reconciled = findDecision(decision.id);
-      printLine(`${decision.id} ${update.fromStatus} -> ${update.toStatus} (${intent.id})`);
+      printLine(`${decision.id} ${update.fromStatus} -> ${update.toStatus} (${outcome.id})`);
       return publicDecision(reconciled, { includeContent: true });
     }
 
@@ -4662,6 +5284,54 @@ const commands = {
     return absorbLogs(positionals[0], flags.decisions, { abandon, dryRun });
   },
 
+  migrate(argv) {
+    const [route, action, ...rest] = argv;
+    if (route === '--help' || route === '-h' ||
+      (route === 'v1-to-v2' && (action === '--help' || action === '-h'))) {
+      throw new HelpRequested('migrate');
+    }
+    if (route !== 'v1-to-v2' || !['inspect', 'apply', 'check'].includes(action)) {
+      fail(usageFor('migrate'));
+    }
+    const { positionals, flags } = parseArgs(rest, {
+      'source-log': 'single',
+      'source-decisions': 'single',
+      plan: 'single',
+      'plan-json': 'single',
+      json: 'boolean',
+    }, 'migrate');
+    if (positionals.length > 0) fail(usageFor('migrate'));
+    if (action === 'inspect') {
+      if (flags.plan || flags['plan-json']) fail('--plan is only valid with migration apply');
+      const inspection = migrationInspection(migrationSourceSnapshot(flags));
+      if (flags.json) printLine(JSON.stringify(inspection, null, 2));
+      else {
+        printLine(`v1 source ${inspection.sourceFingerprint}: ${inspection.records.length} closed intent(s), ${inspection.decisions.length} MADR file(s)`);
+        printLine('Generate a driftseal-v1-to-v2-plan JSON document, then run migrate v1-to-v2 apply --plan <file>.');
+      }
+      return inspection;
+    }
+    if (action === 'apply') {
+      if (flags.json) fail('--json is only valid with migration inspect or check');
+      const snapshot = migrationSourceSnapshot(flags);
+      const validated = validateMigrationPlan(readMigrationPlan(flags.plan, flags['plan-json']), snapshot);
+      return applyMigration(snapshot, validated);
+    }
+    if (flags.plan || flags['plan-json']) fail('--plan is only valid with migration apply');
+    const paths = migrationPaths(flags);
+    let result;
+    if (fs.existsSync(paths.sourceLog)) {
+      result = checkMigration(migrationSourceSnapshot(flags));
+    } else {
+      if (fs.existsSync(paths.sourceDecisions)) {
+        fail('v1 intent log is absent but the v1 decision directory still exists');
+      }
+      result = checkMigration({ ...paths, decisions: [] }, { sourceMissing: true });
+    }
+    if (flags.json) printLine(JSON.stringify(result, null, 2));
+    return result;
+  },
+
   init(argv) {
     const { positionals, flags } = parseArgs(argv, { lang: 'single', 'local-log': 'boolean' }, 'init');
     if (positionals.length > 0) fail(usageFor('init'));
@@ -4686,11 +5356,13 @@ const commands = {
       content: updated,
       marker: INTENT_PROTOCOL_MARKER,
       endMarker: INTENT_PROTOCOL_END,
-      versionPattern: /^<!-- driftseal-version: (\d+) -->\r?$/m,
+      versionPattern: /^<!-- driftseal-version: (\d+(?:\.\d+)?) -->\r?$/m,
       replacement: intentBlock,
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(v1IntentProtocolBlock(14, source), eol),
+          protocolEol(v1IntentProtocolBlock(14, source, true), eol),
           protocolEol(previousIntentProtocolBlock(13, source), eol),
           protocolEol(previousIntentProtocolBlock(13, source, true), eol),
           protocolEol(previousIntentProtocolBlock(12, source), eol),
@@ -4715,11 +5387,13 @@ const commands = {
       content: updated,
       marker: DECISION_PROTOCOL_MARKER,
       endMarker: DECISION_PROTOCOL_END,
-      versionPattern: /^<!-- driftseal-decisions-version: (\d+) -->\r?$/m,
+      versionPattern: /^<!-- driftseal-decisions-version: (\d+(?:\.\d+)?) -->\r?$/m,
       replacement: decisionBlock,
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(v1DecisionProtocolBlock(14, source), eol),
+          protocolEol(v1DecisionProtocolBlock(14, source, true), eol),
           protocolEol(previousDecisionProtocolBlock(13, source), eol),
           protocolEol(previousDecisionProtocolBlock(13, source, true), eol),
           protocolEol(previousDecisionProtocolBlock(12, source), eol),
@@ -4777,37 +5451,39 @@ const commands = {
       printLine(`Configured git merge attribute: ${attributes.target}`);
     }
     if (driver.changed) {
-      printLine('Configured local git merge driver for DriftSeal intent logs');
+      printLine('Configured local git merge driver for DriftSeal outcome logs');
     }
     return { changed: true, target };
   },
 
   help() {
-    printLine(`DriftSeal — Seal the intent. Stop the drift.
+    printLine(`DriftSeal — Seal the outcome. Stop the drift.
 
-Intent-level write-ahead log for agent sessions.
+Outcome-level write-ahead log for agent sessions.
 
 usage:
-  driftseal begin "<intent>" [--accept "<observable outcome>"] [--verify "<command>"]
+  driftseal begin "<outcome>" [--accept "<observable result>"] [--verify "<command>"]
                  [--decision <id>] [--force]
+  driftseal extend "<same-outcome addition>" [--accept "<observable result>"]
+                 [--verify "<cumulative command>"] [--decision <id>]
   driftseal verify [--allow-tracked-command]
                                        run the declared command and bind its result
-                                       to the current Git-visible workspace contents
+                                       to the current contract and Git-visible workspace
   driftseal end [id] [--status completed|partial|failed|abandoned] [--note "..."] [--verify-result "..."]
-  driftseal status                     show the intent currently in progress (re-anchor after drift)
-  driftseal log [--last N] [--all]     show intent history (--all includes reclaimed records)
+  driftseal status                     show the outcome currently in progress
+  driftseal log [--last N] [--all]     show outcome history (--all includes reclaimed records)
   driftseal reclaim [id ...] --reason "<why>" [--older-than <days>] [--force] [--dry-run]
                                  hide meaningless closed records without deleting them
   driftseal unreclaim <id> --reason "<why>"
                                  restore a reclaimed record to the visible log
   driftseal absorb [other-events.jsonl] [--decisions <dir>]
                  [--abandon-theirs | --abandon-ours] [--dry-run]
-                                 merge another intent log, remapping colliding ids
+                                 merge another outcome log, remapping colliding ids
   driftseal absorb --git <base> <ours> <theirs>
-                                 git merge driver for .intent-log/events.jsonl
+                                 git merge driver for .seal/outcomes/events.jsonl
   driftseal decision add "<title>" --context "..." --outcome "..." [options]
   driftseal decision update <id> [--status STATUS] --note "..."
-                                 reconcile a linked decision in the open intent
+                                 reconcile a linked decision in the open outcome
   driftseal decision list [--status STATUS] [--last N | --count]
                                  list or count filtered MADR decision records
   driftseal decision show <id>         print one MADR decision record
@@ -4824,8 +5500,12 @@ usage:
                                  emit the reminder a lifecycle hook injects; never blocks
   driftseal init [--lang <tag>] [--local-log]
                                  inject protocols into ./AGENTS.md and configure the git merge driver
-                                 --lang sets the intent/decision log language (BCP 47, default: en)
+                                 --lang sets the outcome/MADR log language (BCP 47, default: en)
                                  --local-log keeps the logs local and untracked instead of committing them
+  driftseal migrate v1-to-v2 inspect [--json]
+  driftseal migrate v1-to-v2 apply --plan <file>
+  driftseal migrate v1-to-v2 check
+                                 model-assisted, validated migration that never deletes v1 data
   driftseal --version | -V             print the installed DriftSeal version
   driftseal help
 
@@ -4835,9 +5515,10 @@ decision add options:
   --option "..."                repeat for each considered option
   --consequence "..."           repeat for each consequence
 
-intent log: $DRIFTSEAL_HOME/events.jsonl, or .intent-log/events.jsonl
-decision log: $DRIFTSEAL_DECISION_HOME, or .decision-log/ in the current directory
-In a Git worktree, begin parks an open intent in Git metadata until end, so merge does not need a log-only commit.`);
+seal root: $DRIFTSEAL_HOME, or .seal in the current directory
+outcome log: <seal-root>/outcomes/events.jsonl
+MADR records: <seal-root>/madr/
+In a Git worktree, begin parks an open outcome in Git metadata until end, so merge does not need a log-only commit.`);
     return null;
   },
 
@@ -4861,12 +5542,14 @@ function requestedEndStatus(argv) {
  */
 const VALUE_TAKING_FLAGS = {
   begin: ['--accept', '--verify', '-v', '--decision'],
+  extend: ['--accept', '--verify', '-v', '--decision'],
   end: ['--status', '-s', '--note', '-n', '--verify-result', '-r'],
   log: ['--last', '-n'],
   reclaim: ['--reason', '-r', '--older-than'],
   unreclaim: ['--reason', '-r'],
   absorb: ['--decisions'],
   init: ['--lang'],
+  migrate: ['--source-log', '--source-decisions', '--plan', '--plan-json'],
   'decision add': ['--context', '-c', '--outcome', '-o', '--status', '-s', '--driver', '--option', '--consequence'],
   'decision update': ['--status', '-s', '--note', '-n'],
   'decision list': ['--last', '-n', '--status', '-s'],
@@ -4897,6 +5580,7 @@ function mutationResources(cmd, argv) {
   if (cmd === 'mcp') return [parseMcpInstallRequest(argv).configDir];
   if (cmd === 'hook') return [parseHookInstallRequest(argv.slice(1)).configDir];
   if (cmd === 'init') return [process.cwd()];
+  if (cmd === 'migrate') return [process.cwd()];
   if (cmd === 'reclaim' || cmd === 'unreclaim') return [logDir()];
   if (cmd === 'absorb') return [logDir(), decisionDir()];
   if (cmd === 'begin' && !argv.some((arg) => arg === '--decision' || arg.startsWith('--decision='))) {
@@ -4925,7 +5609,8 @@ function dispatch(argv) {
     // --help token consumed as a flag value is left for parseArgs to reject.
     if (wantsHelpBeforeLock(cmd, rest)) return { data: fn(rest), exitCode: 0 };
     const mutates =
-      ['begin', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
+      ['begin', 'extend', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
+      (cmd === 'migrate' && rest[1] === 'apply') ||
       (cmd === 'hook' && rest[0] === 'install') ||
       (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
     const readsIntentLog =
@@ -5066,12 +5751,19 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
     status() {
       return call(['status']);
     },
-    begin({ intent, acceptance = [], verify, decisions = [], force = false }) {
-      const argv = ['begin', intent];
+    begin({ outcome, acceptance = [], verify, decisions = [], force = false }) {
+      const argv = ['begin', outcome];
       for (const criterion of acceptance) appendFlag(argv, '--accept', criterion);
       appendFlag(argv, '--verify', verify);
       for (const decision of decisions) appendFlag(argv, '--decision', decision);
       if (force) argv.push('--force');
+      return call(argv);
+    },
+    extend({ extension, acceptance = [], verify, decisions = [] }) {
+      const argv = ['extend', extension];
+      for (const criterion of acceptance) appendFlag(argv, '--accept', criterion);
+      appendFlag(argv, '--verify', verify);
+      for (const decision of decisions) appendFlag(argv, '--decision', decision);
       return call(argv);
     },
     verify({ allowTrackedCommand = false } = {}) {
@@ -5134,6 +5826,24 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
     },
     decisionShow({ id }) {
       return call(['decision', 'show', String(id)]);
+    },
+    migrationInspect({ sourceLog, sourceDecisions } = {}) {
+      const argv = ['migrate', 'v1-to-v2', 'inspect'];
+      appendFlag(argv, '--source-log', sourceLog);
+      appendFlag(argv, '--source-decisions', sourceDecisions);
+      return call(argv);
+    },
+    migrationApply({ plan, sourceLog, sourceDecisions }) {
+      const argv = ['migrate', 'v1-to-v2', 'apply', '--plan-json', JSON.stringify(plan)];
+      appendFlag(argv, '--source-log', sourceLog);
+      appendFlag(argv, '--source-decisions', sourceDecisions);
+      return call(argv);
+    },
+    migrationCheck({ sourceLog, sourceDecisions } = {}) {
+      const argv = ['migrate', 'v1-to-v2', 'check'];
+      appendFlag(argv, '--source-log', sourceLog);
+      appendFlag(argv, '--source-decisions', sourceDecisions);
+      return call(argv);
     },
     init() {
       return call(['init']);

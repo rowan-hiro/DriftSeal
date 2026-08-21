@@ -38,19 +38,19 @@ test('programmatic API returns structured records without changing its fixed roo
   assert.equal(api.root, fs.realpathSync(root));
   assert.equal(api.status(), null);
   const opened = api.begin({
-    intent: 'exercise structured API',
+    outcome: 'exercise structured API',
     acceptance: ['the declared command exits successfully'],
     verify: 'true',
   });
   assert.equal(opened.status, 'in_progress');
-  assert.equal(opened.intent, 'exercise structured API');
+  assert.equal(opened.outcome, 'exercise structured API');
   const verification = api.verify();
   assert.equal(verification.verification.passed, true);
   const closed = api.end({ status: 'completed', note: 'done', verifyResult: 'passed' });
   assert.equal(closed.status, 'completed');
   assert.equal(api.log().length, 1);
-  assert.equal(fs.existsSync(path.join(root, '.intent-log', 'events.jsonl')), true);
-  assert.equal(fs.existsSync(path.join(other, '.intent-log', 'events.jsonl')), false);
+  assert.equal(fs.existsSync(path.join(root, '.seal', 'outcomes', 'events.jsonl')), true);
+  assert.equal(fs.existsSync(path.join(other, '.seal', 'outcomes', 'events.jsonl')), false);
   assert.throws(() => createApi({ root: path.join(root, 'missing') }), /does not exist/);
 });
 
@@ -76,7 +76,7 @@ test('captured verification output is bounded without changing complete evidence
     "+'b'.repeat(1048576)+'\\nstderr-tail\\n')";
 
   api.begin({
-    intent: 'verify bounded API capture',
+    outcome: 'verify bounded API capture',
     acceptance: ['complete output evidence survives bounded replay capture'],
     verify: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
   });
@@ -114,7 +114,7 @@ test('MCP startup arguments fix one repository root', () => {
   assert.throws(() => parseArguments(['--repository', '/tmp/example']), /unknown argument/);
 });
 
-test('stdio MCP exposes the complete v1 workflow, resources, and repository boundary', async () => {
+test('stdio MCP exposes the complete v2 workflow, resources, and repository boundary', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-test-'));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-outside-'));
   const incomingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-incoming-'));
@@ -126,8 +126,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     status: 'proposed',
   });
   incomingApi.begin({
-    intent: 'incoming MCP absorb round',
-    verify: 'true',
+    outcome: 'incoming MCP absorb round',
     decisions: [incomingDecision.id],
   });
   incomingApi.decisionUpdate({
@@ -154,6 +153,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
       [
         'driftseal_status',
         'driftseal_begin',
+        'driftseal_extend',
         'driftseal_verify',
         'driftseal_end',
         'driftseal_log',
@@ -164,6 +164,9 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
         'driftseal_decision_show',
         'driftseal_decision_add',
         'driftseal_decision_update',
+        'driftseal_migration_inspect',
+        'driftseal_migration_apply',
+        'driftseal_migration_check',
       ]
     );
     assert.equal(tools.tools.find((tool) => tool.name === 'driftseal_status').annotations.readOnlyHint, true);
@@ -180,21 +183,20 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     const resources = await client.listResources();
     assert.deepEqual(
       resources.resources.map((resource) => resource.uri),
-      ['driftseal://intent/current', 'driftseal://intents/recent', 'driftseal://decisions']
+      ['driftseal://outcome/current', 'driftseal://outcomes/recent', 'driftseal://madr']
     );
 
     const initial = await call(client, 'driftseal_status', { root: outside });
     assert.equal(initial.structuredContent.root, fs.realpathSync(root));
-    assert.equal(initial.structuredContent.intent, null);
+    assert.equal(initial.structuredContent.outcome, null);
 
     const first = await call(client, 'driftseal_begin', {
-      intent: 'first MCP round',
-      verify: 'true',
+      outcome: 'first MCP round',
     });
     assert.equal(first.isError, undefined);
-    assert.equal(first.structuredContent.intent.status, 'in_progress');
+    assert.equal(first.structuredContent.outcome.status, 'in_progress');
 
-    const conflict = await call(client, 'driftseal_begin', { intent: 'must not replace first' });
+    const conflict = await call(client, 'driftseal_begin', { outcome: 'must not replace first' });
     assert.equal(conflict.isError, true);
     assert.match(conflict.content[0].text, /still in_progress/);
 
@@ -202,7 +204,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
       status: 'abandoned',
       note: 'Clearing the test round.',
     });
-    assert.equal(abandoned.structuredContent.intent.status, 'abandoned');
+    assert.equal(abandoned.structuredContent.outcome.status, 'abandoned');
 
     const added = await call(client, 'driftseal_decision_add', {
       title: 'Keep MCP state repository-local',
@@ -221,12 +223,22 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     assert.match(shown.structuredContent.decision.content, /Keep MCP state repository-local/);
 
     const linked = await call(client, 'driftseal_begin', {
-      intent: 'reconcile MCP boundary decision',
+      outcome: 'reconcile MCP boundary decision',
       acceptance: ['the fixed-root workflow passes its declared check'],
       verify: 'true',
       decisions: ['1'],
     });
-    assert.deepEqual(linked.structuredContent.intent.decisions, ['0001']);
+    assert.deepEqual(linked.structuredContent.outcome.decisions, ['0001']);
+
+    const extended = await call(client, 'driftseal_extend', {
+      extension: 'Exercise the MCP extension boundary.',
+      acceptance: ['the extended contract still passes its cumulative check'],
+      verify: 'true',
+    });
+    assert.equal(
+      extended.structuredContent.outcome.extensions[0].extension,
+      'Exercise the MCP extension boundary.'
+    );
 
     const updated = await call(client, 'driftseal_decision_update', {
       id: '1',
@@ -244,41 +256,41 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
       note: 'Exercised the linked decision workflow.',
       verifyResult: 'MCP integration assertions passed.',
     });
-    assert.equal(completed.structuredContent.intent.status, 'completed');
+    assert.equal(completed.structuredContent.outcome.status, 'completed');
 
     const history = await call(client, 'driftseal_log', { last: 10 });
-    assert.equal(history.structuredContent.intents.length, 2);
+    assert.equal(history.structuredContent.outcomes.length, 2);
 
     const noReason = await call(client, 'driftseal_reclaim', { ids: ['x'] });
     assert.equal(noReason.isError, true);
 
     const reclaimed = await call(client, 'driftseal_reclaim', {
-      ids: [abandoned.structuredContent.intent.id],
+      ids: [abandoned.structuredContent.outcome.id],
       reason: 'Clearing round was test scaffolding, not project signal.',
     });
     assert.equal(reclaimed.isError, undefined);
-    assert.equal(reclaimed.structuredContent.intents[0].reclaimed, true);
+    assert.equal(reclaimed.structuredContent.outcomes[0].reclaimed, true);
     assert.equal(
-      reclaimed.structuredContent.intents[0].reclaimReason,
+      reclaimed.structuredContent.outcomes[0].reclaimReason,
       'Clearing round was test scaffolding, not project signal.'
     );
 
     const filtered = await call(client, 'driftseal_log', { last: 10 });
-    assert.equal(filtered.structuredContent.intents.length, 1);
+    assert.equal(filtered.structuredContent.outcomes.length, 1);
     const unfiltered = await call(client, 'driftseal_log', { last: 10, includeReclaimed: true });
-    assert.equal(unfiltered.structuredContent.intents.length, 2);
+    assert.equal(unfiltered.structuredContent.outcomes.length, 2);
 
     const restored = await call(client, 'driftseal_unreclaim', {
-      id: abandoned.structuredContent.intent.id,
+      id: abandoned.structuredContent.outcome.id,
       reason: 'Kept for the integration test record.',
     });
-    assert.equal(restored.structuredContent.intent.reclaimed, false);
+    assert.equal(restored.structuredContent.outcome.reclaimed, false);
     const restoredHistory = await call(client, 'driftseal_log', { last: 10 });
-    assert.equal(restoredHistory.structuredContent.intents.length, 2);
+    assert.equal(restoredHistory.structuredContent.outcomes.length, 2);
 
     const absorbInput = {
-      otherLog: path.join(incomingRoot, '.intent-log', 'events.jsonl'),
-      otherDecisions: path.join(incomingRoot, '.decision-log'),
+      otherLog: path.join(incomingRoot, '.seal', 'outcomes', 'events.jsonl'),
+      otherDecisions: path.join(incomingRoot, '.seal', 'madr'),
     };
     const absorbDryRun = await call(client, 'driftseal_absorb', {
       ...absorbInput,
@@ -286,27 +298,30 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
     });
     assert.equal(absorbDryRun.isError, undefined);
     assert.equal(absorbDryRun.structuredContent.result.mappings.length, 2);
-    assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.intents.length, 2);
+    assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.outcomes.length, 2);
 
     const absorbed = await call(client, 'driftseal_absorb', absorbInput);
     assert.equal(absorbed.isError, undefined);
     assert.equal(absorbed.structuredContent.root, fs.realpathSync(root));
     assert.deepEqual(
       absorbed.structuredContent.result.mappings.map((mapping) => mapping.kind).sort(),
-      ['decision', 'intent']
+      ['decision', 'outcome']
     );
     assert.equal(absorbed.structuredContent.result.exitCode, 0);
-    assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.intents.length, 3);
+    assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.outcomes.length, 3);
     assert.equal(
-      fs.readdirSync(path.join(root, '.decision-log')).some((file) => /^0002-/.test(file)),
+      fs.readdirSync(path.join(root, '.seal', 'madr')).some((file) => /^0002-/.test(file)),
       true
     );
 
-    const currentResource = await client.readResource({ uri: 'driftseal://intent/current' });
-    assert.equal(JSON.parse(currentResource.contents[0].text).intent, null);
+    const currentResource = await client.readResource({ uri: 'driftseal://outcome/current' });
+    assert.equal(JSON.parse(currentResource.contents[0].text).outcome, null);
 
-    assert.equal(fs.existsSync(path.join(root, '.intent-log', 'events.jsonl')), true);
-    assert.equal(fs.existsSync(path.join(root, '.decision-log', '0001-keep-mcp-state-repository-local.md')), true);
+    assert.equal(fs.existsSync(path.join(root, '.seal', 'outcomes', 'events.jsonl')), true);
+    assert.equal(
+      fs.existsSync(path.join(root, '.seal', 'madr', '0001-keep-mcp-state-repository-local.md')),
+      true
+    );
     assert.equal(fs.existsSync(path.join(outside, 'events.jsonl')), false);
     assert.equal(fs.existsSync(path.join(outside, 'decisions')), false);
   } finally {
@@ -315,7 +330,7 @@ test('stdio MCP exposes the complete v1 workflow, resources, and repository boun
 });
 
 function holdLogLock(root) {
-  const lock = path.join(root, '.intent-log', '.driftseal.lock');
+  const lock = path.join(root, '.seal', 'outcomes', '.driftseal.lock');
   fs.mkdirSync(lock, { recursive: true });
   fs.writeFileSync(
     path.join(lock, 'owner.json'),
@@ -332,7 +347,7 @@ const READ_ONLY_ENV = {
 test('MCP status and log surface a degraded read-only snapshot', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-readonly-'));
   const setup = createApi({ root, isolateStorage: true });
-  setup.begin({ intent: 'MCP round behind a held lock', verify: 'true' });
+  setup.begin({ outcome: 'MCP round behind a held lock' });
   holdLogLock(root);
   const client = await connect(root, READ_ONLY_ENV);
 
@@ -340,21 +355,21 @@ test('MCP status and log surface a degraded read-only snapshot', async () => {
     const status = await call(client, 'driftseal_status');
     assert.equal(status.isError, undefined);
     assert.equal(status.structuredContent.readOnly, true);
-    assert.equal(status.structuredContent.intent.status, 'in_progress');
-    assert.equal(status.structuredContent.intent.readOnly, true);
+    assert.equal(status.structuredContent.outcome.status, 'in_progress');
+    assert.equal(status.structuredContent.outcome.readOnly, true);
     assert.match(status.content[0].text, /read-only/);
 
     const log = await call(client, 'driftseal_log', { last: 10 });
     assert.equal(log.isError, undefined);
     assert.equal(log.structuredContent.readOnly, true);
-    assert.equal(log.structuredContent.intents.length, 1);
+    assert.equal(log.structuredContent.outcomes.length, 1);
     assert.match(log.content[0].text, /read-only/);
   } finally {
     await client.close();
   }
 });
 
-test('MCP status with no open intent still reports a degraded snapshot', async () => {
+test('MCP status with no open outcome still reports a degraded snapshot', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-readonly-empty-'));
   holdLogLock(root);
   const client = await connect(root, READ_ONLY_ENV);
@@ -362,9 +377,9 @@ test('MCP status with no open intent still reports a degraded snapshot', async (
   try {
     const status = await call(client, 'driftseal_status');
     assert.equal(status.isError, undefined);
-    assert.equal(status.structuredContent.intent, null);
+    assert.equal(status.structuredContent.outcome, null);
     assert.equal(status.structuredContent.readOnly, true);
-    assert.match(status.content[0].text, /No DriftSeal intent is in progress/);
+    assert.match(status.content[0].text, /No DriftSeal outcome is in progress/);
     assert.match(status.content[0].text, /read-only/);
   } finally {
     await client.close();
@@ -374,10 +389,10 @@ test('MCP status with no open intent still reports a degraded snapshot', async (
 test('MCP driftseal_log coerces a non-string head to null without a schema error', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-corrupt-head-'));
   const api = createApi({ root, isolateStorage: true });
-  api.begin({ intent: 'round whose head is corrupted on disk', verify: 'true' });
+  api.begin({ outcome: 'round whose head is corrupted on disk' });
   api.end({ status: 'completed', note: 'done', verifyResult: 'ok' });
 
-  const file = path.join(root, '.intent-log', 'events.jsonl');
+  const file = path.join(root, '.seal', 'outcomes', 'events.jsonl');
   const events = fs
     .readFileSync(file, 'utf8')
     .trim()
@@ -391,13 +406,13 @@ test('MCP driftseal_log coerces a non-string head to null without a schema error
   try {
     const log = await call(client, 'driftseal_log', { last: 10 });
     assert.equal(log.isError, undefined);
-    assert.equal(log.structuredContent.intents.length, 1);
-    assert.equal(log.structuredContent.intents[0].beginHead, null);
-    assert.equal(log.structuredContent.intents[0].endHead, null);
+    assert.equal(log.structuredContent.outcomes.length, 1);
+    assert.equal(log.structuredContent.outcomes[0].beginHead, null);
+    assert.equal(log.structuredContent.outcomes[0].endHead, null);
 
     const status = await call(client, 'driftseal_status');
     assert.equal(status.isError, undefined);
-    assert.equal(status.structuredContent.intent, null);
+    assert.equal(status.structuredContent.outcome, null);
   } finally {
     await client.close();
   }
@@ -407,13 +422,13 @@ test('MCP status accepts a verification record with a null exit code', async () 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-mcp-null-exit-'));
   const api = createApi({ root, isolateStorage: true });
   api.begin({
-    intent: 'round interrupted by a signal',
+    outcome: 'round interrupted by a signal',
     acceptance: ['the verifier result remains inspectable'],
     verify: 'true',
   });
   api.verify();
 
-  const file = path.join(root, '.intent-log', 'events.jsonl');
+  const file = path.join(root, '.seal', 'outcomes', 'events.jsonl');
   const events = fs
     .readFileSync(file, 'utf8')
     .trim()
@@ -429,8 +444,8 @@ test('MCP status accepts a verification record with a null exit code', async () 
   try {
     const status = await call(client, 'driftseal_status');
     assert.equal(status.isError, undefined);
-    assert.equal(status.structuredContent.intent.verification.exitCode, null);
-    assert.equal(status.structuredContent.intent.verification.signal, 'SIGTERM');
+    assert.equal(status.structuredContent.outcome.verification.exitCode, null);
+    assert.equal(status.structuredContent.outcome.verification.signal, 'SIGTERM');
   } finally {
     await client.close();
   }
