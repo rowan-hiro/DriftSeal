@@ -46,3 +46,10 @@ Named lanes, a derived local index, protocol 2.1, and package 2.1.0 are implemen
 Status: Accepted → Accepted
 
 Unknown lane names are inferred from the WAL so re-anchor commands stay readable; a stale current-lane pointer falls back to main on status, log, and lane; begin still refuses. Open outcomes remain visible in log across lanes.
+
+<!-- driftseal-reconciliation: a7b38126-b80e-4a93-8dde-8bf819337d73 -->
+### 2026-08-22T01:17:37.603Z — Outcome `2026-08-22-001`
+
+Status: Accepted → Accepted
+
+Duplicate lane_add last-writes the description instead of failing the fold. lane_assign infers a missing lane the same way a tagged begin does, so merge-damaged logs stay readable.
