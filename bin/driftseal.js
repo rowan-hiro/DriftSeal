@@ -1152,7 +1152,9 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
     }
   }
   state.source = laneIndexSourceIdentity(file, indexedThrough, indexedLines);
-  if (state.lastBuild !== 'hot') linkLaneIndex(state);
+  if (state.lastBuild !== 'hot' || process.env._DRIFTSEAL_TEST_FORCE_INDEX_RELINK === '1') {
+    linkLaneIndex(state);
+  }
   if (state.lastBuild !== 'hot') persistLaneIndex(state, { readOnly });
   return state;
 }
@@ -6407,7 +6409,12 @@ const commands = {
     const n = flags.last === undefined ? null : positiveInteger(flags.last, '--last');
     const allLanes = flags['all-lanes'] === true;
     const parkedV1 = legacyParkedIntent();
-    if (n !== null && !allLanes && !parkedV1) {
+    if (
+      n !== null &&
+      !allLanes &&
+      !parkedV1 &&
+      process.env._DRIFTSEAL_TEST_DISABLE_RECENT_INDEX !== '1'
+    ) {
       const recent = tryLoadRecentOutcomeView(n, {
         includeReclaimed: flags.all === true,
         repairTail: true,

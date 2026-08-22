@@ -157,11 +157,15 @@ return more than N records when an open outcome sits on another lane.
 
 A derived lane index caches fold state in Git metadata (or beside a custom
 seal). Incremental rebuilds follow `indexedThrough` and `indexedLines`; a full
-rebuild happens when the log identity changes. Per-lane heads, reverse links,
-and WAL byte ranges are stored for a seek path that is not consumed yet. The
-index is reconstructable and is not committed with the log. Custom-home
-sidecars sit next to `events.jsonl`. When that directory is inside a Git
-worktree, they are listed in its `.gitignore`.
+rebuild happens when the log identity changes. On a hot `log --last N` without
+a parked overlay, the reader follows the current lane's persisted head and
+reverse links only until it has N visible outcomes, then includes any open
+outcomes from other lanes. Rebuilds, parked overlays, unbounded logs, and
+`--all-lanes` use the complete fold path. WAL byte ranges remain staged for a
+future random-access format; the current path still parses the complete JSON
+sidecar. The index is reconstructable and is not committed with the log.
+Custom-home sidecars sit next to `events.jsonl`. When that directory is inside
+a Git worktree, they are listed in its `.gitignore`.
 
 ## Decisions and MADR
 
