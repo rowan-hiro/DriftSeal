@@ -5698,6 +5698,93 @@ test('the derived lane index incrementally follows WAL growth and rebuilds after
   assert.equal(afterRewrite.lastBuild, 'full');
 });
 
+test('log --last walks only the visible tail of the current lane index', () => {
+  const { dir, run } = setup();
+  const ids = [];
+  for (let i = 0; i < 5; i++) {
+    ids.push(run(['begin', `main work ${i}`]).trim());
+    run(['end', '--status', 'abandoned', '--note', `main ${i}`]);
+  }
+  const hidden = run(['begin', 'hidden main work']).trim();
+  run(['end', '--status', 'abandoned', '--note', 'hidden']);
+  run(['reclaim', hidden, '--reason', 'hide benchmark noise']);
+
+  run(['lane', 'add', 'other']);
+  run(['lane', 'switch', 'other']);
+  for (let i = 0; i < 12; i++) {
+    run(['begin', `unrelated work ${i}`]);
+    run(['end', '--status', 'abandoned', '--note', `other ${i}`]);
+  }
+  run(['lane', 'switch', 'main']);
+  run(['log']);
+
+  const env = {
+    ...process.env,
+    DRIFTSEAL_HOME: dir,
+    DRIFTSEAL_DECISION_HOME: path.join(dir, 'madr'),
+    _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1',
+    _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '4',
+  };
+  const recent = run(['log', '--last', '3'], { env });
+  assert.match(recent, /main work 2/);
+  assert.match(recent, /main work 3/);
+  assert.match(recent, /main work 4/);
+  assert.doesNotMatch(recent, /main work 1/);
+  assert.doesNotMatch(recent, /hidden main work/);
+  assert.doesNotMatch(recent, /unrelated work/);
+
+  env._DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS = '3';
+  const withReclaimed = run(['log', '--all', '--last', '3'], { env });
+  assert.doesNotMatch(withReclaimed, /main work 2/);
+  assert.match(withReclaimed, /main work 3/);
+  assert.match(withReclaimed, /main work 4/);
+  assert.match(withReclaimed, /hidden main work/);
+});
+
+test('recent lane index rebuilds after assignment or sidecar loss and falls back for a park', () => {
+  const { dir, run } = setup();
+  const moved = run(['begin', 'move me']).trim();
+  run(['end', '--status', 'abandoned', '--note', 'main']);
+  run(['lane', 'add', 'index']);
+  run(['lane', 'switch', 'index']);
+  run(['begin', 'existing index work']);
+  run(['end', '--status', 'abandoned', '--note', 'index']);
+  run(['lane', 'assign', moved, 'index']);
+  run(['log']);
+
+  const env = {
+    ...process.env,
+    DRIFTSEAL_HOME: dir,
+    DRIFTSEAL_DECISION_HOME: path.join(dir, 'madr'),
+    _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1',
+    _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '2',
+  };
+  const assigned = run(['log', '--last', '2'], { env });
+  assert.match(assigned, /move me/);
+  assert.match(assigned, /existing index work/);
+
+  const indexFile = path.join(dir, 'outcomes', '.lane-index.json');
+  fs.unlinkSync(indexFile);
+  assert.match(run(['log', '--last', '1'], { env: { ...env, _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '1' } }), /existing index work/);
+  fs.writeFileSync(indexFile, '{broken\n');
+  assert.match(run(['log', '--last', '1'], { env: { ...env, _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '1' } }), /existing index work/);
+
+  const repo = setupGitRepository('driftseal-recent-park-');
+  repo.run(['begin', 'parked work']);
+  assert.match(repo.run(['log', '--last', '1']), /parked work/);
+  assert.match(
+    repo.runFail([
+      'log',
+      '--last',
+      '1',
+    ], {
+      env: { ...repo.env, _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1' },
+    }).stderr,
+    /fast path was not used/
+  );
+  repo.run(['end', '--status', 'abandoned', '--note', 'clear park']);
+});
+
 test('current lane is local to a git worktree', () => {
   const { cwd, git, run } = setupGitRepository('driftseal-lane-worktree-');
   git(['add', '.gitattributes', 'AGENTS.md']);
