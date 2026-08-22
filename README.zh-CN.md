@@ -141,10 +141,13 @@ lane 不能改名或删除。`lane add` 打错的名字会一直出现在 `drift
 别的 lane 时，返回条数可以多于 N。
 
 派生的 lane index 缓存 fold 状态，放在 Git metadata（或自定义 seal 旁边）。
-增量重建跟随 `indexedThrough` 和 `indexedLines`；log 身份变化时全量重建。每条
-lane 的 head、反向链接和 WAL byte range 会写入 index，供尚未接入的 seek 路径使用。
-它可以重建，不会随 log 一起提交。自定义 home 下的 sidecar 放在 `events.jsonl`
-旁边；该目录在 Git worktree 内时，由目录里的 `.gitignore` 忽略。
+增量重建跟随 `indexedThrough` 和 `indexedLines`；log 身份变化时全量重建。没有
+parked overlay 的 hot `log --last N` 会从当前 lane 已持久化的 head 沿反向链接读取，
+只走到取得 N 条可见 outcome 为止，再补上其他 lane 的 open outcome。重建、parked
+overlay、无界 log 和 `--all-lanes` 仍走完整 fold 路径。WAL byte range 保留给后续的
+随机访问格式；当前路径仍会解析完整的 JSON sidecar。index 可以重建，不会随 log
+一起提交。自定义 home 下的 sidecar 放在 `events.jsonl` 旁边；该目录在 Git worktree
+内时，由目录里的 `.gitignore` 忽略。
 
 ## Decision 与 MADR
 

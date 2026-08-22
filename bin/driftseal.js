@@ -53,7 +53,7 @@ const LANE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
 const CURRENT_LANE_GIT_PATH = 'driftseal-v2-current-lane';
 const LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
-const LANE_INDEX_VERSION = 1;
+const LANE_INDEX_VERSION = 2;
 const LANE_INDEX_PREFIX_BYTES = 8192;
 const LANE_INDEX_TAIL_BYTES = 64 * 1024;
 const LOCK_STALE_MS = 30 * 60 * 1000;
@@ -598,7 +598,9 @@ function laneIndexFile() {
 }
 
 function emptyLaneCatalog() {
-  return new Map([[DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null }]]);
+  return new Map([
+    [DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null, count: 0, visible: 0 }],
+  ]);
 }
 
 function readCurrentLaneName() {
@@ -636,7 +638,16 @@ function ensureDerivedLaneSidecarIgnore() {
 }
 
 function defaultLaneCatalogObject() {
-  return { [DEFAULT_LANE]: { name: DEFAULT_LANE, description: null, addedAt: null, head: null } };
+  return {
+    [DEFAULT_LANE]: {
+      name: DEFAULT_LANE,
+      description: null,
+      addedAt: null,
+      head: null,
+      count: 0,
+      visible: 0,
+    },
+  };
 }
 
 function emptyLaneIndexState() {
@@ -654,6 +665,7 @@ function emptyLaneIndexState() {
     records: new Map(),
     ranges: new Map(),
     reconciliations: new Map(),
+    open: [],
   };
 }
 
@@ -709,13 +721,22 @@ function serializeLaneIndex(state) {
     lanes: Object.fromEntries(
       [...state.lanes.entries()].map(([name, lane]) => [
         name,
-        { name, description: lane.description || null, addedAt: lane.addedAt || null, head: lane.head || null, inferred: lane.inferred === true },
+        {
+          name,
+          description: lane.description || null,
+          addedAt: lane.addedAt || null,
+          head: lane.head || null,
+          inferred: lane.inferred === true,
+          count: lane.count || 0,
+          visible: lane.visible || 0,
+        },
       ])
     ),
     order: [...state.order],
     records: Object.fromEntries(state.records),
     ranges: Object.fromEntries(state.ranges),
     reconciliations: Object.fromEntries(state.reconciliations),
+    open: [...state.open],
   };
 }
 
@@ -729,10 +750,19 @@ function deserializeLaneIndex(raw) {
       addedAt: lane.addedAt || null,
       head: lane.head || null,
       inferred: lane.inferred === true,
+      count: lane.count || 0,
+      visible: lane.visible || 0,
     });
   }
   if (!lanes.has(DEFAULT_LANE)) {
-    lanes.set(DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null });
+    lanes.set(DEFAULT_LANE, {
+      name: DEFAULT_LANE,
+      description: null,
+      addedAt: null,
+      head: null,
+      count: 0,
+      visible: 0,
+    });
   }
   return {
     indexVersion: LANE_INDEX_VERSION,
@@ -743,6 +773,7 @@ function deserializeLaneIndex(raw) {
     records: new Map(Object.entries(raw.records)),
     ranges: new Map(Object.entries(raw.ranges || {})),
     reconciliations: new Map(Object.entries(raw.reconciliations || {})),
+    open: Array.isArray(raw.open) ? [...raw.open] : [],
   };
 }
 
@@ -752,10 +783,22 @@ function cloneLaneIndexState(state) {
 
 function linkLaneIndex(state) {
   const heads = new Map();
-  for (const id of state.order) {
+  state.open = [];
+  for (const lane of state.lanes.values()) {
+    lane.head = null;
+    lane.count = 0;
+    lane.visible = 0;
+  }
+  for (let ordinal = 0; ordinal < state.order.length; ordinal += 1) {
+    const id = state.order[ordinal];
     const rec = state.records.get(id);
     rec.previous = heads.get(rec.lane) || null;
+    rec.ordinal = ordinal;
     heads.set(rec.lane, id);
+    const lane = state.lanes.get(rec.lane);
+    lane.count += 1;
+    if (!rec.reclaimed) lane.visible += 1;
+    if (rec.status === 'in_progress') state.open.push(id);
   }
   for (const [name, lane] of state.lanes) {
     lane.head = heads.get(name) || null;
@@ -777,7 +820,15 @@ function applyFoldEvent(state, ev) {
   const { records, reconciliations, order, lanes } = state;
   const ensureLane = (name) => {
     if (lanes.has(name)) return;
-    lanes.set(name, { name, description: null, addedAt: null, head: null, inferred: true });
+    lanes.set(name, {
+      name,
+      description: null,
+      addedAt: null,
+      head: null,
+      inferred: true,
+      count: 0,
+      visible: 0,
+    });
   };
   if (ev.type === 'begin') {
     if (records.has(ev.id)) fail(`duplicate begin event for outcome id: ${ev.id}`);
@@ -824,6 +875,8 @@ function applyFoldEvent(state, ev) {
       addedAt: ev.ts,
       head: existing ? existing.head : null,
       inferred: false,
+      count: existing ? existing.count : 0,
+      visible: existing ? existing.visible : 0,
     });
     return;
   }
@@ -1065,10 +1118,10 @@ function loadPersistedLaneIndex() {
   }
 }
 
-function syncCommittedLaneIndex({ repairTail = false, readOnly = false } = {}) {
+function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFull = false } = {}) {
   const file = logFile();
   let state = loadPersistedLaneIndex();
-  const canIncrement = state && laneIndexMatchesFile(state, file);
+  const canIncrement = !forceFull && state && laneIndexMatchesFile(state, file);
   let indexedThrough = 0;
   let indexedLines = 0;
   if (!canIncrement) {
@@ -1099,7 +1152,9 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false } = {}) {
     }
   }
   state.source = laneIndexSourceIdentity(file, indexedThrough, indexedLines);
-  linkLaneIndex(state);
+  if (state.lastBuild !== 'hot' || process.env._DRIFTSEAL_TEST_FORCE_INDEX_RELINK === '1') {
+    linkLaneIndex(state);
+  }
   if (state.lastBuild !== 'hot') persistLaneIndex(state, { readOnly });
   return state;
 }
@@ -1211,6 +1266,63 @@ function selectLastLogRecords(records, current, n) {
   if (extras.length === 0) return clipped;
   const order = new Map(records.map((record, index) => [record.id, index]));
   return [...clipped, ...extras].sort((left, right) => order.get(left.id) - order.get(right.id));
+}
+
+function selectLastIndexedLogRecords(state, current, n, { includeReclaimed = false } = {}) {
+  const lane = state.lanes.get(current);
+  if (!lane) return null;
+  const selected = [];
+  const visited = new Set();
+  let id = lane.head;
+  let visits = 0;
+  const maxVisits = Number(process.env._DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS) || Infinity;
+  while (id && selected.length < n) {
+    if (visited.has(id)) return null;
+    visited.add(id);
+    visits += 1;
+    if (visits > maxVisits) fail(`recent lane index visited more than ${maxVisits} records`);
+    const record = state.records.get(id);
+    if (!record || (record.lane || DEFAULT_LANE) !== current) return null;
+    if (includeReclaimed || !record.reclaimed) selected.push(record);
+    id = record.previous || null;
+  }
+  selected.reverse();
+  const kept = new Set(selected.map((record) => record.id));
+  const extras = [];
+  for (const openId of state.open) {
+    if (kept.has(openId)) continue;
+    const record = state.records.get(openId);
+    if (!record || record.status !== 'in_progress') return null;
+    extras.push(record);
+  }
+  return [...selected, ...extras].sort((left, right) => left.ordinal - right.ordinal);
+}
+
+function indexedLaneSummary(state, name) {
+  const lane = state.lanes.get(name);
+  return {
+    name,
+    description: lane ? lane.description : null,
+    addedAt: lane ? lane.addedAt : null,
+    inferred: Boolean(lane && lane.inferred),
+    visible: lane ? lane.visible : 0,
+    count: lane ? lane.count : 0,
+  };
+}
+
+function tryLoadRecentOutcomeView(n, { includeReclaimed = false, repairTail = false, readOnly = false } = {}) {
+  const park = inProgressFile();
+  if (park && fs.existsSync(park)) return null;
+  let state = syncCommittedLaneIndex({ repairTail, readOnly });
+  if (park && fs.existsSync(park)) return null;
+  const { current, missing } = resolveCurrentLane({ lanes: state.lanes });
+  let records = selectLastIndexedLogRecords(state, current, n, { includeReclaimed });
+  if (!records) {
+    state = syncCommittedLaneIndex({ repairTail, readOnly, forceFull: true });
+    records = selectLastIndexedLogRecords(state, current, n, { includeReclaimed });
+  }
+  if (!records) return null;
+  return { state, records, current, missing };
 }
 
 function liveWorktreeOutcomeLog() {
@@ -6294,16 +6406,47 @@ const commands = {
       'all-lanes': 'boolean',
     }, 'log');
     if (positionals.length > 0) fail(usageFor('log'));
+    const n = flags.last === undefined ? null : positiveInteger(flags.last, '--last');
+    const allLanes = flags['all-lanes'] === true;
+    const parkedV1 = legacyParkedIntent();
+    if (
+      n !== null &&
+      !allLanes &&
+      !parkedV1 &&
+      process.env._DRIFTSEAL_TEST_DISABLE_RECENT_INDEX !== '1'
+    ) {
+      const recent = tryLoadRecentOutcomeView(n, {
+        includeReclaimed: flags.all === true,
+        repairTail: true,
+        readOnly,
+      });
+      if (recent) {
+        const { state, records, current, missing } = recent;
+        warnMissingCurrentLane(missing);
+        const customLanes = state.lanes.size > 1;
+        if (customLanes || current !== DEFAULT_LANE || missing) {
+          const summary = indexedLaneSummary(state, current);
+          printLine(`lane: ${current} (${summary.visible} visible / ${summary.count} in lane)`);
+        }
+        if (records.length === 0) {
+          printLine('log is empty');
+          return [];
+        }
+        printLine(records.map((record) => render(record, { currentLane: current })).join('\n\n'));
+        return records.map(publicOutcome);
+      }
+    }
+    if (process.env._DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX === '1' && n !== null && !allLanes) {
+      fail('recent lane index fast path was not used');
+    }
     const view = loadOutcomeView({ repairTail: true, readOnly });
     let records = view.records;
-    const parkedV1 = legacyParkedIntent();
     if (parkedV1 && !records.some((record) => record.id === parkedV1.id && record.status === 'in_progress')) {
       records = Object.assign([...records, parkedV1], { lanes: records.lanes });
     }
     const catalog = records.lanes || emptyLaneCatalog();
     const { current, missing } = resolveCurrentLane(view.records);
     warnMissingCurrentLane(missing);
-    const allLanes = flags['all-lanes'] === true;
     if (!allLanes) {
       records = Object.assign(selectLaneLogRecords(records, current), { lanes: catalog });
     }
@@ -6313,8 +6456,7 @@ const commands = {
       printLine(renderLaneLine(view.records, current));
     }
     let shown = visible;
-    if (flags.last) {
-      const n = positiveInteger(flags.last, '--last');
+    if (n !== null) {
       shown = selectLastLogRecords(visible, current, n);
     }
     if (shown.length === 0) {
