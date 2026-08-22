@@ -43,11 +43,19 @@ const DECISION_STATUSES = [
   'superseded',
 ];
 const LOG_VERSION = 2;
-const EVENT_SCHEMA_VERSION = 1;
+const EVENT_SCHEMA_VERSION = 2;
+const DEFAULT_WRITE_SCHEMA_VERSION = 1;
 const LEGACY_EVENT_SCHEMA_VERSION = 4;
-const PROTOCOL_VERSION = '2.0';
+const PROTOCOL_VERSION = '2.1';
 const DEFAULT_LOG_LANGUAGE = 'en';
+const DEFAULT_LANE = 'main';
+const LANE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
+const CURRENT_LANE_GIT_PATH = 'driftseal-v2-current-lane';
+const LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
+const LANE_INDEX_VERSION = 1;
+const LANE_INDEX_PREFIX_BYTES = 8192;
+const LANE_INDEX_TAIL_BYTES = 64 * 1024;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repair skipped)';
@@ -84,7 +92,12 @@ function usageFor(key) {
     verify: 'usage: driftseal verify [--allow-tracked-command]',
     end: 'usage: driftseal end [id] [options]',
     status: 'usage: driftseal status',
-    log: 'usage: driftseal log [--last N] [--all]',
+    log: 'usage: driftseal log [--last N] [--all] [--all-lanes]',
+    lane: 'usage: driftseal lane [add|switch|assign|show] ... (run: driftseal help)',
+    'lane add': 'usage: driftseal lane add <name> [--desc "<why this capability exists>"]',
+    'lane switch': 'usage: driftseal lane switch <name>',
+    'lane assign': 'usage: driftseal lane assign <id> <name>',
+    'lane show': 'usage: driftseal lane show [name]',
     reclaim:
       'usage: driftseal reclaim [id ...] --reason "<why>" [--older-than <days>] [--force] [--dry-run]',
     unreclaim: 'usage: driftseal unreclaim <id> --reason "<why>"',
@@ -265,6 +278,26 @@ function normalizeMigrationSource(value, line) {
   };
 }
 
+function laneEventId(name) {
+  return `lane:${name}`;
+}
+
+function normalizeLaneName(value, { optional = false, line } = {}) {
+  const prefix = line === undefined ? '' : ` on log line ${line}`;
+  if (value === undefined || value === null || value === '') {
+    if (optional) return DEFAULT_LANE;
+    fail(`lane name required${prefix}`);
+  }
+  if (typeof value !== 'string') fail(`invalid lane name${prefix}`);
+  const name = value.trim();
+  if (!LANE_NAME_RE.test(name)) {
+    fail(
+      `invalid lane name "${name}"${prefix} (expected a lowercase letter, then up to 62 letters, digits, or hyphens)`
+    );
+  }
+  return name;
+}
+
 function normalizeEvent(event, line) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) {
     fail(`invalid event object on log line ${line}`);
@@ -311,7 +344,8 @@ function normalizeEvent(event, line) {
     if (new Set(decisions).size !== decisions.length) {
       fail(`duplicate linked decision on log line ${line}`);
     }
-    return { ...event, logVersion, outcome, acceptance, decisions, head: normalizeHead(event.head) };
+    const lane = normalizeLaneName(event.lane, { optional: true, line });
+    return { ...event, logVersion, outcome, acceptance, decisions, lane, head: normalizeHead(event.head) };
   }
 
   if (event.type === 'extend') {
@@ -412,7 +446,8 @@ function normalizeEvent(event, line) {
       typeof source.id !== 'string' || source.id.length === 0)) {
       fail(`invalid imported outcome source on log line ${line}`);
     }
-    return { ...event, logVersion, decisions, head: normalizeHead(event.head) };
+    const lane = normalizeLaneName(event.lane, { optional: true, line });
+    return { ...event, logVersion, decisions, lane, head: normalizeHead(event.head) };
   }
 
   if (event.type === 'migration') {
@@ -430,6 +465,32 @@ function normalizeEvent(event, line) {
       madrManifest: normalizeMadrManifest(event.madrManifest, line),
       source: normalizeMigrationSource(event.source, line),
     };
+  }
+
+  if (event.type === 'lane_add') {
+    if (logVersion !== LOG_VERSION) fail(`invalid lane add event on log line ${line}`);
+    const lane = normalizeLaneName(event.lane, { line });
+    if (lane === DEFAULT_LANE) fail(`cannot add the default lane on log line ${line}`);
+    if (event.id !== laneEventId(lane)) {
+      fail(`lane add id must be ${laneEventId(lane)} on log line ${line}`);
+    }
+    if (
+      event.description !== undefined &&
+      event.description !== null &&
+      typeof event.description !== 'string'
+    ) {
+      fail(`invalid lane description on log line ${line}`);
+    }
+    const description = event.description && event.description.trim().length > 0
+      ? event.description.trim()
+      : null;
+    return { ...event, logVersion, lane, description };
+  }
+
+  if (event.type === 'lane_assign') {
+    if (logVersion !== LOG_VERSION) fail(`invalid lane assign event on log line ${line}`);
+    const lane = normalizeLaneName(event.lane, { line });
+    return { ...event, logVersion, lane };
   }
 
   if (event.type === 'reclaim' || event.type === 'unreclaim') {
@@ -517,6 +578,639 @@ function isParkableOutcomeLog() {
 function inProgressFile() {
   if (!isParkableOutcomeLog()) return null;
   return worktreeInProgressFile();
+}
+
+function worktreeMetadataFile(gitPath, cwd = process.cwd()) {
+  if (!isGitWorkTree(cwd)) return null;
+  const resolved = gitCapture(['rev-parse', '--git-path', gitPath], cwd);
+  if (!resolved) return null;
+  return path.resolve(cwd, resolved);
+}
+
+function currentLaneFile() {
+  if (isParkableOutcomeLog()) return worktreeMetadataFile(CURRENT_LANE_GIT_PATH);
+  return path.join(logDir(), '.current-lane');
+}
+
+function laneIndexFile() {
+  if (isParkableOutcomeLog()) return worktreeMetadataFile(LANE_INDEX_GIT_PATH);
+  return path.join(logDir(), '.lane-index.json');
+}
+
+function emptyLaneCatalog() {
+  return new Map([[DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null }]]);
+}
+
+function readCurrentLaneName() {
+  const file = currentLaneFile();
+  if (!file || !fs.existsSync(file)) return DEFAULT_LANE;
+  const name = fs.readFileSync(file, 'utf8').trim();
+  if (!name) return DEFAULT_LANE;
+  return normalizeLaneName(name);
+}
+
+function writeCurrentLaneName(name, { readOnly = false } = {}) {
+  if (readOnly) return;
+  const file = currentLaneFile();
+  if (!file) fail('cannot persist the current lane outside a writable seal');
+  ensureDirectoryDurable(path.dirname(file));
+  ensureDerivedLaneSidecarIgnore();
+  atomicWriteFile(file, `${name}\n`, 0o600);
+}
+
+function ensureDerivedLaneSidecarIgnore() {
+  if (isParkableOutcomeLog()) return;
+  if (!isGitWorkTree(logDir())) return;
+  const ignoreFile = path.join(logDir(), '.gitignore');
+  let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
+  let next = current;
+  for (const name of ['.current-lane', '.lane-index.json']) {
+    const present = next.split(/\r?\n/).some((line) => line.trim() === name);
+    if (present) continue;
+    if (next && !next.endsWith('\n')) next += '\n';
+    next += `${name}\n`;
+  }
+  if (next === current) return;
+  ensureDirectoryDurable(logDir());
+  atomicWriteFile(ignoreFile, next, 0o644);
+}
+
+function defaultLaneCatalogObject() {
+  return { [DEFAULT_LANE]: { name: DEFAULT_LANE, description: null, addedAt: null, head: null } };
+}
+
+function emptyLaneIndexState() {
+  return {
+    indexVersion: LANE_INDEX_VERSION,
+    source: {
+      indexedThrough: 0,
+      indexedLines: 0,
+      prefixHash: contentHash(''),
+      tailHash: contentHash(''),
+    },
+    lastBuild: 'full',
+    lanes: emptyLaneCatalog(),
+    order: [],
+    records: new Map(),
+    ranges: new Map(),
+    reconciliations: new Map(),
+  };
+}
+
+function hashFileRange(file, start, length) {
+  if (length <= 0) return contentHash('');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(length);
+    const read = fs.readSync(fd, buf, 0, length, start);
+    return crypto.createHash('sha256').update(buf.subarray(0, read)).digest('hex');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function laneIndexSourceIdentity(file, indexedThrough, indexedLines = 0) {
+  if (!fs.existsSync(file) || indexedThrough <= 0) {
+    return {
+      indexedThrough: 0,
+      indexedLines: 0,
+      prefixHash: contentHash(''),
+      tailHash: contentHash(''),
+    };
+  }
+  const prefix = Math.min(LANE_INDEX_PREFIX_BYTES, indexedThrough);
+  const tail = Math.min(LANE_INDEX_TAIL_BYTES, indexedThrough);
+  return {
+    indexedThrough,
+    indexedLines,
+    prefixHash: hashFileRange(file, 0, prefix),
+    tailHash: hashFileRange(file, indexedThrough - tail, tail),
+  };
+}
+
+function laneIndexMatchesFile(index, file) {
+  if (!index || index.indexVersion !== LANE_INDEX_VERSION) return false;
+  if (!Number.isSafeInteger(index.source?.indexedLines) || index.source.indexedLines < 0) return false;
+  if (!fs.existsSync(file)) return index.source.indexedThrough === 0;
+  const size = fs.statSync(file).size;
+  if (size < index.source.indexedThrough) return false;
+  const identity = laneIndexSourceIdentity(file, index.source.indexedThrough);
+  return (
+    identity.prefixHash === index.source.prefixHash &&
+    identity.tailHash === index.source.tailHash
+  );
+}
+
+function serializeLaneIndex(state) {
+  return {
+    indexVersion: state.indexVersion,
+    source: state.source,
+    lastBuild: state.lastBuild,
+    lanes: Object.fromEntries(
+      [...state.lanes.entries()].map(([name, lane]) => [
+        name,
+        { name, description: lane.description || null, addedAt: lane.addedAt || null, head: lane.head || null, inferred: lane.inferred === true },
+      ])
+    ),
+    order: [...state.order],
+    records: Object.fromEntries(state.records),
+    ranges: Object.fromEntries(state.ranges),
+    reconciliations: Object.fromEntries(state.reconciliations),
+  };
+}
+
+function deserializeLaneIndex(raw) {
+  if (!raw || raw.indexVersion !== LANE_INDEX_VERSION || !raw.source || !raw.records) return null;
+  const lanes = new Map();
+  for (const [name, lane] of Object.entries(raw.lanes || defaultLaneCatalogObject())) {
+    lanes.set(name, {
+      name,
+      description: lane.description || null,
+      addedAt: lane.addedAt || null,
+      head: lane.head || null,
+      inferred: lane.inferred === true,
+    });
+  }
+  if (!lanes.has(DEFAULT_LANE)) {
+    lanes.set(DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null });
+  }
+  return {
+    indexVersion: LANE_INDEX_VERSION,
+    source: raw.source,
+    lastBuild: raw.lastBuild || 'full',
+    lanes,
+    order: Array.isArray(raw.order) ? [...raw.order] : [],
+    records: new Map(Object.entries(raw.records)),
+    ranges: new Map(Object.entries(raw.ranges || {})),
+    reconciliations: new Map(Object.entries(raw.reconciliations || {})),
+  };
+}
+
+function cloneLaneIndexState(state) {
+  return deserializeLaneIndex(serializeLaneIndex(state));
+}
+
+function linkLaneIndex(state) {
+  const heads = new Map();
+  for (const id of state.order) {
+    const rec = state.records.get(id);
+    rec.previous = heads.get(rec.lane) || null;
+    heads.set(rec.lane, id);
+  }
+  for (const [name, lane] of state.lanes) {
+    lane.head = heads.get(name) || null;
+  }
+}
+
+function applyIndexedEvent(state, ev, startByte, endByte) {
+  if (ev.type === 'begin' || ev.type === 'import') {
+    state.ranges.set(ev.id, { firstByte: startByte, lastByte: endByte });
+  } else if (state.records.has(ev.id) || state.ranges.has(ev.id)) {
+    const range = state.ranges.get(ev.id) || { firstByte: startByte, lastByte: endByte };
+    range.lastByte = endByte;
+    state.ranges.set(ev.id, range);
+  }
+  applyFoldEvent(state, ev);
+}
+
+function applyFoldEvent(state, ev) {
+  const { records, reconciliations, order, lanes } = state;
+  const ensureLane = (name) => {
+    if (lanes.has(name)) return;
+    lanes.set(name, { name, description: null, addedAt: null, head: null, inferred: true });
+  };
+  if (ev.type === 'begin') {
+    if (records.has(ev.id)) fail(`duplicate begin event for outcome id: ${ev.id}`);
+    const record = newOutcomeRecord(ev);
+    ensureLane(record.lane);
+    records.set(ev.id, record);
+    order.push(ev.id);
+    return;
+  }
+  if (ev.type === 'import') {
+    if (records.has(ev.id)) fail(`duplicate imported outcome id: ${ev.id}`);
+    const record = newOutcomeRecord({
+      ...ev,
+      ts: ev.beganAt,
+      acceptance: [],
+      verify: null,
+    });
+    ensureLane(record.lane);
+    record.status = ev.status;
+    record.tsEnd = ev.endedAt;
+    record.note = ev.summary || null;
+    record.reclaimed = ev.reclaimed === true;
+    record.reclaimReason = ev.reclaimReason || null;
+    record.reclaimedAt = ev.reclaimedAt || null;
+    record.imported = {
+      sourceIds: ev.sources.map((source) => source.id),
+      sourceFingerprint: ev.sourceFingerprint,
+      sources: ev.sources,
+    };
+    records.set(ev.id, record);
+    order.push(ev.id);
+    return;
+  }
+  if (ev.type === 'migration') return;
+  if (ev.type === 'lane_add') {
+    const existing = lanes.get(ev.lane);
+    if (existing && !existing.inferred) {
+      if (ev.description) existing.description = ev.description;
+      return;
+    }
+    lanes.set(ev.lane, {
+      name: ev.lane,
+      description: ev.description || null,
+      addedAt: ev.ts,
+      head: existing ? existing.head : null,
+      inferred: false,
+    });
+    return;
+  }
+  if (ev.type === 'lane_assign') {
+    const rec = records.get(ev.id);
+    if (!rec) fail(`lane assign references unknown outcome id: ${ev.id}`);
+    if (rec.status === 'in_progress') fail(`cannot assign lane of in_progress outcome ${ev.id}`);
+    ensureLane(ev.lane);
+    rec.lane = ev.lane;
+    return;
+  }
+  if (ev.type === 'extend') {
+    const rec = records.get(ev.id);
+    if (!rec) fail(`extension references unknown outcome id: ${ev.id}`);
+    if (rec.status !== 'in_progress') fail(`extension occurred after outcome ${ev.id} was closed`);
+    rec.extensions.push({
+      extension: ev.extension,
+      acceptance: ev.acceptance,
+      verify: ev.verify,
+      decisions: ev.decisions,
+      extendedAt: ev.ts,
+      head: ev.head || null,
+    });
+    rec.acceptance = [...new Set([...rec.acceptance, ...ev.acceptance])];
+    if (ev.verify) rec.verify = ev.verify;
+    rec.decisions = [...new Set([...rec.decisions, ...ev.decisions])];
+    rec.contractHash = outcomeContractHash(rec);
+    rec.verification = null;
+    rec.decisionUpdates = [];
+    return;
+  }
+  if (ev.type === 'verify') {
+    const rec = records.get(ev.id);
+    if (!rec) fail(`verification event references unknown outcome id: ${ev.id}`);
+    if (rec.status !== 'in_progress') fail(`verification occurred after outcome ${ev.id} was closed`);
+    if (rec.acceptance.length === 0 || !rec.verify) {
+      fail(`verification event references outcome ${ev.id} without acceptance criteria`);
+    }
+    if (ev.command !== rec.verify) fail(`verification command does not match outcome ${ev.id}`);
+    if (rec.logVersion === LOG_VERSION && ev.contractHash !== rec.contractHash) {
+      fail(`verification contract does not match outcome ${ev.id}`);
+    }
+    rec.verificationAttempts.push(ev);
+    rec.verification = ev;
+    return;
+  }
+  if (ev.type === 'reclaim' || ev.type === 'unreclaim') {
+    const rec = records.get(ev.id);
+    if (!rec) fail(`${ev.type} event references unknown outcome id: ${ev.id}`);
+    if (ev.type === 'reclaim') {
+      if (rec.status === 'in_progress') fail(`cannot reclaim outcome ${ev.id} while it is in_progress`);
+      if (rec.reclaimed) fail(`duplicate reclaim event for outcome id: ${ev.id}`);
+      rec.reclaimed = true;
+      rec.reclaimReason = ev.reason;
+      rec.reclaimedAt = ev.ts;
+    } else {
+      if (!rec.reclaimed) fail(`unreclaim event for outcome id that is not reclaimed: ${ev.id}`);
+      rec.reclaimed = false;
+      rec.reclaimReason = null;
+      rec.reclaimedAt = null;
+    }
+    return;
+  }
+  if (ev.type === 'end') {
+    const rec = records.get(ev.id);
+    if (!rec) fail(`end event references unknown outcome id: ${ev.id}`);
+    if (rec.status !== 'in_progress') fail(`duplicate end event for outcome id: ${ev.id}`);
+    const conflictingCancellation = rec.decisionTerminals.find(
+      (terminal) => terminal.type === 'decision_reconcile_cancel' && terminal.outcomeStatus !== ev.status
+    );
+    if (conflictingCancellation) {
+      fail(`outcome ${ev.id} was closed as ${ev.status} after reconciliation recovery was cancelled for ${conflictingCancellation.outcomeStatus}`);
+    }
+    if (
+      ['completed', 'partial'].includes(ev.status) &&
+      rec.decisions.length > 0 &&
+      ((rec.logVersion === 1 && rec.schemaVersion >= 2 && (ev.schemaVersion || 1) < 2) ||
+        rec.decisions.some((decisionId) => qualifyingDecisionUpdates(rec, decisionId).length === 0))
+    ) {
+      fail(`linked outcome ${ev.id} was closed without reconciling every declared decision`);
+    }
+    if (ev.status === 'completed' && rec.acceptance.length > 0) {
+      if (!rec.verification || !rec.verification.passed) {
+        fail(`acceptance-bound outcome ${ev.id} was completed without successful machine verification`);
+      }
+      if (
+        (rec.logVersion === 1 && (ev.schemaVersion || 1) < 4) ||
+        ev.verificationId !== rec.verification.verificationId ||
+        (ev.workspace ?? null) !== rec.verification.workspace ||
+        (rec.logVersion === LOG_VERSION &&
+          (ev.contractHash !== rec.contractHash || rec.verification.contractHash !== rec.contractHash))
+      ) {
+        fail(`acceptance-bound outcome ${ev.id} was completed with stale machine verification`);
+      }
+    }
+    rec.status = ev.status;
+    rec.tsEnd = ev.ts;
+    rec.note = ev.note || null;
+    rec.verifyResult = ev.verifyResult || null;
+    rec.endHead = ev.head || null;
+    return;
+  }
+  if (ev.type === 'decision_reconcile_prepare') {
+    const rec = records.get(ev.id);
+    if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
+    if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
+    if (!rec.decisions.includes(ev.decisionId)) fail(`decision reconciliation references unlinked decision ${ev.decisionId}`);
+    if (reconciliations.has(ev.reconciliationId)) fail(`duplicate reconciliation id: ${ev.reconciliationId}`);
+    rec.decisionPrepares.push(ev);
+    reconciliations.set(ev.reconciliationId, {
+      prepare: ev,
+      terminal: null,
+      contractHash: rec.contractHash,
+    });
+    return;
+  }
+  if (ev.type === 'decision_reconcile') {
+    const rec = records.get(ev.id);
+    if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
+    if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
+    if (rec.logVersion === 1 && rec.schemaVersion >= 2) {
+      fail(`linked legacy schema-v2 outcome ${rec.id} contains a legacy decision reconciliation`);
+    }
+    rec.decisionUpdates.push(ev);
+    return;
+  }
+  if (
+    ev.type === 'decision_reconcile_commit' ||
+    ev.type === 'decision_reconcile_abort' ||
+    ev.type === 'decision_reconcile_cancel'
+  ) {
+    const rec = records.get(ev.id);
+    const reconciliation = reconciliations.get(ev.reconciliationId);
+    if (rec && rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
+    if (!rec || !reconciliation || reconciliation.prepare.id !== ev.id || reconciliation.prepare.decisionId !== ev.decisionId) {
+      fail(`decision reconciliation terminal has no matching prepare: ${ev.reconciliationId}`);
+    }
+    if (reconciliation.terminal) fail(`decision reconciliation already has a terminal event: ${ev.reconciliationId}`);
+    const priorCancellation = rec.decisionTerminals.find((terminal) => terminal.type === 'decision_reconcile_cancel');
+    if (ev.type === 'decision_reconcile_cancel' && priorCancellation && priorCancellation.outcomeStatus !== ev.outcomeStatus) {
+      fail(`outcome ${ev.id} has conflicting reconciliation cancellation statuses`);
+    }
+    if (
+      ev.type === 'decision_reconcile_commit' &&
+      (reconciliation.prepare.newHash !== ev.fileHash ||
+        reconciliation.prepare.fromStatus !== ev.fromStatus ||
+        reconciliation.prepare.toStatus !== ev.toStatus)
+    ) {
+      fail(`decision reconciliation commit does not match prepare: ${ev.reconciliationId}`);
+    }
+    reconciliation.terminal = ev;
+    rec.decisionTerminals.push(ev);
+    if (
+      ev.type === 'decision_reconcile_commit' &&
+      reconciliation.contractHash === rec.contractHash
+    ) {
+      rec.decisionUpdates.push(ev);
+    }
+  }
+}
+
+function consumeLogSlice(file, startByte, onEvent, { repairTail = false, readOnly = false, startLine = 0 } = {}) {
+  if (!fs.existsSync(file)) return { endByte: 0, endLine: 0 };
+  const fd = fs.openSync(file, 'r');
+  let size;
+  let buf;
+  try {
+    size = fs.fstatSync(fd).size;
+    if (startByte > size) fail('lane index is ahead of the outcome log');
+    if (startByte === size) return { endByte: size, endLine: startLine };
+    buf = Buffer.alloc(size - startByte);
+    fs.readSync(fd, buf, 0, buf.length, startByte);
+  } finally {
+    fs.closeSync(fd);
+  }
+  let text = buf.toString('utf8');
+  if (text.length > 0 && !text.endsWith('\n')) {
+    const rawLines = text.split('\n');
+    const tail = rawLines.at(-1);
+    try {
+      JSON.parse(tail);
+    } catch {
+      const validLength = text.lastIndexOf('\n') + 1;
+      if (!readOnly) {
+        if (!repairTail) fail(`corrupt final log line in ${file}`);
+        const truncateTo = startByte + Buffer.byteLength(text.slice(0, validLength), 'utf8');
+        const repairFd = fs.openSync(file, 'r+');
+        try {
+          fs.ftruncateSync(repairFd, truncateTo);
+          fs.fsyncSync(repairFd);
+        } finally {
+          fs.closeSync(repairFd);
+        }
+      }
+      text = text.slice(0, validLength);
+    }
+  }
+  const parts = text.split('\n');
+  let pos = startByte;
+  let lineNumber = startLine;
+  for (let i = 0; i < parts.length; i++) {
+    const line = parts[i];
+    if (i === parts.length - 1 && line === '') break;
+    lineNumber += 1;
+    const start = pos;
+    pos += Buffer.byteLength(line, 'utf8');
+    if (i < parts.length - 1) pos += 1;
+    if (line.trim().length === 0) continue;
+    try {
+      const event = normalizeEvent(JSON.parse(line), lineNumber);
+      if (event.logVersion !== LOG_VERSION) {
+        fail(`v1 intent log cannot be used as a v2 outcome log; run driftseal migrate v1-to-v2 inspect`);
+      }
+      onEvent(event, start, pos);
+    } catch (err) {
+      if (err instanceof DriftSealError) throw err;
+      fail(`corrupt log line ${lineNumber} in ${file}`);
+    }
+  }
+  return { endByte: pos, endLine: lineNumber };
+}
+
+function persistLaneIndex(state, { readOnly = false } = {}) {
+  if (readOnly) return;
+  const file = laneIndexFile();
+  if (!file) return;
+  ensureDirectoryDurable(path.dirname(file));
+  ensureDerivedLaneSidecarIgnore();
+  atomicWriteFile(file, `${JSON.stringify(serializeLaneIndex(state))}\n`, 0o600);
+}
+
+function loadPersistedLaneIndex() {
+  const file = laneIndexFile();
+  if (!file || !fs.existsSync(file)) return null;
+  try {
+    return deserializeLaneIndex(JSON.parse(fs.readFileSync(file, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+function syncCommittedLaneIndex({ repairTail = false, readOnly = false } = {}) {
+  const file = logFile();
+  let state = loadPersistedLaneIndex();
+  const canIncrement = state && laneIndexMatchesFile(state, file);
+  let indexedThrough = 0;
+  let indexedLines = 0;
+  if (!canIncrement) {
+    state = emptyLaneIndexState();
+    const slice = consumeLogSlice(file, 0, (event, start, end) => applyIndexedEvent(state, event, start, end), {
+      repairTail,
+      readOnly,
+    });
+    indexedThrough = slice.endByte;
+    indexedLines = slice.endLine;
+    state.lastBuild = 'full';
+  } else {
+    const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+    if (size > state.source.indexedThrough) {
+      const slice = consumeLogSlice(
+        file,
+        state.source.indexedThrough,
+        (event, start, end) => applyIndexedEvent(state, event, start, end),
+        { repairTail, readOnly, startLine: state.source.indexedLines || 0 }
+      );
+      indexedThrough = slice.endByte;
+      indexedLines = slice.endLine;
+      state.lastBuild = 'incremental';
+    } else {
+      indexedThrough = size;
+      indexedLines = state.source.indexedLines || 0;
+      state.lastBuild = 'hot';
+    }
+  }
+  state.source = laneIndexSourceIdentity(file, indexedThrough, indexedLines);
+  linkLaneIndex(state);
+  if (state.lastBuild !== 'hot') persistLaneIndex(state, { readOnly });
+  return state;
+}
+
+function applyOverlayToLaneIndex(state, overlayEvents) {
+  if (!overlayEvents || overlayEvents.length === 0) return state;
+  const next = cloneLaneIndexState(state);
+  for (const event of overlayEvents) applyFoldEvent(next, event);
+  linkLaneIndex(next);
+  return next;
+}
+
+function foldedRecordsFromLaneIndex(state) {
+  const records = state.order.map((id) => state.records.get(id)).filter(Boolean);
+  records.lanes = state.lanes;
+  return records;
+}
+
+function loadOutcomeView({ repairTail = false, readOnly = false } = {}) {
+  const committed = syncCommittedLaneIndex({ repairTail, readOnly });
+  const park = inProgressFile();
+  if (!park || !fs.existsSync(park)) {
+    return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
+  }
+  try {
+    const committedEvents = readJsonlRecordsFromFile(logFile(), { repairTail, readOnly }).map(
+      (record) => record.event
+    );
+    const overlay = planInProgressOverlay(committedEvents, park, { repairTail, readOnly });
+    if (!overlay || overlay.alreadyCommitted) {
+      if (overlay && overlay.alreadyCommitted && !readOnly) discardInProgressLog(park);
+      return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
+    }
+    if (!readOnly && overlay.mappings.length > 0) writeJsonl(park, overlay.records);
+    const state = applyOverlayToLaneIndex(
+      committed,
+      overlay.records.map((record) => record.event)
+    );
+    return { state, records: foldedRecordsFromLaneIndex(state) };
+  } catch (err) {
+    if (readOnly && err && err.code === 'ENOENT') {
+      return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
+    }
+    throw err;
+  }
+}
+
+function laneSummary(records, name) {
+  const lanes = records.lanes || emptyLaneCatalog();
+  const lane = lanes.get(name);
+  const members = records.filter((record) => (record.lane || DEFAULT_LANE) === name);
+  const visible = members.filter((record) => !record.reclaimed);
+  return {
+    name,
+    description: lane ? lane.description : null,
+    addedAt: lane ? lane.addedAt : null,
+    inferred: Boolean(lane && lane.inferred),
+    visible: visible.length,
+    count: members.length,
+  };
+}
+
+function publicLane(summary) {
+  return {
+    name: summary.name,
+    description: summary.description,
+    addedAt: summary.addedAt || null,
+    inferred: summary.inferred === true,
+    visible: summary.visible,
+    count: summary.count,
+  };
+}
+
+function resolveCurrentLane(records, { required = false } = {}) {
+  const requested = readCurrentLaneName();
+  const lanes = records.lanes || emptyLaneCatalog();
+  if (lanes.has(requested)) return { current: requested, missing: null };
+  if (required) {
+    fail(`current lane ${requested} does not exist; switch to ${DEFAULT_LANE} or add it`);
+  }
+  return { current: DEFAULT_LANE, missing: requested };
+}
+
+function currentLaneOrFail(records) {
+  return resolveCurrentLane(records, { required: true }).current;
+}
+
+function warnMissingCurrentLane(missing) {
+  if (!missing) return;
+  printLine(`warning: current lane ${missing} does not exist; showing ${DEFAULT_LANE}`);
+}
+
+function renderLaneLine(records, name) {
+  const summary = laneSummary(records, name);
+  return `lane: ${name} (${summary.visible} visible / ${summary.count} in lane)`;
+}
+
+function selectLaneLogRecords(records, current) {
+  return records.filter(
+    (record) => (record.lane || DEFAULT_LANE) === current || record.status === 'in_progress'
+  );
+}
+
+function selectLastLogRecords(records, current, n) {
+  const inLane = records.filter((record) => (record.lane || DEFAULT_LANE) === current);
+  const clipped = inLane.slice(-n);
+  const kept = new Set(clipped.map((record) => record.id));
+  const extras = records.filter((record) => record.status === 'in_progress' && !kept.has(record.id));
+  if (extras.length === 0) return clipped;
+  const order = new Map(records.map((record, index) => [record.id, index]));
+  return [...clipped, ...extras].sort((left, right) => order.get(left.id) - order.get(right.id));
 }
 
 function liveWorktreeOutcomeLog() {
@@ -706,10 +1400,27 @@ function ensureV2OutcomeLogExists() {
   fsyncDirectory(logDir());
 }
 
+function eventWriteSchemaVersion(event) {
+  if (Number.isSafeInteger(event.schemaVersion)) return event.schemaVersion;
+  if (event.type === 'lane_add' || event.type === 'lane_assign') return EVENT_SCHEMA_VERSION;
+  if (
+    (event.type === 'begin' || event.type === 'import') &&
+    event.lane &&
+    event.lane !== DEFAULT_LANE
+  ) {
+    return EVENT_SCHEMA_VERSION;
+  }
+  return DEFAULT_WRITE_SCHEMA_VERSION;
+}
+
 function appendEventTo(file, event) {
   ensureDirectoryDurable(path.dirname(file));
   const existed = fs.existsSync(file);
-  const storedEvent = { logVersion: LOG_VERSION, schemaVersion: EVENT_SCHEMA_VERSION, ...event };
+  const storedEvent = {
+    logVersion: LOG_VERSION,
+    ...event,
+    schemaVersion: eventWriteSchemaVersion(event),
+  };
   const line = Buffer.from(`${JSON.stringify(storedEvent)}\n`, 'utf8');
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
   try {
@@ -1182,6 +1893,7 @@ function newOutcomeRecord(ev) {
     decisions: Array.isArray(ev.decisions) ? ev.decisions : [],
     logVersion: ev.logVersion || 1,
     schemaVersion: ev.schemaVersion || 1,
+    lane: ev.lane || DEFAULT_LANE,
     decisionPrepares: [],
     decisionTerminals: [],
     decisionUpdates: [],
@@ -1204,177 +1916,16 @@ function newOutcomeRecord(ev) {
 
 /** Fold the event stream into one record per outcome. Legacy v1 events are accepted for migration. */
 function fold(events) {
-  const records = new Map();
-  const reconciliations = new Map();
-  const order = [];
-  for (const ev of events) {
-    if (ev.type === 'begin') {
-      if (records.has(ev.id)) fail(`duplicate begin event for outcome id: ${ev.id}`);
-      records.set(ev.id, newOutcomeRecord(ev));
-      order.push(ev.id);
-    } else if (ev.type === 'import') {
-      if (records.has(ev.id)) fail(`duplicate imported outcome id: ${ev.id}`);
-      const record = newOutcomeRecord({
-        ...ev,
-        ts: ev.beganAt,
-        acceptance: [],
-        verify: null,
-      });
-      record.status = ev.status;
-      record.tsEnd = ev.endedAt;
-      record.note = ev.summary || null;
-      record.reclaimed = ev.reclaimed === true;
-      record.reclaimReason = ev.reclaimReason || null;
-      record.reclaimedAt = ev.reclaimedAt || null;
-      record.imported = {
-        sourceIds: ev.sources.map((source) => source.id),
-        sourceFingerprint: ev.sourceFingerprint,
-        sources: ev.sources,
-      };
-      records.set(ev.id, record);
-      order.push(ev.id);
-    } else if (ev.type === 'migration') {
-      continue;
-    } else if (ev.type === 'extend') {
-      const rec = records.get(ev.id);
-      if (!rec) fail(`extension references unknown outcome id: ${ev.id}`);
-      if (rec.status !== 'in_progress') fail(`extension occurred after outcome ${ev.id} was closed`);
-      rec.extensions.push({
-        extension: ev.extension,
-        acceptance: ev.acceptance,
-        verify: ev.verify,
-        decisions: ev.decisions,
-        extendedAt: ev.ts,
-        head: ev.head || null,
-      });
-      rec.acceptance = [...new Set([...rec.acceptance, ...ev.acceptance])];
-      if (ev.verify) rec.verify = ev.verify;
-      rec.decisions = [...new Set([...rec.decisions, ...ev.decisions])];
-      rec.contractHash = outcomeContractHash(rec);
-      rec.verification = null;
-      // Reconciliation certifies the final cumulative outcome contract, just like
-      // machine verification. Any later extension makes every earlier confirmation stale.
-      rec.decisionUpdates = [];
-    } else if (ev.type === 'verify') {
-      const rec = records.get(ev.id);
-      if (!rec) fail(`verification event references unknown outcome id: ${ev.id}`);
-      if (rec.status !== 'in_progress') fail(`verification occurred after outcome ${ev.id} was closed`);
-      if (rec.acceptance.length === 0 || !rec.verify) {
-        fail(`verification event references outcome ${ev.id} without acceptance criteria`);
-      }
-      if (ev.command !== rec.verify) fail(`verification command does not match outcome ${ev.id}`);
-      if (rec.logVersion === LOG_VERSION && ev.contractHash !== rec.contractHash) {
-        fail(`verification contract does not match outcome ${ev.id}`);
-      }
-      rec.verificationAttempts.push(ev);
-      rec.verification = ev;
-    } else if (ev.type === 'reclaim' || ev.type === 'unreclaim') {
-      const rec = records.get(ev.id);
-      if (!rec) fail(`${ev.type} event references unknown outcome id: ${ev.id}`);
-      if (ev.type === 'reclaim') {
-        if (rec.status === 'in_progress') fail(`cannot reclaim outcome ${ev.id} while it is in_progress`);
-        if (rec.reclaimed) fail(`duplicate reclaim event for outcome id: ${ev.id}`);
-        rec.reclaimed = true;
-        rec.reclaimReason = ev.reason;
-        rec.reclaimedAt = ev.ts;
-      } else {
-        if (!rec.reclaimed) fail(`unreclaim event for outcome id that is not reclaimed: ${ev.id}`);
-        rec.reclaimed = false;
-        rec.reclaimReason = null;
-        rec.reclaimedAt = null;
-      }
-    } else if (ev.type === 'end') {
-      const rec = records.get(ev.id);
-      if (!rec) fail(`end event references unknown outcome id: ${ev.id}`);
-      if (rec.status !== 'in_progress') fail(`duplicate end event for outcome id: ${ev.id}`);
-      const conflictingCancellation = rec.decisionTerminals.find(
-        (terminal) => terminal.type === 'decision_reconcile_cancel' && terminal.outcomeStatus !== ev.status
-      );
-      if (conflictingCancellation) {
-        fail(`outcome ${ev.id} was closed as ${ev.status} after reconciliation recovery was cancelled for ${conflictingCancellation.outcomeStatus}`);
-      }
-      if (
-        ['completed', 'partial'].includes(ev.status) &&
-        rec.decisions.length > 0 &&
-        ((rec.logVersion === 1 && rec.schemaVersion >= 2 && (ev.schemaVersion || 1) < 2) ||
-          rec.decisions.some((decisionId) => qualifyingDecisionUpdates(rec, decisionId).length === 0))
-      ) {
-        fail(`linked outcome ${ev.id} was closed without reconciling every declared decision`);
-      }
-      if (ev.status === 'completed' && rec.acceptance.length > 0) {
-        if (!rec.verification || !rec.verification.passed) {
-          fail(`acceptance-bound outcome ${ev.id} was completed without successful machine verification`);
-        }
-        if (
-          (rec.logVersion === 1 && (ev.schemaVersion || 1) < 4) ||
-          ev.verificationId !== rec.verification.verificationId ||
-          (ev.workspace ?? null) !== rec.verification.workspace ||
-          (rec.logVersion === LOG_VERSION &&
-            (ev.contractHash !== rec.contractHash || rec.verification.contractHash !== rec.contractHash))
-        ) {
-          fail(`acceptance-bound outcome ${ev.id} was completed with stale machine verification`);
-        }
-      }
-      rec.status = ev.status;
-      rec.tsEnd = ev.ts;
-      rec.note = ev.note || null;
-      rec.verifyResult = ev.verifyResult || null;
-      rec.endHead = ev.head || null;
-    } else if (ev.type === 'decision_reconcile_prepare') {
-      const rec = records.get(ev.id);
-      if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
-      if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
-      if (!rec.decisions.includes(ev.decisionId)) fail(`decision reconciliation references unlinked decision ${ev.decisionId}`);
-      if (reconciliations.has(ev.reconciliationId)) fail(`duplicate reconciliation id: ${ev.reconciliationId}`);
-      rec.decisionPrepares.push(ev);
-      reconciliations.set(ev.reconciliationId, {
-        prepare: ev,
-        terminal: null,
-        contractHash: rec.contractHash,
-      });
-    } else if (ev.type === 'decision_reconcile') {
-      const rec = records.get(ev.id);
-      if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
-      if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
-      if (rec.logVersion === 1 && rec.schemaVersion >= 2) {
-        fail(`linked legacy schema-v2 outcome ${rec.id} contains a legacy decision reconciliation`);
-      }
-      rec.decisionUpdates.push(ev);
-    } else if (
-      ev.type === 'decision_reconcile_commit' ||
-      ev.type === 'decision_reconcile_abort' ||
-      ev.type === 'decision_reconcile_cancel'
-    ) {
-      const rec = records.get(ev.id);
-      const reconciliation = reconciliations.get(ev.reconciliationId);
-      if (rec && rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
-      if (!rec || !reconciliation || reconciliation.prepare.id !== ev.id || reconciliation.prepare.decisionId !== ev.decisionId) {
-        fail(`decision reconciliation terminal has no matching prepare: ${ev.reconciliationId}`);
-      }
-      if (reconciliation.terminal) fail(`decision reconciliation already has a terminal event: ${ev.reconciliationId}`);
-      const priorCancellation = rec.decisionTerminals.find((terminal) => terminal.type === 'decision_reconcile_cancel');
-      if (ev.type === 'decision_reconcile_cancel' && priorCancellation && priorCancellation.outcomeStatus !== ev.outcomeStatus) {
-        fail(`outcome ${ev.id} has conflicting reconciliation cancellation statuses`);
-      }
-      if (
-        ev.type === 'decision_reconcile_commit' &&
-        (reconciliation.prepare.newHash !== ev.fileHash ||
-          reconciliation.prepare.fromStatus !== ev.fromStatus ||
-          reconciliation.prepare.toStatus !== ev.toStatus)
-      ) {
-        fail(`decision reconciliation commit does not match prepare: ${ev.reconciliationId}`);
-      }
-      reconciliation.terminal = ev;
-      rec.decisionTerminals.push(ev);
-      if (
-        ev.type === 'decision_reconcile_commit' &&
-        reconciliation.contractHash === rec.contractHash
-      ) {
-        rec.decisionUpdates.push(ev);
-      }
-    }
-  }
-  return order.map((id) => records.get(id));
+  const state = {
+    records: new Map(),
+    reconciliations: new Map(),
+    order: [],
+    lanes: emptyLaneCatalog(),
+  };
+  for (const ev of events) applyFoldEvent(state, ev);
+  const folded = state.order.map((id) => state.records.get(id));
+  folded.lanes = state.lanes;
+  return folded;
 }
 
 function qualifyingDecisionUpdates(record, decisionId) {
@@ -1756,8 +2307,12 @@ function parseArgs(argv, spec, usageKey) {
   return { positionals, flags };
 }
 
-function render(rec) {
+function render(rec, { currentLane } = {}) {
   const lines = [`[${rec.id}] ${rec.status}`];
+  const lane = rec.lane || DEFAULT_LANE;
+  if (lane !== DEFAULT_LANE || (currentLane && lane !== currentLane)) {
+    lines.push(`  lane: ${lane}`);
+  }
   lines.push(`  outcome: ${rec.outcome}`);
   for (const extension of rec.extensions) lines.push(`  extend: ${extension.extension}`);
   for (const criterion of rec.acceptance) lines.push(`  accept: ${criterion}`);
@@ -1807,6 +2362,7 @@ function publicOutcome(rec) {
   return {
     id: rec.id,
     outcome: rec.outcome,
+    lane: rec.lane || DEFAULT_LANE,
     extensions: rec.extensions.map((extension) => ({ ...extension })),
     acceptance: [...rec.acceptance],
     verify: rec.verify,
@@ -2085,12 +2641,12 @@ function stripDecisionLogLanguage(block, language = DEFAULT_LOG_LANGUAGE) {
 function outcomeLogLanguageParagraph(language) {
   return `**Log language:** \`${language}\`. Write outcome-log prose (outcome, extension, note,
 verify-result, and reclaim/unreclaim reason) in that language. Keep command
-names, flags, status tokens, and ids in English.`;
+names, flags, status tokens, ids, and lane names in English.`;
 }
 
-function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+function intentProtocolBlockV20(language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   return `${INTENT_PROTOCOL_MARKER}
-<!-- driftseal-version: ${version} -->
+<!-- driftseal-version: 2.0 -->
 <!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
 
 ## Agent protocol: outcome write-ahead log
@@ -2099,7 +2655,9 @@ This repository uses DriftSeal (\`driftseal\`) to prevent agent drift. This
 \`AGENTS.md\` protocol is the source of truth; use the CLI by default, with MCP
 and lifecycle hooks as optional adapters.
 
-${outcomeLogLanguageParagraph(language)}
+**Log language:** \`${language}\`. Write outcome-log prose (outcome, extension, note,
+verify-result, and reclaim/unreclaim reason) in that language. Keep command
+names, flags, status tokens, and ids in English.
 
 1. **Write the outcome first**, before changing durable project content:
    \`driftseal begin "<coherent delivery outcome>" --accept "<observable result>" --verify "<exact command that proves the cumulative contract>"\`.
@@ -2139,6 +2697,70 @@ collisions. These operations preserve append-only single-lineage history.
 Seal root: \`.seal/\` (override with \`$DRIFTSEAL_HOME\`); outcome log:
 \`.seal/outcomes/events.jsonl\`; ${localLog ? 'keep `.seal/` local and untracked.' : 'commit `.seal/` with the code.'}
 ${INTENT_PROTOCOL_END}`;
+}
+
+function intentProtocolBlockV21(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  return `${INTENT_PROTOCOL_MARKER}
+<!-- driftseal-version: ${version} -->
+<!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
+
+## Agent protocol: outcome write-ahead log
+
+This repository uses DriftSeal (\`driftseal\`) to prevent agent drift. This
+\`AGENTS.md\` protocol is the source of truth; use the CLI by default, with MCP
+and lifecycle hooks as optional adapters.
+
+${outcomeLogLanguageParagraph(language)}
+
+1. **Write the outcome first**, before changing durable project content:
+   \`driftseal begin "<coherent delivery outcome>" --accept "<observable result>" --verify "<exact command that proves the cumulative contract>"\`.
+   Repeat \`--accept\` for independently observable criteria and add one
+   \`--decision <id>\` for each existing MADR this outcome may change.
+   Record outcomes for changes intended to persist in the project: code,
+   configuration, documentation, dependencies, and equivalent files, inside or
+   outside Git. Git operations, checks, temporary auxiliary work, and external
+   state changes are exempt when they do not write durable project content here.
+2. **Extend only the same outcome.** For another step toward the same coherent
+   delivery goal, append \`driftseal extend "<addition>"\`. It may add
+   \`--accept\`, \`--decision\`, and a replacement \`--verify\`; adding acceptance
+   requires a replacement verifier that proves the complete accumulated contract.
+   Every extension invalidates earlier verification and MADR reconciliation. If
+   the delivery goal changes, close the current outcome honestly and begin a new one.
+   One open outcome belongs to one worktree, or one configured non-Git project
+   root. Every agent changing durable content in the same root re-anchors and
+   continues it; separate worktrees hold separate outcomes.
+   Outcomes belong to one named lane (\`driftseal lane\`). The default lane is
+   \`main\`; untagged history lives there. Re-anchoring and \`driftseal log\`
+   follow the current lane. Close the open outcome before switching lanes.
+   Create a lane only for a long-lived capability you expect to leave and resume.
+3. **Reconcile, verify, then close.** After the final extension, reconcile every
+   linked MADR with \`driftseal decision update\`. Inspect \`driftseal status\`,
+   then run \`driftseal verify\` for an acceptance-bound outcome. A verifier
+   without matching local provenance is untrusted and requires
+   \`--allow-tracked-command\` after inspection. Finish with
+   \`driftseal end -s completed|partial|failed|abandoned -n "<what happened>"\`.
+   Completed outcomes require fresh successful verification bound to both the
+   current contract hash and Git-visible workspace. Never report success without
+   closing the outcome.
+4. **Re-anchor after context loss or handoff:** run \`driftseal status\` and
+   \`driftseal log --last 3\` before changing durable content. Both follow the
+   current lane. Resume the open outcome when it still matches; otherwise close
+   it and begin a new one. If the requested work belongs to a different existing
+   lane, switch first.
+
+**Log access goes only through DriftSeal.** Never read, edit, move, or delete
+\`.seal/outcomes/events.jsonl\` (or its configured equivalent) directly. Use
+\`reclaim\`/\`unreclaim\` for visibility markers and \`absorb\` after merge
+collisions. These operations preserve append-only single-lineage history.
+
+Seal root: \`.seal/\` (override with \`$DRIFTSEAL_HOME\`); outcome log:
+\`.seal/outcomes/events.jsonl\`; ${localLog ? 'keep `.seal/` local and untracked.' : 'commit `.seal/` with the code.'}
+${INTENT_PROTOCOL_END}`;
+}
+
+function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  if (String(version) === '2.0') return intentProtocolBlockV20(language, localLog);
+  return intentProtocolBlockV21(version, language, localLog);
 }
 
 function v1IntentProtocolBlock(version = 14, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
@@ -2858,6 +3480,8 @@ const SKILL_RELEASE_DIGESTS = new Set([
   '72ddea79940bdf2bce66d491888f11423ae1bd383e1b511028fda617e6f6fb27', // f395778 1.1.6 parked intents
   'df8bc7035de1a19faf307c92f9bb0f4052e683d1a94881c2c5d5cbef48b67568', // dc9899d 1.1.7 parked intents in absorb
   '42a0549dff21483c0508ea4a79658e7bf05cd98f8af4238c95dbd23cdcde7ee6', // 2.0.0 outcome workflow
+  '38e89060ff37ecdd663eae73a3e0c646d6bb220fc8232a5762356375d84ba69b', // 2.1.0 outcome lanes
+  'b4b2cc27ea71c5777b5eb9b67d861fbe1da43f31ab5d422d6a877e0cad592493', // 2.1.0 lane re-anchor recovery
 ]);
 
 function skillInstallUsage() {
@@ -3849,6 +4473,19 @@ function rebindV2ContractHashes(records) {
   });
 }
 
+function dropDuplicateLaneAdds(oursEvents, theirsRecords) {
+  const seen = new Set();
+  for (const event of oursEvents) {
+    if (event.type === 'lane_add') seen.add(event.lane);
+  }
+  return theirsRecords.filter((record) => {
+    if (record.event.type !== 'lane_add') return true;
+    if (seen.has(record.event.lane)) return false;
+    seen.add(record.event.lane);
+    return true;
+  });
+}
+
 function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap, hashMap = new Map()) {
   const intentMap = new Map();
   const mappings = [];
@@ -3870,6 +4507,7 @@ function remapTheirsRecords(theirsNew, oursUsedEvents, decisionMap, hashMap = ne
 
 function repairDuplicateOutcomeRecords(records, decisionMap, hashMap = new Map()) {
   const seenBegins = new Set();
+  const seenLanes = new Set();
   const intentMap = new Map();
   const used = [];
   const mappings = [];
@@ -3877,6 +4515,10 @@ function repairDuplicateOutcomeRecords(records, decisionMap, hashMap = new Map()
   let incomingSide = false;
   for (const record of records) {
     let event = record.event;
+    if (event.type === 'lane_add') {
+      if (seenLanes.has(event.lane)) continue;
+      seenLanes.add(event.lane);
+    }
     if (isOutcomeStart(event) && seenBegins.has(event.id)) {
       incomingSide = true;
       const { date } = parseOutcomeId(event.id);
@@ -3946,7 +4588,7 @@ function abandonOpenIntent(records, targetId, side) {
   records.push({
     event: {
       logVersion: LOG_VERSION,
-      schemaVersion: EVENT_SCHEMA_VERSION,
+      schemaVersion: DEFAULT_WRITE_SCHEMA_VERSION,
       type: 'end',
       id: targetId,
       ts: new Date().toISOString(),
@@ -4169,7 +4811,10 @@ function absorbFromStreams(ours, theirs, baseRecords, options) {
     baseIds: options.baseDecisionIds || new Set(),
   });
   const remapped = remapTheirsRecords(
-    streams.theirsNew,
+    dropDuplicateLaneAdds(
+      [...streams.base, ...streams.oursNew].map((record) => record.event),
+      streams.theirsNew
+    ),
     [...streams.base, ...streams.oursNew].map((record) => record.event),
     decisionPlan.decisionMap,
     decisionPlan.hashMap
@@ -4913,7 +5558,7 @@ function validateMigrationPlan(plan, snapshot) {
 }
 
 function storedV2Event(event) {
-  return { logVersion: LOG_VERSION, schemaVersion: EVENT_SCHEMA_VERSION, ...event };
+  return { logVersion: LOG_VERSION, schemaVersion: DEFAULT_WRITE_SCHEMA_VERSION, ...event };
 }
 
 function migrationImportEvent(snapshot, validated, group, events) {
@@ -5270,6 +5915,116 @@ function checkMigration(snapshot, { sourceMissing = false } = {}) {
   };
 }
 
+function listLaneSnapshot(records) {
+  const catalog = records.lanes || emptyLaneCatalog();
+  const { current, missing } = resolveCurrentLane(records);
+  const lanes = [...catalog.keys()].map((name) => {
+    const summary = laneSummary(records, name);
+    return {
+      ...publicLane(summary),
+      current: name === current,
+    };
+  });
+  return { current, missingCurrentLane: missing, lanes, total: records.length };
+}
+
+function printLaneSnapshot(snapshot) {
+  warnMissingCurrentLane(snapshot.missingCurrentLane);
+  const lines = snapshot.lanes.map((lane) => {
+    const mark = lane.current ? '*' : ' ';
+    const desc = lane.description ? ` — ${lane.description}` : '';
+    const inferred = lane.inferred ? ' (inferred)' : '';
+    return `${mark} ${lane.name}  ${lane.visible} visible / ${lane.count} in lane${desc}${inferred}`;
+  });
+  printLine(`current lane: ${snapshot.current}`);
+  printLine(lines.join('\n'));
+  return snapshot;
+}
+
+function showLanes(argv, { readOnly = false } = {}) {
+  const { positionals } = parseArgs(argv, {}, 'lane show');
+  const view = loadOutcomeView({ repairTail: true, readOnly });
+  const snapshot = listLaneSnapshot(view.records);
+  if (positionals.length === 0) return printLaneSnapshot(snapshot);
+  if (positionals.length !== 1) fail(usageFor('lane show'));
+  const name = normalizeLaneName(positionals[0]);
+  const lane = snapshot.lanes.find((item) => item.name === name);
+  if (!lane) fail(`unknown lane ${name}`);
+  printLine(
+    `${lane.current ? 'current ' : ''}lane: ${lane.name} (${lane.visible} visible / ${lane.count} in lane)`
+  );
+  if (lane.description) printLine(lane.description);
+  return lane;
+}
+
+function addLane(argv) {
+  const { positionals, flags } = parseArgs(argv, { desc: 'single' }, 'lane add');
+  if (positionals.length !== 1) fail(usageFor('lane add'));
+  const name = normalizeLaneName(positionals[0]);
+  if (name === DEFAULT_LANE) fail(`lane ${DEFAULT_LANE} always exists`);
+  const events = readEvents({ repairTail: true });
+  const records = fold(events);
+  const catalog = records.lanes || emptyLaneCatalog();
+  const existing = catalog.get(name);
+  if (existing && !existing.inferred) fail(`lane ${name} already exists`);
+  const description = flags.desc && flags.desc.trim() ? flags.desc.trim() : null;
+  appendEvent({
+    type: 'lane_add',
+    id: laneEventId(name),
+    ts: new Date().toISOString(),
+    lane: name,
+    description,
+  });
+  printLine(`added lane ${name}`);
+  return { name, description };
+}
+
+function switchLane(argv) {
+  const { positionals } = parseArgs(argv, {}, 'lane switch');
+  if (positionals.length !== 1) fail(usageFor('lane switch'));
+  const name = normalizeLaneName(positionals[0]);
+  const events = readEvents({ repairTail: true });
+  const records = fold(events);
+  const catalog = records.lanes || emptyLaneCatalog();
+  if (!catalog.has(name)) fail(`unknown lane ${name}; add it with driftseal lane add ${name}`);
+  const open = openOutcome(records);
+  if (open) {
+    fail(
+      `outcome ${open.id} is still in_progress on lane ${open.lane || DEFAULT_LANE}; ` +
+        'end it before switching lanes'
+    );
+  }
+  writeCurrentLaneName(name);
+  printLine(`switched to lane ${name}`);
+  return { current: name };
+}
+
+function assignLane(argv) {
+  const { positionals } = parseArgs(argv, {}, 'lane assign');
+  if (positionals.length !== 2) fail(usageFor('lane assign'));
+  const id = positionals[0];
+  const name = normalizeLaneName(positionals[1]);
+  const events = readEvents({ repairTail: true });
+  const records = fold(events);
+  const record = records.find((candidate) => candidate.id === id);
+  if (!record) fail(`unknown outcome id: ${id}`);
+  if (record.status === 'in_progress') fail(`cannot assign lane of in_progress outcome ${id}`);
+  const catalog = records.lanes || emptyLaneCatalog();
+  if (!catalog.has(name)) fail(`unknown lane ${name}; add it with driftseal lane add ${name}`);
+  if ((record.lane || DEFAULT_LANE) === name) {
+    printLine(`${id} already on lane ${name}`);
+    return publicOutcome(record);
+  }
+  appendEvent({
+    type: 'lane_assign',
+    id,
+    ts: new Date().toISOString(),
+    lane: name,
+  });
+  printLine(`${id} assigned to lane ${name}`);
+  return { ...publicOutcome(record), lane: name };
+}
+
 const commands = {
   begin(argv) {
     const { positionals, flags } = parseArgs(argv, {
@@ -5324,6 +6079,7 @@ const commands = {
     }
 
     const id = nextId(events);
+    const currentLane = currentLaneOrFail(records);
     events.push(appendEvent({
       type: 'begin',
       id,
@@ -5332,6 +6088,7 @@ const commands = {
       acceptance,
       verify: flags.verify || null,
       decisions,
+      ...(currentLane !== DEFAULT_LANE ? { lane: currentLane } : {}),
       head: gitCapture(['rev-parse', 'HEAD']),
     }));
     const record = fold(events).find((candidate) => candidate.id === id);
@@ -5513,34 +6270,71 @@ const commands = {
       printLine('parked v1 intent; close it with: driftseal end --status abandoned --note "close parked v1 intent before migration"');
       return publicOutcome(parkedV1);
     }
-    const open = openOutcome(fold(readEvents({ repairTail: true, readOnly })));
+    const view = loadOutcomeView({ repairTail: true, readOnly });
+    const records = view.records;
+    const { current, missing } = resolveCurrentLane(records);
+    warnMissingCurrentLane(missing);
+    const customLanes = records.lanes && records.lanes.size > 1;
+    if (customLanes || current !== DEFAULT_LANE) {
+      printLine(renderLaneLine(records, current));
+    }
+    const open = openOutcome(records);
     if (!open) {
       printLine('no outcome in progress');
       return null;
     }
-    printLine(render(open));
+    printLine(render(open, { currentLane: current }));
     return publicOutcome(open);
   },
 
   log(argv, { readOnly = false } = {}) {
-    const { positionals, flags } = parseArgs(argv, { last: '-n', all: 'boolean' }, 'log');
+    const { positionals, flags } = parseArgs(argv, {
+      last: '-n',
+      all: 'boolean',
+      'all-lanes': 'boolean',
+    }, 'log');
     if (positionals.length > 0) fail(usageFor('log'));
-    let records = fold(readEvents({ repairTail: true, readOnly }));
+    const view = loadOutcomeView({ repairTail: true, readOnly });
+    let records = view.records;
     const parkedV1 = legacyParkedIntent();
     if (parkedV1 && !records.some((record) => record.id === parkedV1.id && record.status === 'in_progress')) {
-      records = [...records, parkedV1];
+      records = Object.assign([...records, parkedV1], { lanes: records.lanes });
     }
-    if (!flags.all) records = records.filter((record) => !record.reclaimed);
+    const catalog = records.lanes || emptyLaneCatalog();
+    const { current, missing } = resolveCurrentLane(view.records);
+    warnMissingCurrentLane(missing);
+    const allLanes = flags['all-lanes'] === true;
+    if (!allLanes) {
+      records = Object.assign(selectLaneLogRecords(records, current), { lanes: catalog });
+    }
+    const visible = flags.all ? records : records.filter((record) => !record.reclaimed);
+    const customLanes = catalog.size > 1;
+    if (!allLanes && (customLanes || current !== DEFAULT_LANE || missing)) {
+      printLine(renderLaneLine(view.records, current));
+    }
+    let shown = visible;
     if (flags.last) {
       const n = positiveInteger(flags.last, '--last');
-      records = records.slice(-n);
+      shown = selectLastLogRecords(visible, current, n);
     }
-    if (records.length === 0) {
+    if (shown.length === 0) {
       printLine('log is empty');
       return [];
     }
-    printLine(records.map(render).join('\n\n'));
-    return records.map(publicOutcome);
+    printLine(shown.map((record) => render(record, { currentLane: current })).join('\n\n'));
+    return shown.map(publicOutcome);
+  },
+
+  lane(argv, { readOnly = false } = {}) {
+    const [subcommand, ...rest] = argv;
+    if (subcommand === '--help' || subcommand === '-h') throw new HelpRequested('lane');
+    if (!subcommand || subcommand === 'show') {
+      return showLanes(rest, { readOnly });
+    }
+    if (subcommand === 'add') return addLane(rest);
+    if (subcommand === 'switch') return switchLane(rest);
+    if (subcommand === 'assign') return assignLane(rest);
+    fail(usageFor('lane'));
   },
 
   reclaim(argv) {
@@ -5906,6 +6700,9 @@ const commands = {
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source, true), eol),
+          protocolEol(intentProtocolBlockV20(source), eol),
+          protocolEol(intentProtocolBlockV20(source, true), eol),
           protocolEol(v1IntentProtocolBlock(14, source), eol),
           protocolEol(v1IntentProtocolBlock(14, source, true), eol),
           protocolEol(previousIntentProtocolBlock(13, source), eol),
@@ -5937,6 +6734,9 @@ const commands = {
       knownManagedBlocks: [
         ...sourceLanguages.flatMap((source) => [
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source), eol),
+          protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source, true), eol),
+          protocolEol(decisionProtocolBlock('2.0', source), eol),
+          protocolEol(decisionProtocolBlock('2.0', source, true), eol),
           protocolEol(v1DecisionProtocolBlock(14, source), eol),
           protocolEol(v1DecisionProtocolBlock(14, source, true), eol),
           protocolEol(previousDecisionProtocolBlock(13, source), eol),
@@ -6016,7 +6816,13 @@ usage:
                                        to the current contract and Git-visible workspace
   driftseal end [id] [--status completed|partial|failed|abandoned] [--note "..."] [--verify-result "..."]
   driftseal status                     show the outcome currently in progress
-  driftseal log [--last N] [--all]     show outcome history (--all includes reclaimed records)
+  driftseal log [--last N] [--all] [--all-lanes]
+                                 show outcome history (current lane; --all-lanes is global)
+  driftseal lane                 show named outcome lanes and the current lane
+  driftseal lane add <name> [--desc "..."]
+  driftseal lane switch <name>
+  driftseal lane assign <id> <name>
+                                 partition outcome history by long-lived capability
   driftseal reclaim [id ...] --reason "<why>" [--older-than <days>] [--force] [--dry-run]
                                  hide meaningless closed records without deleting them
   driftseal unreclaim <id> --reason "<why>"
@@ -6096,6 +6902,8 @@ const VALUE_TAKING_FLAGS = {
   extend: ['--accept', '--verify', '-v', '--decision'],
   end: ['--status', '-s', '--note', '-n', '--verify-result', '-r'],
   log: ['--last', '-n'],
+  lane: ['--desc'],
+  'lane add': ['--desc'],
   reclaim: ['--reason', '-r', '--older-than'],
   unreclaim: ['--reason', '-r'],
   absorb: ['--decisions'],
@@ -6133,6 +6941,7 @@ function mutationResources(cmd, argv) {
   if (cmd === 'init') return [process.cwd()];
   if (cmd === 'migrate') return [process.cwd()];
   if (cmd === 'reclaim' || cmd === 'unreclaim') return [logDir()];
+  if (cmd === 'lane') return [logDir()];
   if (cmd === 'absorb' && argv[0] === '--git') {
     const ours = argv[2];
     return ours ? [path.dirname(path.resolve(ours))] : [process.cwd()];
@@ -6152,7 +6961,7 @@ function mutationResources(cmd, argv) {
 
 function usesV2RepositoryState(cmd, rest) {
   if (
-    ['begin', 'extend', 'verify', 'end', 'status', 'log', 'reclaim', 'unreclaim', 'absorb', 'decision', 'init'].includes(cmd)
+    ['begin', 'extend', 'verify', 'end', 'status', 'log', 'lane', 'reclaim', 'unreclaim', 'absorb', 'decision', 'init'].includes(cmd)
   ) {
     return true;
   }
@@ -6421,11 +7230,14 @@ function dispatch(argv) {
     assertV2RepositoryReady(cmd, rest);
     const mutates =
       ['begin', 'extend', 'end', 'init', 'skill', 'mcp', 'reclaim', 'unreclaim', 'absorb'].includes(cmd) ||
+      (cmd === 'lane' && ['add', 'switch', 'assign'].includes(rest[0])) ||
       (cmd === 'migrate' && rest[1] === 'apply') ||
       (cmd === 'hook' && rest[0] === 'install') ||
       (cmd === 'decision' && ['add', 'update'].includes(rest[0]));
     const readsIntentLog =
-      ['status', 'log'].includes(cmd) || (cmd === 'hook' && ['prompt', 'stop'].includes(rest[0]));
+      ['status', 'log'].includes(cmd) ||
+      (cmd === 'lane' && (!rest[0] || rest[0] === 'show')) ||
+      (cmd === 'hook' && ['prompt', 'stop'].includes(rest[0]));
     if (mutates || readsIntentLog) {
       if (readsIntentLog) {
         let resources;
@@ -6595,11 +7407,26 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
       appendFlag(argv, '--verify-result', verifyResult);
       return call(argv);
     },
-    log({ last, all = false } = {}) {
+    log({ last, all = false, allLanes = false } = {}) {
       const argv = ['log'];
       appendFlag(argv, '--last', last);
       if (all) argv.push('--all');
+      if (allLanes) argv.push('--all-lanes');
       return call(argv);
+    },
+    lane() {
+      return call(['lane']);
+    },
+    laneAdd({ name, description } = {}) {
+      const argv = ['lane', 'add', String(name)];
+      appendFlag(argv, '--desc', description);
+      return call(argv);
+    },
+    laneSwitch({ name } = {}) {
+      return call(['lane', 'switch', String(name)]);
+    },
+    laneAssign({ id, lane } = {}) {
+      return call(['lane', 'assign', String(id), String(lane)]);
     },
     absorb({ otherLog, otherDecisions, abandon, dryRun = false } = {}) {
       if (abandon && !['ours', 'theirs'].includes(abandon)) {

@@ -94,6 +94,7 @@ function registerTools(server, api, z) {
   const outcomeRecord = z.object({
     id: z.string(),
     outcome: z.string(),
+    lane: z.string().optional(),
     extensions: z.array(extensionRecord),
     acceptance: z.array(z.string()),
     verify: z.string().nullable(),
@@ -281,10 +282,14 @@ function registerTools(server, api, z) {
     {
       title: 'List DriftSeal outcome history',
       description:
-        'Review recent or complete DriftSeal outcome history. Reclaimed records are hidden unless includeReclaimed is set.',
+        'Review recent or complete DriftSeal outcome history. Defaults to the current lane. Reclaimed records are hidden unless includeReclaimed is set.',
       inputSchema: {
         last: z.number().int().positive().max(100).optional(),
         includeReclaimed: z.boolean().default(false),
+        allLanes: z
+          .boolean()
+          .default(false)
+          .describe('Show outcomes from every lane instead of the current lane.'),
       },
       outputSchema: {
         root: z.string(),
@@ -295,12 +300,113 @@ function registerTools(server, api, z) {
     },
     async (input) =>
       guarded(() => {
-        const outcomes = api.log({ last: input.last, all: input.includeReclaimed });
+        const outcomes = api.log({
+          last: input.last,
+          all: input.includeReclaimed,
+          allLanes: input.allLanes,
+        });
         const readOnly = api.readOnly;
         const summary = `Found ${outcomes.length} DriftSeal outcome records.`;
         return success(
           { root: api.root, outcomes, ...(readOnly ? { readOnly: true } : {}) },
           readOnly ? `${summary} ${READ_ONLY_SUFFIX}` : summary
+        );
+      })
+  );
+
+  const laneRecord = z.object({
+    name: z.string(),
+    description: z.string().nullable(),
+    addedAt: z.string().nullable(),
+    inferred: z.boolean().optional(),
+    visible: z.number().int().nonnegative(),
+    count: z.number().int().nonnegative(),
+    current: z.boolean().optional(),
+  });
+
+  server.registerTool(
+    'driftseal_lane',
+    {
+      title: 'Show DriftSeal lanes',
+      description:
+        'List named outcome lanes and the current lane. Re-anchoring and log history follow the current lane.',
+      inputSchema: {},
+      outputSchema: {
+        root: z.string(),
+        current: z.string(),
+        missingCurrentLane: z.string().nullable().optional(),
+        lanes: z.array(laneRecord),
+        total: z.number().int().nonnegative(),
+        readOnly: z.boolean().optional(),
+      },
+      annotations: readOnly,
+    },
+    async () =>
+      guarded(() => {
+        const snapshot = api.lane();
+        const readOnly = api.readOnly;
+        return success(
+          { root: api.root, ...snapshot, ...(readOnly ? { readOnly: true } : {}) },
+          `Current DriftSeal lane is ${snapshot.current}.`
+        );
+      })
+  );
+
+  server.registerTool(
+    'driftseal_lane_add',
+    {
+      title: 'Add a DriftSeal lane',
+      description:
+        'Create a named lane for a long-lived capability. The default lane main always exists.',
+      inputSchema: {
+        name: nonEmpty.describe('Lane name: a lowercase letter, then letters, digits, or hyphens.'),
+        description: nonEmpty.optional(),
+      },
+      outputSchema: { root: z.string(), name: z.string(), description: z.string().nullable() },
+      annotations: localWrite,
+    },
+    async (input) =>
+      guarded(() => {
+        const lane = api.laneAdd({ name: input.name, description: input.description });
+        return success({ root: api.root, ...lane }, `Added DriftSeal lane ${lane.name}.`);
+      })
+  );
+
+  server.registerTool(
+    'driftseal_lane_switch',
+    {
+      title: 'Switch the current DriftSeal lane',
+      description:
+        'Move this worktree onto an existing lane. Refused while an outcome is open.',
+      inputSchema: { name: nonEmpty },
+      outputSchema: { root: z.string(), current: z.string() },
+      annotations: localWrite,
+    },
+    async (input) =>
+      guarded(() => {
+        const result = api.laneSwitch({ name: input.name });
+        return success({ root: api.root, ...result }, `Switched to DriftSeal lane ${result.current}.`);
+      })
+  );
+
+  server.registerTool(
+    'driftseal_lane_assign',
+    {
+      title: 'Assign a closed outcome to a lane',
+      description: 'Move a closed outcome onto an existing lane with an append-only assign event.',
+      inputSchema: {
+        id: nonEmpty.describe('Closed outcome id.'),
+        lane: nonEmpty,
+      },
+      outputSchema: { root: z.string(), outcome: outcomeRecord },
+      annotations: localWrite,
+    },
+    async (input) =>
+      guarded(() => {
+        const outcome = api.laneAssign({ id: input.id, lane: input.lane });
+        return success(
+          { root: api.root, outcome },
+          `Assigned outcome ${outcome.id} to lane ${outcome.lane}.`
         );
       })
   );
@@ -568,8 +674,15 @@ function registerResources(server, api) {
     'recent-outcomes',
     'driftseal://outcomes/recent',
     'Recent DriftSeal outcomes',
-    'The ten most recent outcome records for the fixed repository.',
+    'The ten most recent outcome records on the current lane.',
     () => ({ root: api.root, outcomes: api.log({ last: 10 }) })
+  );
+  registerJson(
+    'outcome-lanes',
+    'driftseal://lanes',
+    'DriftSeal outcome lanes',
+    'Named lanes that partition outcome history, including the current lane.',
+    () => ({ root: api.root, ...api.lane() })
   );
   registerJson(
     'decision-catalog',
@@ -592,7 +705,7 @@ async function createServer({ root }) {
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       instructions:
-        'Use driftseal_status before durable project changes or after context loss. Open one coherent outcome with driftseal_begin and append same-outcome steps with driftseal_extend. Reconcile linked decisions after the final extension, inspect the cumulative verifier, use driftseal_verify for fresh contract-bound evidence, and close honestly with driftseal_end.',
+        'Use driftseal_status before durable project changes or after context loss. Open one coherent outcome with driftseal_begin and append same-outcome steps with driftseal_extend. Reconcile linked decisions after the final extension, inspect the cumulative verifier, use driftseal_verify for fresh contract-bound evidence, and close honestly with driftseal_end. Named lanes isolate orthogonal capability history; driftseal_log follows the current lane.',
     }
   );
   registerTools(server, api, z);

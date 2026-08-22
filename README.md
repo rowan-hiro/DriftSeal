@@ -28,9 +28,12 @@ DriftSeal v2 is an outcome log rather than an intent-per-step log.
   decision link to the currently open outcome.
 - Every extension changes the contract hash and invalidates earlier verification
   and MADR reconciliation.
-- Stored events use `logVersion: 2` and `schemaVersion: 1`.
-- The generated `AGENTS.md` protocol series is `2.0`; compatible protocol
-  refinements use `2.1`, `2.2`, and so on.
+- Stored events use `logVersion: 2`. Compatible clients accept `schemaVersion`
+  `1` or `2`; lane events and non-default `begin.lane` use `schemaVersion: 2`.
+- The generated `AGENTS.md` protocol series is `2.1`. `driftseal init` upgrades
+  recognized `2.0` blocks.
+- Named lanes partition outcome history on the same WAL. The default lane is
+  `main`; `driftseal log` follows the current lane.
 - The public CLI, Node API, MCP tools, and MCP resources use outcome terminology.
   v1 names and storage paths are not runtime aliases.
 
@@ -121,6 +124,45 @@ The scope belongs to the worktree, not to the agent process. Agents and subagent
 working in the same worktree resume its matching open outcome. Separate worktrees
 hold separate outcomes.
 
+## Lanes
+
+Orthogonal long-lived capabilities can share one append-only log without sharing
+narrative context. Each outcome belongs to one named lane. Untagged history lives
+on `main`. `status` and `log --last 3` follow the current lane, which is local to
+the worktree.
+
+```sh
+driftseal lane add index --desc "On-disk inverted index"
+driftseal lane switch index
+driftseal begin "Ship the inverted index" --accept "lookups return stored postings" --verify "npm test"
+```
+
+Close the open outcome before switching. Later work on the same capability
+switches back and begins a new outcome on that lane; it does not reopen a closed
+record. `driftseal lane assign <id> <name>` moves a closed outcome. Cross-cutting
+work stays on `main`. An open outcome stays visible in `log` even when it belongs
+to another lane; `status` prints that lane when it differs from the current one.
+
+Lanes cannot be renamed or removed. A typo in `lane add` stays in `driftseal lane`
+output; add the intended name and stop using the old one.
+
+If a `begin` names a lane whose `lane_add` is missing, DriftSeal infers the lane
+so `status`, `log`, and `lane` still work, and `lane add` can write the missing
+event. Duplicate `lane_add` records last-write the description instead of failing
+the fold. A `lane_assign` that names an unknown lane infers it the same way.
+If the worktree's current-lane pointer names a lane the WAL no longer
+has, `status`, `log`, and `lane` fall back to `main` with a warning; `begin`
+still refuses until you `lane switch main` or add the lane. `log --last N` can
+return more than N records when an open outcome sits on another lane.
+
+A derived lane index caches fold state in Git metadata (or beside a custom
+seal). Incremental rebuilds follow `indexedThrough` and `indexedLines`; a full
+rebuild happens when the log identity changes. Per-lane heads, reverse links,
+and WAL byte ranges are stored for a seek path that is not consumed yet. The
+index is reconstructable and is not committed with the log. Custom-home
+sidecars sit next to `events.jsonl`. When that directory is inside a Git
+worktree, they are listed in its `.gitignore`.
+
 ## Decisions and MADR
 
 Use a MADR only for context that the outcome log and Git cannot recover: a
@@ -152,8 +194,9 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 | `driftseal extend "<addition>" [--accept "..."] [--verify "..."] [--decision id]` | Append scope to the same outcome and invalidate earlier verification. |
 | `driftseal verify [--allow-tracked-command]` | Execute the declared cumulative verifier and bind evidence. |
 | `driftseal end [id] [-s status] [-n note] [-r verify-result]` | Close an outcome honestly. |
-| `driftseal status` | Show the outcome in progress. |
-| `driftseal log [--last N] [--all]` | Review outcome history. |
+| `driftseal status` | Show the outcome in progress and the current lane. |
+| `driftseal log [--last N] [--all] [--all-lanes]` | Review outcome history (current lane unless `--all-lanes`). |
+| `driftseal lane add\|switch\|assign\|show` | Partition history by long-lived capability. |
 | `driftseal reclaim [id ...] --reason "..." [--force]` | Hide meaningless closed records with append-only markers. |
 | `driftseal unreclaim <id> --reason "..."` | Restore a reclaimed record. |
 | `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | Merge another lineage and remap colliding outcome or MADR ids. |
@@ -266,24 +309,31 @@ seal.begin({
 seal.extend({ extension: 'Document token expiry' });
 ```
 
-The API also exposes `status`, `verify`, `end`, `log`, `absorb`, reclaim,
-decision, init, and migration methods.
+The API also exposes `status`, `verify`, `end`, `log`, `lane`, `laneAdd`,
+`laneSwitch`, `laneAssign`, `absorb`, reclaim, decision, init, and migration
+methods.
 
 The stdio MCP server fixes all operations to one repository root. Its v2 tools
 include `driftseal_status`, `driftseal_begin`, `driftseal_extend`,
-`driftseal_verify`, `driftseal_end`, outcome history and absorb tools, MADR
-tools, and the three migration tools. Resources are:
+`driftseal_verify`, `driftseal_end`, outcome history, lane, and absorb tools,
+MADR tools, and the three migration tools. Resources are:
 
 - `driftseal://outcome/current`
 - `driftseal://outcomes/recent`
+- `driftseal://lanes`
 - `driftseal://madr`
 
 ## Storage and trust boundary
 
 - `.seal/outcomes/events.jsonl` is the append-only outcome log. Access it through
-  DriftSeal; use `reclaim`, `unreclaim`, and `absorb` instead of manual edits.
+  DriftSeal; use `reclaim`, `unreclaim`, `lane`, and `absorb` instead of manual edits.
 - `.seal/madr/` stores numbered MADR documents.
 - `$DRIFTSEAL_HOME` replaces the `.seal` root.
+- The current lane and derived lane index live in Git metadata for a default
+  repository seal, or beside a custom seal (`outcomes/.current-lane` and
+  `outcomes/.lane-index.json`). When the custom seal sits inside a Git
+  worktree, those sidecars are gitignored. They are reconstructable and are not
+  part of the committed WAL.
 - Advisory hooks remind agents about lifecycle state but never broaden the
   repository's `AGENTS.md` policy.
 
