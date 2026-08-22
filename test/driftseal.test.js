@@ -5813,3 +5813,35 @@ test('incremental WAL errors report the file line number', () => {
   fs.appendFileSync(logPath, '{not-json\n');
   assert.match(runFail(['status']).stderr, /corrupt log line 3 in /);
 });
+
+test('a duplicate lane_add still folds and last description wins', () => {
+  const { dir, run, events } = setup();
+  run(['lane', 'add', 'index', '--desc', 'first']);
+  const logPath = path.join(dir, 'outcomes', 'events.jsonl');
+  const add = events().find((event) => event.type === 'lane_add');
+  fs.appendFileSync(
+    logPath,
+    `${JSON.stringify({ ...add, ts: new Date().toISOString(), description: 'second' })}\n`
+  );
+  fs.rmSync(path.join(dir, 'outcomes', '.lane-index.json'), { force: true });
+  assert.match(run(['status']), /no outcome in progress/);
+  assert.match(run(['lane']), /second/);
+  assert.match(run(['lane', 'switch', 'index']), /switched to lane index/);
+});
+
+test('a lane_assign that names a missing lane still folds', () => {
+  const { dir, run, events } = setup();
+  run(['lane', 'add', 'index']);
+  const id = run(['begin', 'assigned work']).trim();
+  run(['end', '--status', 'abandoned', '--note', 'done']);
+  run(['lane', 'assign', id, 'index']);
+  const logPath = path.join(dir, 'outcomes', 'events.jsonl');
+  const kept = events().filter((event) => event.type !== 'lane_add');
+  fs.writeFileSync(logPath, `${kept.map(JSON.stringify).join('\n')}\n`);
+  fs.rmSync(path.join(dir, 'outcomes', '.lane-index.json'), { force: true });
+  assert.match(run(['status']), /no outcome in progress/);
+  assert.match(run(['log', '--all-lanes']), /assigned work/);
+  assert.match(run(['lane']), /index/);
+  assert.match(run(['lane']), /inferred/);
+  assert.match(run(['lane', 'add', 'index']), /added lane index/);
+});

@@ -813,7 +813,10 @@ function applyFoldEvent(state, ev) {
   if (ev.type === 'migration') return;
   if (ev.type === 'lane_add') {
     const existing = lanes.get(ev.lane);
-    if (existing && !existing.inferred) fail(`duplicate lane add for ${ev.lane}`);
+    if (existing && !existing.inferred) {
+      if (ev.description) existing.description = ev.description;
+      return;
+    }
     lanes.set(ev.lane, {
       name: ev.lane,
       description: ev.description || null,
@@ -827,7 +830,7 @@ function applyFoldEvent(state, ev) {
     const rec = records.get(ev.id);
     if (!rec) fail(`lane assign references unknown outcome id: ${ev.id}`);
     if (rec.status === 'in_progress') fail(`cannot assign lane of in_progress outcome ${ev.id}`);
-    if (!lanes.has(ev.lane)) fail(`lane assign references unknown lane ${ev.lane}`);
+    ensureLane(ev.lane);
     rec.lane = ev.lane;
     return;
   }

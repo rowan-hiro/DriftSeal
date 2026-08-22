@@ -133,9 +133,12 @@ lane 不能改名或删除。`lane add` 打错的名字会一直出现在 `drift
 补上正确名字，旧名字不要再用。
 
 如果 `begin` 引用了 WAL 里没有 `lane_add` 的 lane，DriftSeal 会推断这条 lane，
-让 `status` / `log` / `lane` 仍可读，也允许再用 `lane add` 补上缺失事件。若
-worktree 的 current-lane 指针指向 WAL 里已不存在的 lane，`status` / `log` / `lane`
-会警告并回落到 `main`；`begin` 仍会拒绝，直到 `lane switch main` 或把该 lane 加回来。
+让 `status` / `log` / `lane` 仍可读，也允许再用 `lane add` 补上缺失事件。重复的
+`lane_add` 只更新 description，不会让 fold 失败；没有前置 `lane_add` 的
+`lane_assign` 同样会推断该 lane。若 worktree 的 current-lane 指针指向 WAL 里已
+不存在的 lane，`status` / `log` / `lane` 会警告并回落到 `main`；`begin` 仍会拒绝，
+直到 `lane switch main` 或把该 lane 加回来。`log --last N` 在 open outcome 属于
+别的 lane 时，返回条数可以多于 N。
 
 派生的 lane index 缓存 fold 状态、每条 lane 的 head、反向链接和 WAL byte range，
 放在 Git metadata（或自定义 seal 旁边）。它可以重建，不会随 log 一起提交。自定义

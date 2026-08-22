@@ -148,9 +148,12 @@ output; add the intended name and stop using the old one.
 
 If a `begin` names a lane whose `lane_add` is missing, DriftSeal infers the lane
 so `status`, `log`, and `lane` still work, and `lane add` can write the missing
-event. If the worktree's current-lane pointer names a lane the WAL no longer
+event. Duplicate `lane_add` records last-write the description instead of failing
+the fold. A `lane_assign` that names an unknown lane infers it the same way.
+If the worktree's current-lane pointer names a lane the WAL no longer
 has, `status`, `log`, and `lane` fall back to `main` with a warning; `begin`
-still refuses until you `lane switch main` or add the lane.
+still refuses until you `lane switch main` or add the lane. `log --last N` can
+return more than N records when an open outcome sits on another lane.
 
 A derived lane index caches fold state, per-lane heads, reverse links, and WAL
 byte ranges in Git metadata (or beside a custom seal). It is reconstructable
