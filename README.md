@@ -155,10 +155,13 @@ has, `status`, `log`, and `lane` fall back to `main` with a warning; `begin`
 still refuses until you `lane switch main` or add the lane. `log --last N` can
 return more than N records when an open outcome sits on another lane.
 
-A derived lane index caches fold state, per-lane heads, reverse links, and WAL
-byte ranges in Git metadata (or beside a custom seal). It is reconstructable
-and is not committed with the log. Custom-home sidecars sit next to
-`events.jsonl` and are listed in that directory's `.gitignore`.
+A derived lane index caches fold state in Git metadata (or beside a custom
+seal). Incremental rebuilds follow `indexedThrough` and `indexedLines`; a full
+rebuild happens when the log identity changes. Per-lane heads, reverse links,
+and WAL byte ranges are stored for a seek path that is not consumed yet. The
+index is reconstructable and is not committed with the log. Custom-home
+sidecars sit next to `events.jsonl`. When that directory is inside a Git
+worktree, they are listed in its `.gitignore`.
 
 ## Decisions and MADR
 
@@ -328,7 +331,8 @@ MADR tools, and the three migration tools. Resources are:
 - `$DRIFTSEAL_HOME` replaces the `.seal` root.
 - The current lane and derived lane index live in Git metadata for a default
   repository seal, or beside a custom seal (`outcomes/.current-lane` and
-  `outcomes/.lane-index.json`, gitignored). They are reconstructable and are not
+  `outcomes/.lane-index.json`). When the custom seal sits inside a Git
+  worktree, those sidecars are gitignored. They are reconstructable and are not
   part of the committed WAL.
 - Advisory hooks remind agents about lifecycle state but never broaden the
   repository's `AGENTS.md` policy.

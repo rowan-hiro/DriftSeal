@@ -24,7 +24,7 @@ Orthogonal capabilities share one append-only events.jsonl. After merge, log --l
 
 ## Decision Outcome
 
-Keep a single WAL. Tag each outcome with one named lane (default main). Store the current lane per worktree in Git metadata. Default log and re-anchor follow the current lane. Refuse switching while an outcome is open. Persist a derived, local lane index of per-lane heads, reverse links, and WAL byte ranges; rebuild when the log identity changes. Do not put parent pointers in canonical events, and do not allow one open outcome per lane in a shared worktree.
+Keep a single WAL. Tag each outcome with one named lane (default main). Store the current lane per worktree in Git metadata. Default log and re-anchor follow the current lane. Refuse switching while an outcome is open. Persist a derived, local lane index as a reconstructable fold cache; rebuild incrementally from indexedThrough and indexedLines, or fully when the log identity changes. Per-lane heads, reverse links, and WAL byte ranges are stored for a seek path that is not consumed yet. Do not put parent pointers in canonical events, and do not allow one open outcome per lane in a shared worktree.
 
 ## Consequences
 
@@ -53,3 +53,10 @@ Unknown lane names are inferred from the WAL so re-anchor commands stay readable
 Status: Accepted → Accepted
 
 Duplicate lane_add last-writes the description instead of failing the fold. lane_assign infers a missing lane the same way a tagged begin does, so merge-damaged logs stay readable.
+
+<!-- driftseal-reconciliation: a6e34fcd-febd-445e-aa67-5ec03805c5c0 -->
+### 2026-08-22T01:24:45.972Z — Outcome `2026-08-22-002`
+
+Status: Accepted → Accepted
+
+Heads, reverse links, and WAL byte ranges remain in the derived index for a seek path that is not consumed yet; incremental rebuild uses indexedThrough and indexedLines. Custom-home sidecar gitignore is written only when the WAL sits inside a Git worktree.

@@ -620,6 +620,7 @@ function writeCurrentLaneName(name, { readOnly = false } = {}) {
 
 function ensureDerivedLaneSidecarIgnore() {
   if (isParkableOutcomeLog()) return;
+  if (!isGitWorkTree(logDir())) return;
   const ignoreFile = path.join(logDir(), '.gitignore');
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
   let next = current;
@@ -1157,7 +1158,6 @@ function laneSummary(records, name) {
     addedAt: lane ? lane.addedAt : null,
     inferred: Boolean(lane && lane.inferred),
     visible: visible.length,
-    total: members.length,
     count: members.length,
   };
 }
@@ -1170,7 +1170,6 @@ function publicLane(summary) {
     inferred: summary.inferred === true,
     visible: summary.visible,
     count: summary.count,
-    total: summary.total,
   };
 }
 

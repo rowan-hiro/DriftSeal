@@ -321,7 +321,6 @@ function registerTools(server, api, z) {
     inferred: z.boolean().optional(),
     visible: z.number().int().nonnegative(),
     count: z.number().int().nonnegative(),
-    total: z.number().int().nonnegative(),
     current: z.boolean().optional(),
   });
 

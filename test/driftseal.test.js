@@ -5796,12 +5796,29 @@ test('log keeps an open outcome visible when it belongs to another lane', () => 
 });
 
 test('custom-home lane sidecars are gitignored next to the WAL', () => {
-  const { dir, run } = setup();
+  const { cwd, env } = setupGitRepository('driftseal-lane-sidecar-');
+  const dir = path.join(cwd, 'custom-seal');
+  const run = (args, opts = {}) =>
+    execFileSync(process.execPath, [DRIFTSEAL, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...env, DRIFTSEAL_HOME: dir, DRIFTSEAL_DECISION_HOME: path.join(dir, 'madr') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...opts,
+    });
   run(['lane', 'add', 'index']);
   run(['log']);
   const ignore = fs.readFileSync(path.join(dir, 'outcomes', '.gitignore'), 'utf8');
   assert.match(ignore, /^\.current-lane$/m);
   assert.match(ignore, /^\.lane-index\.json$/m);
+});
+
+test('non-git custom-home lane sidecars are not gitignored', () => {
+  const { dir, run } = setup();
+  run(['lane', 'add', 'index']);
+  run(['log']);
+  assert.equal(fs.existsSync(path.join(dir, 'outcomes', '.gitignore')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'outcomes', '.lane-index.json')), true);
 });
 
 test('incremental WAL errors report the file line number', () => {

@@ -54,6 +54,27 @@ test('programmatic API returns structured records without changing its fixed roo
   assert.throws(() => createApi({ root: path.join(root, 'missing') }), /does not exist/);
 });
 
+test('lane snapshot keeps a global total and omits per-lane total', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-lane-total-'));
+  const api = createApi({ root, isolateStorage: true });
+  api.laneAdd({ name: 'index', description: 'index work' });
+  const empty = api.lane();
+  assert.equal(empty.total, 0);
+  for (const lane of empty.lanes) {
+    assert.equal(Object.hasOwn(lane, 'total'), false);
+    assert.equal(typeof lane.count, 'number');
+    assert.equal(typeof lane.visible, 'number');
+  }
+  api.begin({ outcome: 'count outcomes once' });
+  api.end({ status: 'abandoned', note: 'done' });
+  const snapshot = api.lane();
+  assert.equal(snapshot.total, 1);
+  const main = snapshot.lanes.find((lane) => lane.name === 'main');
+  assert.equal(main.count, 1);
+  assert.equal(main.visible, 1);
+  assert.equal(Object.hasOwn(main, 'total'), false);
+});
+
 test('captured verification output is bounded without changing complete evidence', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-api-bounded-output-'));
   const api = createApi({ root, isolateStorage: true });
