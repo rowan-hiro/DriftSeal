@@ -5888,7 +5888,7 @@ test('indexed park recovery ignores committed event key order', () => {
     env: { ...repo.env, _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1' },
   });
   assert.match(output, new RegExp(`\\[${id}\\] in_progress`));
-  assert.equal((output.match(/key order independent park/g) || []).length, 1);
+  assert.equal((output.match(/\] in_progress/g) || []).length, 1);
   assert.equal(fs.existsSync(park), false);
   repo.run(['end', '--status', 'abandoned', '--note', 'clear']);
 });

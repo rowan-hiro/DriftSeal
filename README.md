@@ -160,8 +160,8 @@ A derived SQLite outcome index stores folded records in Git metadata (or beside
 a custom seal). It is a disposable read model; `events.jsonl` remains the only
 canonical history. Incremental sync follows `indexedThrough` and
 `indexedLines`, and source prefix/tail hashes bind the database to the exact WAL
-it represents. A source rewrite, incompatible schema, failed integrity check,
-or malformed indexed row triggers a full rebuild.
+it represents. A source rewrite, incompatible schema, malformed indexed row, or
+SQLite read error triggers a full rebuild.
 
 `log --last N` uses a `(lane, reclaimed, ordinal)` SQLite index and reads only
 the selected outcome rows plus open outcomes from other lanes. Parked events
