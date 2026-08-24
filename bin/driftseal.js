@@ -32,6 +32,13 @@ const { isDeepStrictEqual } = require('util');
 const { StringDecoder } = require('string_decoder');
 const { execFileSync, spawnSync } = require('child_process');
 const { version: PACKAGE_VERSION } = require('../package.json');
+const { createOutcomeFold } = require('../lib/outcome-fold.js');
+const {
+  OutcomeIndexError,
+  openOutcomeIndex,
+  removeIndexFiles,
+  temporaryIndexPath,
+} = require('../lib/outcome-index-sqlite.js');
 
 const END_STATUSES = ['completed', 'partial', 'failed', 'abandoned'];
 const DECISION_STATUSES = [
@@ -52,8 +59,8 @@ const DEFAULT_LANE = 'main';
 const LANE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
 const CURRENT_LANE_GIT_PATH = 'driftseal-v2-current-lane';
-const LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
-const LANE_INDEX_VERSION = 2;
+const LANE_INDEX_GIT_PATH = 'driftseal-v3-outcome-index.sqlite';
+const LEGACY_LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
 const LANE_INDEX_PREFIX_BYTES = 8192;
 const LANE_INDEX_TAIL_BYTES = 64 * 1024;
 const LOCK_STALE_MS = 30 * 60 * 1000;
@@ -594,6 +601,11 @@ function currentLaneFile() {
 
 function laneIndexFile() {
   if (isParkableOutcomeLog()) return worktreeMetadataFile(LANE_INDEX_GIT_PATH);
+  return path.join(logDir(), '.outcome-index.sqlite');
+}
+
+function legacyLaneIndexFile() {
+  if (isParkableOutcomeLog()) return worktreeMetadataFile(LEGACY_LANE_INDEX_GIT_PATH);
   return path.join(logDir(), '.lane-index.json');
 }
 
@@ -626,7 +638,7 @@ function ensureDerivedLaneSidecarIgnore() {
   const ignoreFile = path.join(logDir(), '.gitignore');
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
   let next = current;
-  for (const name of ['.current-lane', '.lane-index.json']) {
+  for (const name of ['.current-lane', '.lane-index.json', '.outcome-index.sqlite']) {
     const present = next.split(/\r?\n/).some((line) => line.trim() === name);
     if (present) continue;
     if (next && !next.endsWith('\n')) next += '\n';
@@ -635,38 +647,6 @@ function ensureDerivedLaneSidecarIgnore() {
   if (next === current) return;
   ensureDirectoryDurable(logDir());
   atomicWriteFile(ignoreFile, next, 0o644);
-}
-
-function defaultLaneCatalogObject() {
-  return {
-    [DEFAULT_LANE]: {
-      name: DEFAULT_LANE,
-      description: null,
-      addedAt: null,
-      head: null,
-      count: 0,
-      visible: 0,
-    },
-  };
-}
-
-function emptyLaneIndexState() {
-  return {
-    indexVersion: LANE_INDEX_VERSION,
-    source: {
-      indexedThrough: 0,
-      indexedLines: 0,
-      prefixHash: contentHash(''),
-      tailHash: contentHash(''),
-    },
-    lastBuild: 'full',
-    lanes: emptyLaneCatalog(),
-    order: [],
-    records: new Map(),
-    ranges: new Map(),
-    reconciliations: new Map(),
-    open: [],
-  };
 }
 
 function hashFileRange(file, start, length) {
@@ -700,120 +680,18 @@ function laneIndexSourceIdentity(file, indexedThrough, indexedLines = 0) {
   };
 }
 
-function laneIndexMatchesFile(index, file) {
-  if (!index || index.indexVersion !== LANE_INDEX_VERSION) return false;
-  if (!Number.isSafeInteger(index.source?.indexedLines) || index.source.indexedLines < 0) return false;
-  if (!fs.existsSync(file)) return index.source.indexedThrough === 0;
+function laneIndexMatchesFile(source, file, { exact = false } = {}) {
+  if (!source || !Number.isSafeInteger(source.indexedLines) || source.indexedLines < 0) {
+    return false;
+  }
+  if (!fs.existsSync(file)) return source.indexedThrough === 0;
   const size = fs.statSync(file).size;
-  if (size < index.source.indexedThrough) return false;
-  const identity = laneIndexSourceIdentity(file, index.source.indexedThrough);
+  if (size < source.indexedThrough || (exact && size !== source.indexedThrough)) return false;
+  const identity = laneIndexSourceIdentity(file, source.indexedThrough);
   return (
-    identity.prefixHash === index.source.prefixHash &&
-    identity.tailHash === index.source.tailHash
+    identity.prefixHash === source.prefixHash &&
+    identity.tailHash === source.tailHash
   );
-}
-
-function serializeLaneIndex(state) {
-  return {
-    indexVersion: state.indexVersion,
-    source: state.source,
-    lastBuild: state.lastBuild,
-    lanes: Object.fromEntries(
-      [...state.lanes.entries()].map(([name, lane]) => [
-        name,
-        {
-          name,
-          description: lane.description || null,
-          addedAt: lane.addedAt || null,
-          head: lane.head || null,
-          inferred: lane.inferred === true,
-          count: lane.count || 0,
-          visible: lane.visible || 0,
-        },
-      ])
-    ),
-    order: [...state.order],
-    records: Object.fromEntries(state.records),
-    ranges: Object.fromEntries(state.ranges),
-    reconciliations: Object.fromEntries(state.reconciliations),
-    open: [...state.open],
-  };
-}
-
-function deserializeLaneIndex(raw) {
-  if (!raw || raw.indexVersion !== LANE_INDEX_VERSION || !raw.source || !raw.records) return null;
-  const lanes = new Map();
-  for (const [name, lane] of Object.entries(raw.lanes || defaultLaneCatalogObject())) {
-    lanes.set(name, {
-      name,
-      description: lane.description || null,
-      addedAt: lane.addedAt || null,
-      head: lane.head || null,
-      inferred: lane.inferred === true,
-      count: lane.count || 0,
-      visible: lane.visible || 0,
-    });
-  }
-  if (!lanes.has(DEFAULT_LANE)) {
-    lanes.set(DEFAULT_LANE, {
-      name: DEFAULT_LANE,
-      description: null,
-      addedAt: null,
-      head: null,
-      count: 0,
-      visible: 0,
-    });
-  }
-  return {
-    indexVersion: LANE_INDEX_VERSION,
-    source: raw.source,
-    lastBuild: raw.lastBuild || 'full',
-    lanes,
-    order: Array.isArray(raw.order) ? [...raw.order] : [],
-    records: new Map(Object.entries(raw.records)),
-    ranges: new Map(Object.entries(raw.ranges || {})),
-    reconciliations: new Map(Object.entries(raw.reconciliations || {})),
-    open: Array.isArray(raw.open) ? [...raw.open] : [],
-  };
-}
-
-function cloneLaneIndexState(state) {
-  return deserializeLaneIndex(serializeLaneIndex(state));
-}
-
-function linkLaneIndex(state) {
-  const heads = new Map();
-  state.open = [];
-  for (const lane of state.lanes.values()) {
-    lane.head = null;
-    lane.count = 0;
-    lane.visible = 0;
-  }
-  for (let ordinal = 0; ordinal < state.order.length; ordinal += 1) {
-    const id = state.order[ordinal];
-    const rec = state.records.get(id);
-    rec.previous = heads.get(rec.lane) || null;
-    rec.ordinal = ordinal;
-    heads.set(rec.lane, id);
-    const lane = state.lanes.get(rec.lane);
-    lane.count += 1;
-    if (!rec.reclaimed) lane.visible += 1;
-    if (rec.status === 'in_progress') state.open.push(id);
-  }
-  for (const [name, lane] of state.lanes) {
-    lane.head = heads.get(name) || null;
-  }
-}
-
-function applyIndexedEvent(state, ev, startByte, endByte) {
-  if (ev.type === 'begin' || ev.type === 'import') {
-    state.ranges.set(ev.id, { firstByte: startByte, lastByte: endByte });
-  } else if (state.records.has(ev.id) || state.ranges.has(ev.id)) {
-    const range = state.ranges.get(ev.id) || { firstByte: startByte, lastByte: endByte };
-    range.lastByte = endByte;
-    state.ranges.set(ev.id, range);
-  }
-  applyFoldEvent(state, ev);
 }
 
 function applyFoldEvent(state, ev) {
@@ -1092,113 +970,155 @@ function consumeLogSlice(file, startByte, onEvent, { repairTail = false, readOnl
       }
       onEvent(event, start, pos);
     } catch (err) {
-      if (err instanceof DriftSealError) throw err;
+      if (err instanceof DriftSealError || err instanceof OutcomeIndexError) throw err;
       fail(`corrupt log line ${lineNumber} in ${file}`);
     }
   }
   return { endByte: pos, endLine: lineNumber };
 }
 
-function persistLaneIndex(state, { readOnly = false } = {}) {
-  if (readOnly) return;
-  const file = laneIndexFile();
-  if (!file) return;
-  ensureDirectoryDurable(path.dirname(file));
-  ensureDerivedLaneSidecarIgnore();
-  atomicWriteFile(file, `${JSON.stringify(serializeLaneIndex(state))}\n`, 0o600);
+function replaceOutcomeIndexFile(temporary, target) {
+  try {
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    if (!['EEXIST', 'EPERM'].includes(error && error.code)) throw error;
+    removeIndexFiles(target);
+    fs.renameSync(temporary, target);
+  }
+  fs.chmodSync(target, 0o600);
+  fsyncDirectory(path.dirname(target));
 }
 
-function loadPersistedLaneIndex() {
-  const file = laneIndexFile();
-  if (!file || !fs.existsSync(file)) return null;
+function removeLegacyLaneIndex() {
+  const legacy = legacyLaneIndexFile();
+  if (legacy) fs.rmSync(legacy, { force: true });
+}
+
+function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
+  const wal = logFile();
+  const target = laneIndexFile();
+  if (!target) return null;
+  ensureDirectoryDurable(path.dirname(target));
+  ensureDerivedLaneSidecarIgnore();
+  const temporary = temporaryIndexPath(target);
+  removeIndexFiles(temporary);
+  let index;
   try {
-    return deserializeLaneIndex(JSON.parse(fs.readFileSync(file, 'utf8')));
-  } catch {
-    return null;
+    index = openOutcomeIndex(temporary);
+    let slice;
+    index.transaction(() => {
+      index.clear();
+      index.ensureLane(DEFAULT_LANE);
+      slice = consumeLogSlice(
+        wal,
+        0,
+        (event, start, end) =>
+          index.applyEvent(event, start, end, { applyFoldEvent, defaultLane: DEFAULT_LANE }),
+        { repairTail }
+      );
+      index.setSource(
+        laneIndexSourceIdentity(wal, slice.endByte, slice.endLine),
+        'full'
+      );
+    });
+    if (!index.integrityCheck()) fail('rebuilt SQLite outcome index failed integrity check');
+    index.close();
+    index = null;
+    replaceOutcomeIndexFile(temporary, target);
+    removeLegacyLaneIndex();
+    const reopened = openOutcomeIndex(target);
+    reopened.build = 'full';
+    return reopened;
+  } catch (error) {
+    if (index) index.close();
+    removeIndexFiles(temporary);
+    throw error;
   }
 }
 
 function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFull = false } = {}) {
-  const file = logFile();
-  let state = loadPersistedLaneIndex();
-  const canIncrement = !forceFull && state && laneIndexMatchesFile(state, file);
-  let indexedThrough = 0;
-  let indexedLines = 0;
-  if (!canIncrement) {
-    state = emptyLaneIndexState();
-    const slice = consumeLogSlice(file, 0, (event, start, end) => applyIndexedEvent(state, event, start, end), {
-      repairTail,
-      readOnly,
-    });
-    indexedThrough = slice.endByte;
-    indexedLines = slice.endLine;
-    state.lastBuild = 'full';
-  } else {
-    const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
-    if (size > state.source.indexedThrough) {
-      const slice = consumeLogSlice(
-        file,
-        state.source.indexedThrough,
-        (event, start, end) => applyIndexedEvent(state, event, start, end),
-        { repairTail, readOnly, startLine: state.source.indexedLines || 0 }
-      );
-      indexedThrough = slice.endByte;
-      indexedLines = slice.endLine;
-      state.lastBuild = 'incremental';
-    } else {
-      indexedThrough = size;
-      indexedLines = state.source.indexedLines || 0;
-      state.lastBuild = 'hot';
+  const wal = logFile();
+  const target = laneIndexFile();
+  if (!target) return null;
+  if (readOnly) {
+    if (!fs.existsSync(target)) return null;
+    try {
+      const index = openOutcomeIndex(target, { readOnly: true });
+      if (!index.integrityCheck() || !laneIndexMatchesFile(index.source(), wal, { exact: true })) {
+        index.close();
+        return null;
+      }
+      index.build = 'hot';
+      return index;
+    } catch {
+      return null;
     }
   }
-  state.source = laneIndexSourceIdentity(file, indexedThrough, indexedLines);
-  if (state.lastBuild !== 'hot' || process.env._DRIFTSEAL_TEST_FORCE_INDEX_RELINK === '1') {
-    linkLaneIndex(state);
+  if (forceFull || !fs.existsSync(target)) {
+    return rebuildCommittedOutcomeIndex({ repairTail });
   }
-  if (state.lastBuild !== 'hot') persistLaneIndex(state, { readOnly });
-  return state;
+  let index;
+  try {
+    index = openOutcomeIndex(target);
+    const source = index.source();
+    if (!index.integrityCheck() || !laneIndexMatchesFile(source, wal)) {
+      index.close();
+      return rebuildCommittedOutcomeIndex({ repairTail });
+    }
+    const size = fs.existsSync(wal) ? fs.statSync(wal).size : 0;
+    if (size === source.indexedThrough) {
+      index.build = 'hot';
+      removeLegacyLaneIndex();
+      return index;
+    }
+    let slice;
+    index.transaction(() => {
+      slice = consumeLogSlice(
+        wal,
+        source.indexedThrough,
+        (event, start, end) =>
+          index.applyEvent(event, start, end, { applyFoldEvent, defaultLane: DEFAULT_LANE }),
+        {
+          repairTail,
+          startLine: source.indexedLines || 0,
+        }
+      );
+      index.setSource(
+        laneIndexSourceIdentity(wal, slice.endByte, slice.endLine),
+        'incremental'
+      );
+    });
+    index.build = 'incremental';
+    removeLegacyLaneIndex();
+    return index;
+  } catch (error) {
+    if (index) index.close();
+    if (error instanceof DriftSealError) throw error;
+    return rebuildCommittedOutcomeIndex({ repairTail });
+  }
 }
 
-function applyOverlayToLaneIndex(state, overlayEvents) {
-  if (!overlayEvents || overlayEvents.length === 0) return state;
-  const next = cloneLaneIndexState(state);
-  for (const event of overlayEvents) applyFoldEvent(next, event);
-  linkLaneIndex(next);
-  return next;
-}
-
-function foldedRecordsFromLaneIndex(state) {
-  const records = state.order.map((id) => state.records.get(id)).filter(Boolean);
-  records.lanes = state.lanes;
+function recordsFromOutcomeIndex(index) {
+  const records = index.queryAll();
+  records.lanes = index.laneCatalog();
   return records;
 }
 
 function loadOutcomeView({ repairTail = false, readOnly = false } = {}) {
-  const committed = syncCommittedLaneIndex({ repairTail, readOnly });
   const park = inProgressFile();
-  if (!park || !fs.existsSync(park)) {
-    return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
+  if (park && fs.existsSync(park)) {
+    const records = fold(readEvents({ repairTail, readOnly }));
+    return { index: null, records };
+  }
+  const index = syncCommittedLaneIndex({ repairTail, readOnly });
+  if (!index) {
+    const records = fold(readEvents({ repairTail, readOnly }));
+    return { index: null, records };
   }
   try {
-    const committedEvents = readJsonlRecordsFromFile(logFile(), { repairTail, readOnly }).map(
-      (record) => record.event
-    );
-    const overlay = planInProgressOverlay(committedEvents, park, { repairTail, readOnly });
-    if (!overlay || overlay.alreadyCommitted) {
-      if (overlay && overlay.alreadyCommitted && !readOnly) discardInProgressLog(park);
-      return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
-    }
-    if (!readOnly && overlay.mappings.length > 0) writeJsonl(park, overlay.records);
-    const state = applyOverlayToLaneIndex(
-      committed,
-      overlay.records.map((record) => record.event)
-    );
-    return { state, records: foldedRecordsFromLaneIndex(state) };
-  } catch (err) {
-    if (readOnly && err && err.code === 'ENOENT') {
-      return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
-    }
-    throw err;
+    return { index: null, records: recordsFromOutcomeIndex(index) };
+  } finally {
+    index.close();
   }
 }
 
@@ -1268,36 +1188,6 @@ function selectLastLogRecords(records, current, n) {
   return [...clipped, ...extras].sort((left, right) => order.get(left.id) - order.get(right.id));
 }
 
-function selectLastIndexedLogRecords(state, current, n, { includeReclaimed = false } = {}) {
-  const lane = state.lanes.get(current);
-  if (!lane) return null;
-  const selected = [];
-  const visited = new Set();
-  let id = lane.head;
-  let visits = 0;
-  const maxVisits = Number(process.env._DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS) || Infinity;
-  while (id && selected.length < n) {
-    if (visited.has(id)) return null;
-    visited.add(id);
-    visits += 1;
-    if (visits > maxVisits) fail(`recent lane index visited more than ${maxVisits} records`);
-    const record = state.records.get(id);
-    if (!record || (record.lane || DEFAULT_LANE) !== current) return null;
-    if (includeReclaimed || !record.reclaimed) selected.push(record);
-    id = record.previous || null;
-  }
-  selected.reverse();
-  const kept = new Set(selected.map((record) => record.id));
-  const extras = [];
-  for (const openId of state.open) {
-    if (kept.has(openId)) continue;
-    const record = state.records.get(openId);
-    if (!record || record.status !== 'in_progress') return null;
-    extras.push(record);
-  }
-  return [...selected, ...extras].sort((left, right) => left.ordinal - right.ordinal);
-}
-
 function indexedLaneSummary(state, name) {
   const lane = state.lanes.get(name);
   return {
@@ -1313,16 +1203,26 @@ function indexedLaneSummary(state, name) {
 function tryLoadRecentOutcomeView(n, { includeReclaimed = false, repairTail = false, readOnly = false } = {}) {
   const park = inProgressFile();
   if (park && fs.existsSync(park)) return null;
-  let state = syncCommittedLaneIndex({ repairTail, readOnly });
-  if (park && fs.existsSync(park)) return null;
-  const { current, missing } = resolveCurrentLane({ lanes: state.lanes });
-  let records = selectLastIndexedLogRecords(state, current, n, { includeReclaimed });
-  if (!records) {
-    state = syncCommittedLaneIndex({ repairTail, readOnly, forceFull: true });
-    records = selectLastIndexedLogRecords(state, current, n, { includeReclaimed });
+  let index = syncCommittedLaneIndex({ repairTail, readOnly });
+  if (!index) return null;
+  try {
+    if (park && fs.existsSync(park)) return null;
+    const state = { lanes: index.laneCatalog() };
+    const { current, missing } = resolveCurrentLane(state);
+    const records = index.queryRecent(current, n, { includeReclaimed });
+    return { state, records, current, missing };
+  } catch (error) {
+    index.close();
+    index = null;
+    if (readOnly) return null;
+    index = syncCommittedLaneIndex({ repairTail, forceFull: true });
+    const state = { lanes: index.laneCatalog() };
+    const { current, missing } = resolveCurrentLane(state);
+    const records = index.queryRecent(current, n, { includeReclaimed });
+    return { state, records, current, missing };
+  } finally {
+    if (index) index.close();
   }
-  if (!records) return null;
-  return { state, records, current, missing };
 }
 
 function liveWorktreeOutcomeLog() {

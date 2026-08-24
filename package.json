@@ -1,6 +1,6 @@
 {
   "name": "driftseal",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "description": "Seal outcomes, verification, and decisions into an auditable workflow for agentic coding",
   "keywords": [
     "driftseal",
@@ -34,6 +34,7 @@
   "files": [
     "index.js",
     "bin",
+    "lib",
     "skills",
     "README.md",
     "README.zh-CN.md",
@@ -41,10 +42,11 @@
   ],
   "scripts": {
     "benchmark:recent-log": "node benchmark/recent-log.js",
+    "test:package": "node test/package-smoke.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
