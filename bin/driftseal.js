@@ -7102,9 +7102,52 @@ function repositoryOutcomeLogFiles() {
   return files;
 }
 
+function indexedMigrationEvent(file) {
+  if (
+    canonicalPath(file) !== canonicalPath(logFile()) ||
+    !laneIndexFile() ||
+    !fs.existsSync(laneIndexFile())
+  ) {
+    return { usable: false, migration: null };
+  }
+  let index;
+  try {
+    index = openOutcomeIndex(laneIndexFile(), { readOnly: true });
+    const source = index.source();
+    if (!laneIndexMatchesFile(source, file)) {
+      return { usable: false, migration: null };
+    }
+    let migration = index.migrationEvent();
+    const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+    if (size > source.indexedThrough) {
+      consumeLogSlice(
+        file,
+        source.indexedThrough,
+        (event) => {
+          if (event.type === 'migration' && event.id === 'v1-to-v2') migration = event;
+        },
+        {
+          readOnly: true,
+          startLine: source.indexedLines || 0,
+        }
+      );
+    }
+    return { usable: true, migration };
+  } catch {
+    return { usable: false, migration: null };
+  } finally {
+    if (index) index.close();
+  }
+}
+
 function repositoryMigrationEvent() {
   for (const file of repositoryOutcomeLogFiles()) {
     try {
+      const indexed = indexedMigrationEvent(file);
+      if (indexed.usable) {
+        if (indexed.migration) return indexed.migration;
+        continue;
+      }
       const migration = findMigrationEvent(file);
       if (migration) return migration;
     } catch {
