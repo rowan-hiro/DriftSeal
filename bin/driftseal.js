@@ -35,10 +35,12 @@ const { version: PACKAGE_VERSION } = require('../package.json');
 const { createOutcomeFold } = require('../lib/outcome-fold.js');
 const {
   OutcomeIndexError,
+  SqliteUnavailableError,
   openOutcomeIndex,
   removeIndexFiles,
   temporaryIndexPath,
 } = require('../lib/outcome-index-sqlite.js');
+const { assertSupportedNode } = require('../lib/sqlite-runtime.js');
 
 const END_STATUSES = ['completed', 'partial', 'failed', 'abandoned'];
 const DECISION_STATUSES = [
@@ -642,7 +644,15 @@ function ensureDerivedLaneSidecarIgnore() {
   const ignoreFile = path.join(logDir(), '.gitignore');
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
   let next = current;
-  for (const name of ['.current-lane', '.lane-index.json', '.outcome-index.sqlite']) {
+  for (const name of [
+    '.current-lane',
+    '.lane-index.json',
+    '.outcome-index.sqlite',
+    '.outcome-index.sqlite-journal',
+    '.outcome-index.sqlite-wal',
+    '.outcome-index.sqlite-shm',
+    '..outcome-index.sqlite.*.tmp',
+  ]) {
     const present = next.split(/\r?\n/).some((line) => line.trim() === name);
     if (present) continue;
     if (next && !next.endsWith('\n')) next += '\n';
@@ -772,6 +782,9 @@ function replaceOutcomeIndexFile(temporary, target) {
     fs.renameSync(temporary, target);
   }
   fs.chmodSync(target, 0o600);
+  for (const suffix of ['-journal', '-wal', '-shm']) {
+    fs.rmSync(`${target}${suffix}`, { force: true });
+  }
   fsyncDirectory(path.dirname(target));
 }
 
@@ -842,7 +855,12 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
     }
   }
   if (forceFull || !fs.existsSync(target)) {
-    return rebuildCommittedOutcomeIndex({ repairTail });
+    try {
+      return rebuildCommittedOutcomeIndex({ repairTail });
+    } catch (error) {
+      if (error instanceof SqliteUnavailableError) return null;
+      throw error;
+    }
   }
   let index;
   try {
@@ -881,14 +899,9 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
   } catch (error) {
     if (index) index.close();
     if (error instanceof DriftSealError) throw error;
+    if (error instanceof SqliteUnavailableError) return null;
     return rebuildCommittedOutcomeIndex({ repairTail });
   }
-}
-
-function recordsFromOutcomeIndex(index) {
-  const records = index.queryAll();
-  records.lanes = index.laneCatalog();
-  return records;
 }
 
 function attachIndexedOverlay(index, committed, plan, { readOnly = false } = {}) {
@@ -922,32 +935,48 @@ function attachIndexedOverlay(index, committed, plan, { readOnly = false } = {})
   return records;
 }
 
+function queryOutcomeView(index, park, { repairTail = false, readOnly = false } = {}) {
+  const committed = index.queryAll();
+  if (!park || !fs.existsSync(park)) {
+    committed.lanes = index.laneCatalog();
+    return { index: null, records: committed };
+  }
+  const plan = planIndexedInProgressOverlay(index, park, { repairTail, readOnly });
+  if (plan && plan.alreadyCommitted && !readOnly) discardInProgressLog(park);
+  return {
+    index: null,
+    records: attachIndexedOverlay(index, committed, plan, { readOnly }),
+  };
+}
+
+function recoverableOutcomeIndexError(error) {
+  return (
+    error instanceof OutcomeIndexError ||
+    /^SQLITE_|^ERR_SQLITE_/.test(String(error && error.code))
+  );
+}
+
 function loadOutcomeView({ repairTail = false, readOnly = false } = {}) {
   const park = inProgressFile();
-  const index = syncCommittedLaneIndex({ repairTail, readOnly });
+  let index = syncCommittedLaneIndex({ repairTail, readOnly });
   if (!index) {
     const records = fold(readEvents({ repairTail, readOnly }));
     return { index: null, records };
   }
   try {
-    const committed = index.queryAll();
-    if (!park || !fs.existsSync(park)) {
-      committed.lanes = index.laneCatalog();
-      return { index: null, records: committed };
-    }
-    const plan = planIndexedInProgressOverlay(index, park, { repairTail, readOnly });
-    if (plan && plan.alreadyCommitted && !readOnly) discardInProgressLog(park);
-    return {
-      index: null,
-      records: attachIndexedOverlay(index, committed, plan, { readOnly }),
-    };
+    return queryOutcomeView(index, park, { repairTail, readOnly });
   } catch (error) {
-    if (readOnly && error && error.code === 'ENOENT') {
-      return { index: null, records: recordsFromOutcomeIndex(index) };
-    }
-    throw error;
-  } finally {
     index.close();
+    index = null;
+    if (readOnly && (error.code === 'ENOENT' || recoverableOutcomeIndexError(error))) {
+      return { index: null, records: fold(readEvents({ repairTail, readOnly })) };
+    }
+    if (!recoverableOutcomeIndexError(error)) throw error;
+    index = syncCommittedLaneIndex({ repairTail, forceFull: true });
+    if (!index) return { index: null, records: fold(readEvents({ repairTail })) };
+    return queryOutcomeView(index, park, { repairTail });
+  } finally {
+    if (index) index.close();
   }
 }
 
@@ -7193,6 +7222,7 @@ function repositoryRoot(root) {
 }
 
 function runCommand(argv, { root = process.cwd(), isolateStorage = false, capture = true } = {}) {
+  assertSupportedNode();
   if (!Array.isArray(argv) || argv.some((arg) => typeof arg !== 'string')) {
     fail('command arguments must be an array of strings');
   }
@@ -7253,6 +7283,7 @@ function appendFlag(argv, flag, value) {
 }
 
 function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
+  assertSupportedNode();
   const fixedRoot = repositoryRoot(root);
   let lastReadOnly = false;
   const call = (argv) => {
@@ -7389,6 +7420,7 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
 
 function main() {
   try {
+    assertSupportedNode();
     const result = dispatch(process.argv.slice(2));
     process.exitCode = result.exitCode;
   } catch (err) {

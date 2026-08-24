@@ -81,6 +81,15 @@ try {
     fs.existsSync(path.join(home, 'outcomes', '.outcome-index.sqlite')),
     true
   );
+  fs.writeFileSync(
+    path.join(home, 'outcomes', '.outcome-index.sqlite'),
+    'corrupt package smoke index'
+  );
+  const rebuilt = run(process.execPath, [cli, 'log', '--last', '1'], {
+    cwd: sandbox,
+    env,
+  });
+  assert.match(rebuilt, /packaged sqlite smoke/);
   process.stdout.write(`package smoke passed: ${packed[0].filename}\n`);
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
