@@ -3917,8 +3917,10 @@ test('skill install protects conflicts and --force replaces the complete skill d
 function stageNextSkillRelease() {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-skill-next-')));
   const cli = path.join(home, 'bin', 'driftseal.js');
+  const lib = path.join(home, 'lib');
   const skillFile = path.join(home, 'skills', 'use-driftseal', 'SKILL.md');
   fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.cpSync(path.join(__dirname, '..', 'lib'), lib, { recursive: true });
   fs.mkdirSync(path.dirname(skillFile), { recursive: true });
   fs.copyFileSync(DRIFTSEAL, cli);
   fs.copyFileSync(path.join(__dirname, '..', 'package.json'), path.join(home, 'package.json'));
