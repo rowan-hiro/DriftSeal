@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { DatabaseSync } = require('../lib/sqlite-runtime.js');
+const { DatabaseSync, assertSupportedNode } = require('../lib/sqlite-runtime.js');
 
 const DRIFTSEAL = path.join(__dirname, '..', 'bin', 'driftseal.js');
 
@@ -5866,6 +5866,15 @@ test('node:sqlite warning filtering leaves unrelated warnings visible', () => {
   assert.equal(result.status, 0);
   assert.doesNotMatch(result.stderr, /SQLite is an experimental feature/);
   assert.match(result.stderr, /keep this warning/);
+});
+
+test('SQLite runtime enforces the Node 22.13 minimum', () => {
+  assert.throws(
+    () => assertSupportedNode('22.12.0'),
+    /requires Node\.js 22\.13\.0 or newer/
+  );
+  assert.doesNotThrow(() => assertSupportedNode('22.13.0'));
+  assert.doesNotThrow(() => assertSupportedNode('24.0.0'));
 });
 
 test('current lane is local to a git worktree', () => {

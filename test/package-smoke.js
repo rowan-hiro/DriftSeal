@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -68,11 +68,15 @@ try {
     [cli, 'end', '--status', 'abandoned', '--note', 'packaged smoke'],
     { cwd: sandbox, env }
   );
-  const output = run(process.execPath, [cli, 'log', '--last', '1'], {
+  const logged = spawnSync(process.execPath, [cli, 'log', '--last', '1'], {
     cwd: sandbox,
     env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  assert.match(output, /packaged sqlite smoke/);
+  assert.equal(logged.status, 0, logged.stderr);
+  assert.match(logged.stdout, /packaged sqlite smoke/);
+  assert.doesNotMatch(logged.stderr, /SQLite is an experimental feature/);
   assert.equal(
     fs.existsSync(path.join(home, 'outcomes', '.outcome-index.sqlite')),
     true
