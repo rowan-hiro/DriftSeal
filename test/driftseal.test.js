@@ -5731,6 +5731,29 @@ test('the derived lane index incrementally follows WAL growth and rebuilds after
   assert.equal(afterRewrite.metadata.lastBuild, 'full');
 });
 
+test('SQLite source binding detects equal-length WAL rewrites', () => {
+  const { dir, run } = setup();
+  run(['begin', 'first middle outcome']);
+  run(['end', '--status', 'abandoned', '--note', 'first']);
+  run(['begin', 'second middle outcome']);
+  run(['end', '--status', 'abandoned', '--note', 'second']);
+  run(['log']);
+
+  const logPath = path.join(dir, 'outcomes', 'events.jsonl');
+  const original = fs.readFileSync(logPath, 'utf8');
+  const rewritten = original.replace('first middle outcome', 'f1rst middle outcome');
+  assert.equal(Buffer.byteLength(rewritten), Buffer.byteLength(original));
+  fs.writeFileSync(logPath, rewritten);
+
+  const output = run(['log', '--all-lanes']);
+  assert.match(output, /f1rst middle outcome/);
+  assert.doesNotMatch(output, /first middle outcome/);
+  const index = sqliteIndexSnapshot(
+    path.join(dir, 'outcomes', '.outcome-index.sqlite')
+  );
+  assert.equal(index.metadata.lastBuild, 'full');
+});
+
 test('log --last walks only the visible tail of the current lane index', () => {
   const { dir, run } = setup();
   const ids = [];
@@ -5828,7 +5851,7 @@ test('SQLite outcome index rebuilds after schema, row, or file corruption', () =
   db.close();
   assert.match(run(['log', '--last', '1']), /recover indexed outcome/);
   db = new DatabaseSync(indexFile, { readOnly: true });
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 5);
   db.close();
 
   for (const command of [
@@ -5845,6 +5868,16 @@ test('SQLite outcome index rebuilds after schema, row, or file corruption', () =
     if (command[0] === 'status') assert.match(output, /no outcome in progress/);
     else if (command[0] === 'lane') assert.match(output, /current lane: main/);
     else assert.match(output, /recover indexed outcome/);
+  }
+  for (const statement of [
+    "UPDATE outcomes SET record_json = '{}'",
+    "UPDATE outcomes SET lane = 'other'",
+    'UPDATE lanes SET visible_count = visible_count + 1',
+  ]) {
+    db = new DatabaseSync(indexFile);
+    db.exec(statement);
+    db.close();
+    assert.match(run(['log', '--last', '1']), /recover indexed outcome/);
   }
 
   fs.writeFileSync(indexFile, 'not a sqlite database');

@@ -63,8 +63,6 @@ const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
 const CURRENT_LANE_GIT_PATH = 'driftseal-v2-current-lane';
 const LANE_INDEX_GIT_PATH = 'driftseal-v3-outcome-index.sqlite';
 const LEGACY_LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
-const LANE_INDEX_PREFIX_BYTES = 8192;
-const LANE_INDEX_TAIL_BYTES = 64 * 1024;
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repair skipped)';
@@ -663,49 +661,79 @@ function ensureDerivedLaneSidecarIgnore() {
   atomicWriteFile(ignoreFile, next, 0o644);
 }
 
-function hashFileRange(file, start, length) {
-  if (length <= 0) return contentHash('');
+function hashFilePrefix(file, length) {
+  const hash = crypto.createHash('sha256');
+  if (length <= 0) return hash.digest('hex');
   const fd = fs.openSync(file, 'r');
   try {
-    const buf = Buffer.alloc(length);
-    const read = fs.readSync(fd, buf, 0, length, start);
-    return crypto.createHash('sha256').update(buf.subarray(0, read)).digest('hex');
+    const buffer = Buffer.alloc(Math.min(1024 * 1024, length));
+    let position = 0;
+    while (position < length) {
+      const requested = Math.min(buffer.length, length - position);
+      const read = fs.readSync(fd, buffer, 0, requested, position);
+      if (read === 0) break;
+      hash.update(buffer.subarray(0, read));
+      position += read;
+    }
+    if (position !== length) return null;
+    return hash.digest('hex');
   } finally {
     fs.closeSync(fd);
   }
 }
 
 function laneIndexSourceIdentity(file, indexedThrough, indexedLines = 0) {
-  if (!fs.existsSync(file) || indexedThrough <= 0) {
+  if (!fs.existsSync(file)) {
     return {
       indexedThrough: 0,
       indexedLines: 0,
-      prefixHash: contentHash(''),
-      tailHash: contentHash(''),
+      walHash: contentHash(''),
+      device: null,
+      inode: null,
+      mtimeMs: null,
+      ctimeMs: null,
     };
   }
-  const prefix = Math.min(LANE_INDEX_PREFIX_BYTES, indexedThrough);
-  const tail = Math.min(LANE_INDEX_TAIL_BYTES, indexedThrough);
+  const stat = fs.statSync(file);
   return {
     indexedThrough,
     indexedLines,
-    prefixHash: hashFileRange(file, 0, prefix),
-    tailHash: hashFileRange(file, indexedThrough - tail, tail),
+    walHash: hashFilePrefix(file, indexedThrough),
+    device: Number(stat.dev),
+    inode: Number(stat.ino),
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
   };
 }
 
 function laneIndexMatchesFile(source, file, { exact = false } = {}) {
-  if (!source || !Number.isSafeInteger(source.indexedLines) || source.indexedLines < 0) {
+  if (
+    !source ||
+    typeof source.walHash !== 'string' ||
+    !Number.isSafeInteger(source.indexedLines) ||
+    source.indexedLines < 0
+  ) {
     return false;
   }
   if (!fs.existsSync(file)) return source.indexedThrough === 0;
-  const size = fs.statSync(file).size;
+  const stat = fs.statSync(file);
+  const size = stat.size;
   if (size < source.indexedThrough || (exact && size !== source.indexedThrough)) return false;
-  const identity = laneIndexSourceIdentity(file, source.indexedThrough);
-  return (
-    identity.prefixHash === source.prefixHash &&
-    identity.tailHash === source.tailHash
-  );
+  if (
+    source.device !== null &&
+    source.inode !== null &&
+    (Number(stat.dev) !== source.device || Number(stat.ino) !== source.inode)
+  ) {
+    return false;
+  }
+  if (
+    size === source.indexedThrough &&
+    stat.mtimeMs === source.mtimeMs &&
+    stat.ctimeMs === source.ctimeMs
+  ) {
+    return true;
+  }
+  return hashFilePrefix(file, source.indexedThrough) === source.walHash;
 }
 
 function applyFoldEvent(state, ev) {
@@ -822,6 +850,7 @@ function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
         laneIndexSourceIdentity(wal, slice.endByte, slice.endLine),
         'full'
       );
+      index.acceptProjection();
     });
     if (!index.integrityCheck()) fail('rebuilt SQLite outcome index failed integrity check');
     index.close();
@@ -847,7 +876,10 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
     if (!fs.existsSync(target)) return null;
     try {
       const index = openOutcomeIndex(target, { readOnly: true });
-      if (!laneIndexMatchesFile(index.source(), wal, { exact: true })) {
+      if (
+        !index.projectionTrusted() ||
+        !laneIndexMatchesFile(index.source(), wal, { exact: true })
+      ) {
         index.close();
         return null;
       }
@@ -869,7 +901,7 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
   try {
     index = openOutcomeIndex(target);
     const source = index.source();
-    if (!laneIndexMatchesFile(source, wal)) {
+    if (!index.projectionTrusted() || !laneIndexMatchesFile(source, wal)) {
       index.close();
       return rebuildCommittedOutcomeIndex({ repairTail });
     }
@@ -895,6 +927,7 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
         laneIndexSourceIdentity(wal, slice.endByte, slice.endLine),
         'incremental'
       );
+      index.acceptProjection();
     });
     index.build = 'incremental';
     removeLegacyLaneIndex();

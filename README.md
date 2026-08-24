@@ -159,8 +159,9 @@ return more than N records when an open outcome sits on another lane.
 A derived SQLite outcome index stores folded records in Git metadata (or beside
 a custom seal). It is a disposable read model; `events.jsonl` remains the only
 canonical history. Incremental sync follows `indexedThrough` and
-`indexedLines`, and source prefix/tail hashes bind the database to the exact WAL
-it represents. A source rewrite, incompatible schema, malformed indexed row, or
+`indexedLines`. File identity makes unchanged hot reads constant-time, while a
+full checksum of the previously indexed WAL prefix validates every incremental
+catch-up. A source rewrite, incompatible schema, malformed indexed row, or
 SQLite read error triggers a full rebuild.
 
 `log --last N` uses a `(lane, reclaimed, ordinal)` SQLite index and reads only

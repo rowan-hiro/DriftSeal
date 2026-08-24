@@ -143,9 +143,9 @@ lane 不能改名或删除。`lane add` 打错的名字会一直出现在 `drift
 
 派生的 SQLite outcome index 放在 Git metadata（或自定义 seal 旁边）。它只是可以
 随时删除重建的 read model；`events.jsonl` 仍是唯一 canonical history。增量同步跟随
-`indexedThrough` 和 `indexedLines`，并用 source 的 prefix/tail hash 把 database
-绑定到对应 WAL。source 被改写、schema 不兼容、indexed row 损坏或 SQLite read
-失败时，DriftSeal 会全量重建。
+`indexedThrough` 和 `indexedLines`。未变化的 hot read 用 file identity 做常量时间
+校验；增量追赶前会校验此前全部 WAL prefix 的 checksum。source 被改写、schema
+不兼容、indexed row 损坏或 SQLite read 失败时，DriftSeal 会全量重建。
 
 `log --last N` 使用 `(lane, reclaimed, ordinal)` SQLite index，只读取命中的 outcome
 row，并补上其他 lane 的 open outcome。parked event 会依据 index 中保存的 committed
