@@ -1053,7 +1053,7 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
     if (!fs.existsSync(target)) return null;
     try {
       const index = openOutcomeIndex(target, { readOnly: true });
-      if (!index.integrityCheck() || !laneIndexMatchesFile(index.source(), wal, { exact: true })) {
+      if (!laneIndexMatchesFile(index.source(), wal, { exact: true })) {
         index.close();
         return null;
       }
@@ -1070,7 +1070,7 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
   try {
     index = openOutcomeIndex(target);
     const source = index.source();
-    if (!index.integrityCheck() || !laneIndexMatchesFile(source, wal)) {
+    if (!laneIndexMatchesFile(source, wal)) {
       index.close();
       return rebuildCommittedOutcomeIndex({ repairTail });
     }
