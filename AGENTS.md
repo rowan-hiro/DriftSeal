@@ -92,7 +92,7 @@ Commit `.seal/madr/` with the code.
 
 ## Cursor Cloud specific instructions
 
-DriftSeal is a dependency-light Node.js (CommonJS, `>=18`) CLI with **no build
+DriftSeal is a dependency-light Node.js (CommonJS, `>=22.13`) CLI with **no build
 step** and **no linter/formatter config**. The startup update script runs
 `npm install`; nothing else is required to develop.
 
@@ -101,7 +101,13 @@ step** and **no linter/formatter config**. The startup update script runs
   rather than assuming a hang.
 - **Static checks:** there is no ESLint/Prettier. Reuse the same static gate the
   repo's own DriftSeal verifiers use: `node --check bin/driftseal.js`,
-  `node --check bin/driftseal-mcp.js`, and `git diff --check`.
+  `node --check bin/driftseal-mcp.js`, `node --check lib/*.js`, and
+  `git diff --check`.
+- **Index benchmark:** `npm run benchmark:recent-log -- --quick` validates the
+  synthetic workload and SQLite query plan; omit `--quick` for the 10k-outcome
+  development benchmark and use `--large` for the 100k-outcome profile.
+- **Package smoke:** `npm run test:package` packs and installs the npm tarball,
+  then exercises the packaged SQLite-backed CLI.
 - **Run the CLI:** `node bin/driftseal.js <command>` always works from the repo
   root. `npm link` is also wired up so `driftseal` and `driftseal-mcp` are on
   `PATH` in this environment.

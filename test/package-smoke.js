@@ -44,6 +44,8 @@ try {
     'lib/outcome-fold.js',
     'lib/outcome-index-sqlite.js',
     'lib/sqlite-runtime.js',
+    'benchmark/recent-log.js',
+    'test/package-smoke.js',
   ]) {
     assert.equal(fs.existsSync(path.join(installed, file)), true, `${file} is packaged`);
   }

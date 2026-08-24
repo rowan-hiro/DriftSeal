@@ -35,7 +35,9 @@
     "index.js",
     "bin",
     "lib",
+    "benchmark",
     "skills",
+    "test/package-smoke.js",
     "README.md",
     "README.zh-CN.md",
     "LICENSE"

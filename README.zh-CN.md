@@ -33,7 +33,8 @@ DriftSeal v2 从“按步骤记录 intent”改为“按交付记录 outcome”�
 
 ## 安装
 
-DriftSeal 需要 Node.js 18 或更高版本。
+DriftSeal 需要 Node.js 22.13 或更高版本。派生 outcome index 使用 Node 内置的
+`node:sqlite`，不会安装 native database package。
 
 ```sh
 npm install --global driftseal
@@ -140,14 +141,19 @@ lane 不能改名或删除。`lane add` 打错的名字会一直出现在 `drift
 直到 `lane switch main` 或把该 lane 加回来。`log --last N` 在 open outcome 属于
 别的 lane 时，返回条数可以多于 N。
 
-派生的 lane index 缓存 fold 状态，放在 Git metadata（或自定义 seal 旁边）。
-增量重建跟随 `indexedThrough` 和 `indexedLines`；log 身份变化时全量重建。没有
-parked overlay 的 hot `log --last N` 会从当前 lane 已持久化的 head 沿反向链接读取，
-只走到取得 N 条可见 outcome 为止，再补上其他 lane 的 open outcome。重建、parked
-overlay、无界 log 和 `--all-lanes` 仍走完整 fold 路径。WAL byte range 保留给后续的
-随机访问格式；当前路径仍会解析完整的 JSON sidecar。index 可以重建，不会随 log
-一起提交。自定义 home 下的 sidecar 放在 `events.jsonl` 旁边；该目录在 Git worktree
-内时，由目录里的 `.gitignore` 忽略。
+派生的 SQLite outcome index 放在 Git metadata（或自定义 seal 旁边）。它只是可以
+随时删除重建的 read model；`events.jsonl` 仍是唯一 canonical history。增量同步跟随
+`indexedThrough` 和 `indexedLines`，并用 source 的 prefix/tail hash 把 database
+绑定到对应 WAL。source 被改写、schema 不兼容、integrity check 失败或 indexed row
+损坏时，DriftSeal 会全量重建。
+
+`log --last N` 使用 `(lane, reclaimed, ordinal)` SQLite index，只读取命中的 outcome
+row，并补上其他 lane 的 open outcome。parked event 会依据 index 中保存的 committed
+event identity 做定向 overlay，不再因此重扫 committed WAL。无锁读取遇到缺失或 stale
+database 时，会在内存中 fold canonical WAL，绝不会返回 stale index。保存的 WAL byte
+range 留给后续 projection 使用，但 recent-log lookup 不依赖它。database 可以重建，
+不会随 log 一起提交。自定义 home 下的 sidecar 放在 `events.jsonl` 旁边；该目录在 Git
+worktree 内时，由目录里的 `.gitignore` 忽略。
 
 ## Decision 与 MADR
 
@@ -304,8 +310,8 @@ resources 为：
   `absorb`，不要手改。
 - `.seal/madr/` 保存编号化 MADR。
 - `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
-- 当前 lane 与派生 lane index 对默认 repo seal 存在 Git metadata 里，对自定义 seal
-  则放在旁边（`outcomes/.current-lane` 与 `outcomes/.lane-index.json`）。自定义
+- 当前 lane 与派生 SQLite outcome index 对默认 repo seal 存在 Git metadata 里，对自定义 seal
+  则放在旁边（`outcomes/.current-lane` 与 `outcomes/.outcome-index.sqlite`）。自定义
   seal 在 Git worktree 内时，这些 sidecar 会被 gitignore。它们可以重建，不是
   committed WAL 的一部分。
 - advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
