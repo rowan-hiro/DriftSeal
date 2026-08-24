@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync, execSync, spawn } = require('node:child_process');
+const { execFileSync, execSync, spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -5801,6 +5801,69 @@ test('recent lane index rebuilds after assignment or sidecar loss and falls back
     /parked work/
   );
   repo.run(['end', '--status', 'abandoned', '--note', 'clear park']);
+});
+
+test('SQLite outcome index rebuilds after schema, row, or file corruption', () => {
+  const { dir, run } = setup();
+  run(['begin', 'recover indexed outcome']);
+  run(['end', '--status', 'abandoned', '--note', 'recover']);
+  const outcomeDir = path.join(dir, 'outcomes');
+  const indexFile = path.join(outcomeDir, '.outcome-index.sqlite');
+  const legacyFile = path.join(outcomeDir, '.lane-index.json');
+  fs.writeFileSync(legacyFile, '{"indexVersion":2}\n');
+  assert.match(run(['log', '--last', '1']), /recover indexed outcome/);
+  assert.equal(fs.existsSync(indexFile), true);
+  assert.equal(fs.existsSync(legacyFile), false);
+
+  let db = new DatabaseSync(indexFile);
+  db.exec('PRAGMA user_version = 999');
+  db.close();
+  assert.match(run(['log', '--last', '1']), /recover indexed outcome/);
+  db = new DatabaseSync(indexFile, { readOnly: true });
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  db.close();
+
+  db = new DatabaseSync(indexFile);
+  db.prepare("UPDATE outcomes SET record_json = '{broken'").run();
+  db.close();
+  assert.match(run(['log', '--last', '1']), /recover indexed outcome/);
+
+  fs.writeFileSync(indexFile, 'not a sqlite database');
+  assert.match(run(['log', '--last', '1']), /recover indexed outcome/);
+  assert.equal(sqliteIndexSnapshot(indexFile).outcomes.length, 1);
+});
+
+test('SQLite recent-log output matches a full WAL fold with a parked outcome', () => {
+  const repo = setupGitRepository('driftseal-sqlite-parity-');
+  repo.run(['begin', 'closed main work']);
+  repo.run(['end', '--status', 'abandoned', '--note', 'closed']);
+  repo.run(['lane', 'add', 'index']);
+  repo.run(['lane', 'switch', 'index']);
+  repo.run(['begin', 'parked indexed work']);
+
+  const indexed = repo.run(['log', '--last', '1'], {
+    env: { ...repo.env, _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1' },
+  });
+  const folded = repo.run(['log', '--last', '1'], {
+    env: { ...repo.env, _DRIFTSEAL_TEST_DISABLE_OUTCOME_INDEX: '1' },
+  });
+  assert.equal(indexed, folded);
+  repo.run(['end', '--status', 'abandoned', '--note', 'clear']);
+});
+
+test('node:sqlite warning filtering leaves unrelated warnings visible', () => {
+  const runtime = path.join(__dirname, '..', 'lib', 'sqlite-runtime.js');
+  const result = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `require(${JSON.stringify(runtime)}); process.emitWarning('keep this warning', 'Warning')`,
+    ],
+    { encoding: 'utf8' }
+  );
+  assert.equal(result.status, 0);
+  assert.doesNotMatch(result.stderr, /SQLite is an experimental feature/);
+  assert.match(result.stderr, /keep this warning/);
 });
 
 test('current lane is local to a git worktree', () => {

@@ -1045,6 +1045,7 @@ function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
 }
 
 function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFull = false } = {}) {
+  if (process.env._DRIFTSEAL_TEST_DISABLE_OUTCOME_INDEX === '1') return null;
   const wal = logFile();
   const target = laneIndexFile();
   if (!target) return null;
