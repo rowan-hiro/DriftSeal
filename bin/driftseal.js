@@ -1112,19 +1112,61 @@ function recordsFromOutcomeIndex(index) {
   return records;
 }
 
+function attachIndexedOverlay(index, committed, plan, { readOnly = false } = {}) {
+  const lanes = index.laneCatalog();
+  if (!plan || plan.alreadyCommitted || plan.records.length === 0) {
+    committed.lanes = lanes;
+    return committed;
+  }
+  if (!readOnly && plan.mappings.length > 0) writeJsonl(plan.park, plan.records);
+  const overlay = fold(plan.records.map((record) => record.event));
+  for (const record of overlay) {
+    let lane = lanes.get(record.lane);
+    if (!lane) {
+      const foldedLane = overlay.lanes.get(record.lane);
+      lane = {
+        name: record.lane,
+        description: foldedLane ? foldedLane.description : null,
+        addedAt: foldedLane ? foldedLane.addedAt : null,
+        inferred: foldedLane ? foldedLane.inferred === true : true,
+        head: null,
+        count: 0,
+        visible: 0,
+      };
+      lanes.set(record.lane, lane);
+    }
+    lane.count = (lane.count || 0) + 1;
+    if (!record.reclaimed) lane.visible = (lane.visible || 0) + 1;
+  }
+  const records = [...committed, ...overlay];
+  records.lanes = lanes;
+  return records;
+}
+
 function loadOutcomeView({ repairTail = false, readOnly = false } = {}) {
   const park = inProgressFile();
-  if (park && fs.existsSync(park)) {
-    const records = fold(readEvents({ repairTail, readOnly }));
-    return { index: null, records };
-  }
   const index = syncCommittedLaneIndex({ repairTail, readOnly });
   if (!index) {
     const records = fold(readEvents({ repairTail, readOnly }));
     return { index: null, records };
   }
   try {
-    return { index: null, records: recordsFromOutcomeIndex(index) };
+    const committed = index.queryAll();
+    if (!park || !fs.existsSync(park)) {
+      committed.lanes = index.laneCatalog();
+      return { index: null, records: committed };
+    }
+    const plan = planIndexedInProgressOverlay(index, park, { repairTail, readOnly });
+    if (plan && plan.alreadyCommitted && !readOnly) discardInProgressLog(park);
+    return {
+      index: null,
+      records: attachIndexedOverlay(index, committed, plan, { readOnly }),
+    };
+  } catch (error) {
+    if (readOnly && error && error.code === 'ENOENT') {
+      return { index: null, records: recordsFromOutcomeIndex(index) };
+    }
+    throw error;
   } finally {
     index.close();
   }
@@ -1210,24 +1252,34 @@ function indexedLaneSummary(state, name) {
 
 function tryLoadRecentOutcomeView(n, { includeReclaimed = false, repairTail = false, readOnly = false } = {}) {
   const park = inProgressFile();
-  if (park && fs.existsSync(park)) return null;
   let index = syncCommittedLaneIndex({ repairTail, readOnly });
   if (!index) return null;
-  try {
-    if (park && fs.existsSync(park)) return null;
-    const state = { lanes: index.laneCatalog() };
+  const query = () => {
+    const plan =
+      park && fs.existsSync(park)
+        ? planIndexedInProgressOverlay(index, park, { repairTail, readOnly })
+        : null;
+    if (plan && plan.alreadyCommitted && !readOnly) discardInProgressLog(park);
+    const overlayView = attachIndexedOverlay(index, [], plan, { readOnly });
+    const state = { lanes: overlayView.lanes };
     const { current, missing } = resolveCurrentLane(state);
-    const records = index.queryRecent(current, n, { includeReclaimed });
+    const committed = index.queryRecent(current, n, { includeReclaimed });
+    const records = selectLastLogRecords(
+      [...committed, ...overlayView],
+      current,
+      n
+    );
     return { state, records, current, missing };
+  };
+  try {
+    return query();
   } catch (error) {
+    if (readOnly && error && error.code === 'ENOENT') return null;
     index.close();
     index = null;
     if (readOnly) return null;
     index = syncCommittedLaneIndex({ repairTail, forceFull: true });
-    const state = { lanes: index.laneCatalog() };
-    const { current, missing } = resolveCurrentLane(state);
-    const records = index.queryRecent(current, n, { includeReclaimed });
-    return { state, records, current, missing };
+    return query();
   } finally {
     if (index) index.close();
   }
@@ -1312,6 +1364,27 @@ function planInProgressOverlay(committedEvents, park, { repairTail = false, read
   }
   const remapped = remapTheirsRecords(overlayRecords, committedEvents, new Map(), new Map());
   return { park, records: remapped.records, mappings: remapped.mappings, alreadyCommitted: false };
+}
+
+function planIndexedInProgressOverlay(index, park, { repairTail = false, readOnly = false } = {}) {
+  if (!park || !fs.existsSync(park)) return null;
+  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail, readOnly });
+  const overlayEvents = overlayRecords.map((record) => record.event);
+  if (overlayEvents.length === 0 || index.containsEventSequence(overlayEvents)) {
+    return { park, records: [], mappings: [], alreadyCommitted: true };
+  }
+  const remapped = remapTheirsRecords(
+    overlayRecords,
+    index.outcomeStartEvents(),
+    new Map(),
+    new Map()
+  );
+  return {
+    park,
+    records: remapped.records,
+    mappings: remapped.mappings,
+    alreadyCommitted: false,
+  };
 }
 
 function discardInProgressLog(park) {

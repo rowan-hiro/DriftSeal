@@ -5795,14 +5795,10 @@ test('recent lane index rebuilds after assignment or sidecar loss and falls back
   repo.run(['begin', 'parked work']);
   assert.match(repo.run(['log', '--last', '1']), /parked work/);
   assert.match(
-    repo.runFail([
-      'log',
-      '--last',
-      '1',
-    ], {
+    repo.run(['log', '--last', '1'], {
       env: { ...repo.env, _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1' },
-    }).stderr,
-    /fast path was not used/
+    }),
+    /parked work/
   );
   repo.run(['end', '--status', 'abandoned', '--note', 'clear park']);
 });
