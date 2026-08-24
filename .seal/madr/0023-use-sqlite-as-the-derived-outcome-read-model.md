@@ -32,3 +32,12 @@ Raise the runtime floor to Node.js 22.13 and use built-in node:sqlite for a disp
 * Node.js 18 and 20 are no longer supported
 * The derived index becomes a SQLite sidecar that can be deleted and rebuilt
 * Future filters and search projections can evolve through schema migrations and an OutcomeIndex API
+
+## Decision History
+
+<!-- driftseal-reconciliation: c4bb9611-b682-4a9c-bc49-5422c37f1851 -->
+### 2026-08-24T03:05:20.402Z — Outcome `2026-08-24-001`
+
+Status: Accepted → Accepted
+
+DriftSeal 3.0 uses built-in node:sqlite on Node.js 22.13+ for a reconstructable outcome read model. One canonical fold bulk-builds the database; WAL tails update affected rows transactionally; exact source and projection checks trigger safe rebuilds or canonical fallback.
