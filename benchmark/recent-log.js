@@ -78,6 +78,7 @@ function writeSyntheticWal() {
   }
   lines.push(
     event('lane_add', {
+      id: 'lane:focus',
       lane: 'focus',
       description: 'Benchmark focus lane',
       ts: '2026-01-02T00:00:00.000Z',
