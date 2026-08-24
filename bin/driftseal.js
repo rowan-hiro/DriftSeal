@@ -32,6 +32,15 @@ const { isDeepStrictEqual } = require('util');
 const { StringDecoder } = require('string_decoder');
 const { execFileSync, spawnSync } = require('child_process');
 const { version: PACKAGE_VERSION } = require('../package.json');
+const { createOutcomeFold } = require('../lib/outcome-fold.js');
+const {
+  OutcomeIndexError,
+  SqliteUnavailableError,
+  openOutcomeIndex,
+  removeIndexFiles,
+  temporaryIndexPath,
+} = require('../lib/outcome-index-sqlite.js');
+const { assertSupportedNode } = require('../lib/sqlite-runtime.js');
 
 const END_STATUSES = ['completed', 'partial', 'failed', 'abandoned'];
 const DECISION_STATUSES = [
@@ -52,10 +61,8 @@ const DEFAULT_LANE = 'main';
 const LANE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
 const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
 const CURRENT_LANE_GIT_PATH = 'driftseal-v2-current-lane';
-const LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
-const LANE_INDEX_VERSION = 1;
-const LANE_INDEX_PREFIX_BYTES = 8192;
-const LANE_INDEX_TAIL_BYTES = 64 * 1024;
+const LANE_INDEX_GIT_PATH = 'driftseal-v3-outcome-index.sqlite';
+const LEGACY_LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repair skipped)';
@@ -65,6 +72,12 @@ const VERIFICATION_OUTPUT_CHUNK_BYTES = 64 * 1024;
 const CAPTURE_OUTPUT_EDGE_CHARACTERS = 32 * 1024;
 const CAPTURE_OUTPUT_OMISSION = '\n... [driftseal captured output truncated] ...\n';
 const LOCAL_OUTCOME_PROVENANCE_FILE = '.driftseal-local-outcome.json';
+const outcomeFoldEngine = createOutcomeFold({
+  fail,
+  contentHash,
+  logVersion: LOG_VERSION,
+  defaultLane: DEFAULT_LANE,
+});
 
 class DriftSealError extends Error {
   constructor(message) {
@@ -594,11 +607,16 @@ function currentLaneFile() {
 
 function laneIndexFile() {
   if (isParkableOutcomeLog()) return worktreeMetadataFile(LANE_INDEX_GIT_PATH);
+  return path.join(logDir(), '.outcome-index.sqlite');
+}
+
+function legacyLaneIndexFile() {
+  if (isParkableOutcomeLog()) return worktreeMetadataFile(LEGACY_LANE_INDEX_GIT_PATH);
   return path.join(logDir(), '.lane-index.json');
 }
 
 function emptyLaneCatalog() {
-  return new Map([[DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null }]]);
+  return outcomeFoldEngine.emptyLaneCatalog();
 }
 
 function readCurrentLaneName() {
@@ -624,7 +642,15 @@ function ensureDerivedLaneSidecarIgnore() {
   const ignoreFile = path.join(logDir(), '.gitignore');
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
   let next = current;
-  for (const name of ['.current-lane', '.lane-index.json']) {
+  for (const name of [
+    '.current-lane',
+    '.lane-index.json',
+    '.outcome-index.sqlite',
+    '.outcome-index.sqlite-journal',
+    '.outcome-index.sqlite-wal',
+    '.outcome-index.sqlite-shm',
+    '..outcome-index.sqlite.*.tmp',
+  ]) {
     const present = next.split(/\r?\n/).some((line) => line.trim() === name);
     if (present) continue;
     if (next && !next.endsWith('\n')) next += '\n';
@@ -635,354 +661,83 @@ function ensureDerivedLaneSidecarIgnore() {
   atomicWriteFile(ignoreFile, next, 0o644);
 }
 
-function defaultLaneCatalogObject() {
-  return { [DEFAULT_LANE]: { name: DEFAULT_LANE, description: null, addedAt: null, head: null } };
-}
-
-function emptyLaneIndexState() {
-  return {
-    indexVersion: LANE_INDEX_VERSION,
-    source: {
-      indexedThrough: 0,
-      indexedLines: 0,
-      prefixHash: contentHash(''),
-      tailHash: contentHash(''),
-    },
-    lastBuild: 'full',
-    lanes: emptyLaneCatalog(),
-    order: [],
-    records: new Map(),
-    ranges: new Map(),
-    reconciliations: new Map(),
-  };
-}
-
-function hashFileRange(file, start, length) {
-  if (length <= 0) return contentHash('');
+function hashFilePrefix(file, length) {
+  const hash = crypto.createHash('sha256');
+  if (length <= 0) return hash.digest('hex');
   const fd = fs.openSync(file, 'r');
   try {
-    const buf = Buffer.alloc(length);
-    const read = fs.readSync(fd, buf, 0, length, start);
-    return crypto.createHash('sha256').update(buf.subarray(0, read)).digest('hex');
+    const buffer = Buffer.alloc(Math.min(1024 * 1024, length));
+    let position = 0;
+    while (position < length) {
+      const requested = Math.min(buffer.length, length - position);
+      const read = fs.readSync(fd, buffer, 0, requested, position);
+      if (read === 0) break;
+      hash.update(buffer.subarray(0, read));
+      position += read;
+    }
+    if (position !== length) return null;
+    return hash.digest('hex');
   } finally {
     fs.closeSync(fd);
   }
 }
 
 function laneIndexSourceIdentity(file, indexedThrough, indexedLines = 0) {
-  if (!fs.existsSync(file) || indexedThrough <= 0) {
+  if (!fs.existsSync(file)) {
     return {
       indexedThrough: 0,
       indexedLines: 0,
-      prefixHash: contentHash(''),
-      tailHash: contentHash(''),
+      walHash: contentHash(''),
+      device: null,
+      inode: null,
+      mtimeMs: null,
+      ctimeMs: null,
     };
   }
-  const prefix = Math.min(LANE_INDEX_PREFIX_BYTES, indexedThrough);
-  const tail = Math.min(LANE_INDEX_TAIL_BYTES, indexedThrough);
+  const stat = fs.statSync(file);
   return {
     indexedThrough,
     indexedLines,
-    prefixHash: hashFileRange(file, 0, prefix),
-    tailHash: hashFileRange(file, indexedThrough - tail, tail),
+    walHash: hashFilePrefix(file, indexedThrough),
+    device: Number(stat.dev),
+    inode: Number(stat.ino),
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
   };
 }
 
-function laneIndexMatchesFile(index, file) {
-  if (!index || index.indexVersion !== LANE_INDEX_VERSION) return false;
-  if (!Number.isSafeInteger(index.source?.indexedLines) || index.source.indexedLines < 0) return false;
-  if (!fs.existsSync(file)) return index.source.indexedThrough === 0;
-  const size = fs.statSync(file).size;
-  if (size < index.source.indexedThrough) return false;
-  const identity = laneIndexSourceIdentity(file, index.source.indexedThrough);
-  return (
-    identity.prefixHash === index.source.prefixHash &&
-    identity.tailHash === index.source.tailHash
-  );
-}
-
-function serializeLaneIndex(state) {
-  return {
-    indexVersion: state.indexVersion,
-    source: state.source,
-    lastBuild: state.lastBuild,
-    lanes: Object.fromEntries(
-      [...state.lanes.entries()].map(([name, lane]) => [
-        name,
-        { name, description: lane.description || null, addedAt: lane.addedAt || null, head: lane.head || null, inferred: lane.inferred === true },
-      ])
-    ),
-    order: [...state.order],
-    records: Object.fromEntries(state.records),
-    ranges: Object.fromEntries(state.ranges),
-    reconciliations: Object.fromEntries(state.reconciliations),
-  };
-}
-
-function deserializeLaneIndex(raw) {
-  if (!raw || raw.indexVersion !== LANE_INDEX_VERSION || !raw.source || !raw.records) return null;
-  const lanes = new Map();
-  for (const [name, lane] of Object.entries(raw.lanes || defaultLaneCatalogObject())) {
-    lanes.set(name, {
-      name,
-      description: lane.description || null,
-      addedAt: lane.addedAt || null,
-      head: lane.head || null,
-      inferred: lane.inferred === true,
-    });
+function laneIndexMatchesFile(source, file, { exact = false } = {}) {
+  if (
+    !source ||
+    typeof source.walHash !== 'string' ||
+    !Number.isSafeInteger(source.indexedLines) ||
+    source.indexedLines < 0
+  ) {
+    return false;
   }
-  if (!lanes.has(DEFAULT_LANE)) {
-    lanes.set(DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null });
+  if (!fs.existsSync(file)) return source.indexedThrough === 0;
+  const stat = fs.statSync(file);
+  const size = stat.size;
+  if (size < source.indexedThrough || (exact && size !== source.indexedThrough)) return false;
+  if (
+    source.device !== null &&
+    source.inode !== null &&
+    (Number(stat.dev) !== source.device || Number(stat.ino) !== source.inode)
+  ) {
+    return false;
   }
-  return {
-    indexVersion: LANE_INDEX_VERSION,
-    source: raw.source,
-    lastBuild: raw.lastBuild || 'full',
-    lanes,
-    order: Array.isArray(raw.order) ? [...raw.order] : [],
-    records: new Map(Object.entries(raw.records)),
-    ranges: new Map(Object.entries(raw.ranges || {})),
-    reconciliations: new Map(Object.entries(raw.reconciliations || {})),
-  };
-}
-
-function cloneLaneIndexState(state) {
-  return deserializeLaneIndex(serializeLaneIndex(state));
-}
-
-function linkLaneIndex(state) {
-  const heads = new Map();
-  for (const id of state.order) {
-    const rec = state.records.get(id);
-    rec.previous = heads.get(rec.lane) || null;
-    heads.set(rec.lane, id);
+  if (
+    size === source.indexedThrough &&
+    stat.mtimeMs === source.mtimeMs &&
+    stat.ctimeMs === source.ctimeMs
+  ) {
+    return true;
   }
-  for (const [name, lane] of state.lanes) {
-    lane.head = heads.get(name) || null;
-  }
-}
-
-function applyIndexedEvent(state, ev, startByte, endByte) {
-  if (ev.type === 'begin' || ev.type === 'import') {
-    state.ranges.set(ev.id, { firstByte: startByte, lastByte: endByte });
-  } else if (state.records.has(ev.id) || state.ranges.has(ev.id)) {
-    const range = state.ranges.get(ev.id) || { firstByte: startByte, lastByte: endByte };
-    range.lastByte = endByte;
-    state.ranges.set(ev.id, range);
-  }
-  applyFoldEvent(state, ev);
+  return hashFilePrefix(file, source.indexedThrough) === source.walHash;
 }
 
 function applyFoldEvent(state, ev) {
-  const { records, reconciliations, order, lanes } = state;
-  const ensureLane = (name) => {
-    if (lanes.has(name)) return;
-    lanes.set(name, { name, description: null, addedAt: null, head: null, inferred: true });
-  };
-  if (ev.type === 'begin') {
-    if (records.has(ev.id)) fail(`duplicate begin event for outcome id: ${ev.id}`);
-    const record = newOutcomeRecord(ev);
-    ensureLane(record.lane);
-    records.set(ev.id, record);
-    order.push(ev.id);
-    return;
-  }
-  if (ev.type === 'import') {
-    if (records.has(ev.id)) fail(`duplicate imported outcome id: ${ev.id}`);
-    const record = newOutcomeRecord({
-      ...ev,
-      ts: ev.beganAt,
-      acceptance: [],
-      verify: null,
-    });
-    ensureLane(record.lane);
-    record.status = ev.status;
-    record.tsEnd = ev.endedAt;
-    record.note = ev.summary || null;
-    record.reclaimed = ev.reclaimed === true;
-    record.reclaimReason = ev.reclaimReason || null;
-    record.reclaimedAt = ev.reclaimedAt || null;
-    record.imported = {
-      sourceIds: ev.sources.map((source) => source.id),
-      sourceFingerprint: ev.sourceFingerprint,
-      sources: ev.sources,
-    };
-    records.set(ev.id, record);
-    order.push(ev.id);
-    return;
-  }
-  if (ev.type === 'migration') return;
-  if (ev.type === 'lane_add') {
-    const existing = lanes.get(ev.lane);
-    if (existing && !existing.inferred) {
-      if (ev.description) existing.description = ev.description;
-      return;
-    }
-    lanes.set(ev.lane, {
-      name: ev.lane,
-      description: ev.description || null,
-      addedAt: ev.ts,
-      head: existing ? existing.head : null,
-      inferred: false,
-    });
-    return;
-  }
-  if (ev.type === 'lane_assign') {
-    const rec = records.get(ev.id);
-    if (!rec) fail(`lane assign references unknown outcome id: ${ev.id}`);
-    if (rec.status === 'in_progress') fail(`cannot assign lane of in_progress outcome ${ev.id}`);
-    ensureLane(ev.lane);
-    rec.lane = ev.lane;
-    return;
-  }
-  if (ev.type === 'extend') {
-    const rec = records.get(ev.id);
-    if (!rec) fail(`extension references unknown outcome id: ${ev.id}`);
-    if (rec.status !== 'in_progress') fail(`extension occurred after outcome ${ev.id} was closed`);
-    rec.extensions.push({
-      extension: ev.extension,
-      acceptance: ev.acceptance,
-      verify: ev.verify,
-      decisions: ev.decisions,
-      extendedAt: ev.ts,
-      head: ev.head || null,
-    });
-    rec.acceptance = [...new Set([...rec.acceptance, ...ev.acceptance])];
-    if (ev.verify) rec.verify = ev.verify;
-    rec.decisions = [...new Set([...rec.decisions, ...ev.decisions])];
-    rec.contractHash = outcomeContractHash(rec);
-    rec.verification = null;
-    rec.decisionUpdates = [];
-    return;
-  }
-  if (ev.type === 'verify') {
-    const rec = records.get(ev.id);
-    if (!rec) fail(`verification event references unknown outcome id: ${ev.id}`);
-    if (rec.status !== 'in_progress') fail(`verification occurred after outcome ${ev.id} was closed`);
-    if (rec.acceptance.length === 0 || !rec.verify) {
-      fail(`verification event references outcome ${ev.id} without acceptance criteria`);
-    }
-    if (ev.command !== rec.verify) fail(`verification command does not match outcome ${ev.id}`);
-    if (rec.logVersion === LOG_VERSION && ev.contractHash !== rec.contractHash) {
-      fail(`verification contract does not match outcome ${ev.id}`);
-    }
-    rec.verificationAttempts.push(ev);
-    rec.verification = ev;
-    return;
-  }
-  if (ev.type === 'reclaim' || ev.type === 'unreclaim') {
-    const rec = records.get(ev.id);
-    if (!rec) fail(`${ev.type} event references unknown outcome id: ${ev.id}`);
-    if (ev.type === 'reclaim') {
-      if (rec.status === 'in_progress') fail(`cannot reclaim outcome ${ev.id} while it is in_progress`);
-      if (rec.reclaimed) fail(`duplicate reclaim event for outcome id: ${ev.id}`);
-      rec.reclaimed = true;
-      rec.reclaimReason = ev.reason;
-      rec.reclaimedAt = ev.ts;
-    } else {
-      if (!rec.reclaimed) fail(`unreclaim event for outcome id that is not reclaimed: ${ev.id}`);
-      rec.reclaimed = false;
-      rec.reclaimReason = null;
-      rec.reclaimedAt = null;
-    }
-    return;
-  }
-  if (ev.type === 'end') {
-    const rec = records.get(ev.id);
-    if (!rec) fail(`end event references unknown outcome id: ${ev.id}`);
-    if (rec.status !== 'in_progress') fail(`duplicate end event for outcome id: ${ev.id}`);
-    const conflictingCancellation = rec.decisionTerminals.find(
-      (terminal) => terminal.type === 'decision_reconcile_cancel' && terminal.outcomeStatus !== ev.status
-    );
-    if (conflictingCancellation) {
-      fail(`outcome ${ev.id} was closed as ${ev.status} after reconciliation recovery was cancelled for ${conflictingCancellation.outcomeStatus}`);
-    }
-    if (
-      ['completed', 'partial'].includes(ev.status) &&
-      rec.decisions.length > 0 &&
-      ((rec.logVersion === 1 && rec.schemaVersion >= 2 && (ev.schemaVersion || 1) < 2) ||
-        rec.decisions.some((decisionId) => qualifyingDecisionUpdates(rec, decisionId).length === 0))
-    ) {
-      fail(`linked outcome ${ev.id} was closed without reconciling every declared decision`);
-    }
-    if (ev.status === 'completed' && rec.acceptance.length > 0) {
-      if (!rec.verification || !rec.verification.passed) {
-        fail(`acceptance-bound outcome ${ev.id} was completed without successful machine verification`);
-      }
-      if (
-        (rec.logVersion === 1 && (ev.schemaVersion || 1) < 4) ||
-        ev.verificationId !== rec.verification.verificationId ||
-        (ev.workspace ?? null) !== rec.verification.workspace ||
-        (rec.logVersion === LOG_VERSION &&
-          (ev.contractHash !== rec.contractHash || rec.verification.contractHash !== rec.contractHash))
-      ) {
-        fail(`acceptance-bound outcome ${ev.id} was completed with stale machine verification`);
-      }
-    }
-    rec.status = ev.status;
-    rec.tsEnd = ev.ts;
-    rec.note = ev.note || null;
-    rec.verifyResult = ev.verifyResult || null;
-    rec.endHead = ev.head || null;
-    return;
-  }
-  if (ev.type === 'decision_reconcile_prepare') {
-    const rec = records.get(ev.id);
-    if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
-    if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
-    if (!rec.decisions.includes(ev.decisionId)) fail(`decision reconciliation references unlinked decision ${ev.decisionId}`);
-    if (reconciliations.has(ev.reconciliationId)) fail(`duplicate reconciliation id: ${ev.reconciliationId}`);
-    rec.decisionPrepares.push(ev);
-    reconciliations.set(ev.reconciliationId, {
-      prepare: ev,
-      terminal: null,
-      contractHash: rec.contractHash,
-    });
-    return;
-  }
-  if (ev.type === 'decision_reconcile') {
-    const rec = records.get(ev.id);
-    if (!rec) fail(`decision reconciliation references unknown outcome id: ${ev.id}`);
-    if (rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
-    if (rec.logVersion === 1 && rec.schemaVersion >= 2) {
-      fail(`linked legacy schema-v2 outcome ${rec.id} contains a legacy decision reconciliation`);
-    }
-    rec.decisionUpdates.push(ev);
-    return;
-  }
-  if (
-    ev.type === 'decision_reconcile_commit' ||
-    ev.type === 'decision_reconcile_abort' ||
-    ev.type === 'decision_reconcile_cancel'
-  ) {
-    const rec = records.get(ev.id);
-    const reconciliation = reconciliations.get(ev.reconciliationId);
-    if (rec && rec.status !== 'in_progress') fail(`decision reconciliation occurred after outcome ${ev.id} was closed`);
-    if (!rec || !reconciliation || reconciliation.prepare.id !== ev.id || reconciliation.prepare.decisionId !== ev.decisionId) {
-      fail(`decision reconciliation terminal has no matching prepare: ${ev.reconciliationId}`);
-    }
-    if (reconciliation.terminal) fail(`decision reconciliation already has a terminal event: ${ev.reconciliationId}`);
-    const priorCancellation = rec.decisionTerminals.find((terminal) => terminal.type === 'decision_reconcile_cancel');
-    if (ev.type === 'decision_reconcile_cancel' && priorCancellation && priorCancellation.outcomeStatus !== ev.outcomeStatus) {
-      fail(`outcome ${ev.id} has conflicting reconciliation cancellation statuses`);
-    }
-    if (
-      ev.type === 'decision_reconcile_commit' &&
-      (reconciliation.prepare.newHash !== ev.fileHash ||
-        reconciliation.prepare.fromStatus !== ev.fromStatus ||
-        reconciliation.prepare.toStatus !== ev.toStatus)
-    ) {
-      fail(`decision reconciliation commit does not match prepare: ${ev.reconciliationId}`);
-    }
-    reconciliation.terminal = ev;
-    rec.decisionTerminals.push(ev);
-    if (
-      ev.type === 'decision_reconcile_commit' &&
-      reconciliation.contractHash === rec.contractHash
-    ) {
-      rec.decisionUpdates.push(ev);
-    }
-  }
+  return outcomeFoldEngine.applyFoldEvent(state, ev);
 }
 
 function consumeLogSlice(file, startByte, onEvent, { repairTail = false, readOnly = false, startLine = 0 } = {}) {
@@ -1039,111 +794,225 @@ function consumeLogSlice(file, startByte, onEvent, { repairTail = false, readOnl
       }
       onEvent(event, start, pos);
     } catch (err) {
-      if (err instanceof DriftSealError) throw err;
+      if (err instanceof DriftSealError || err instanceof OutcomeIndexError) throw err;
       fail(`corrupt log line ${lineNumber} in ${file}`);
     }
   }
   return { endByte: pos, endLine: lineNumber };
 }
 
-function persistLaneIndex(state, { readOnly = false } = {}) {
-  if (readOnly) return;
-  const file = laneIndexFile();
-  if (!file) return;
-  ensureDirectoryDurable(path.dirname(file));
-  ensureDerivedLaneSidecarIgnore();
-  atomicWriteFile(file, `${JSON.stringify(serializeLaneIndex(state))}\n`, 0o600);
+function replaceOutcomeIndexFile(temporary, target) {
+  try {
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    if (!['EEXIST', 'EPERM'].includes(error && error.code)) throw error;
+    removeIndexFiles(target);
+    fs.renameSync(temporary, target);
+  }
+  fs.chmodSync(target, 0o600);
+  for (const suffix of ['-journal', '-wal', '-shm']) {
+    fs.rmSync(`${target}${suffix}`, { force: true });
+  }
+  fsyncDirectory(path.dirname(target));
 }
 
-function loadPersistedLaneIndex() {
-  const file = laneIndexFile();
-  if (!file || !fs.existsSync(file)) return null;
+function removeLegacyLaneIndex() {
+  const legacy = legacyLaneIndexFile();
+  if (legacy) fs.rmSync(legacy, { force: true });
+}
+
+function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
+  const wal = logFile();
+  const target = laneIndexFile();
+  if (!target) return null;
+  ensureDirectoryDurable(path.dirname(target));
+  ensureDerivedLaneSidecarIgnore();
+  const temporary = temporaryIndexPath(target);
+  removeIndexFiles(temporary);
+  let index;
   try {
-    return deserializeLaneIndex(JSON.parse(fs.readFileSync(file, 'utf8')));
-  } catch {
-    return null;
+    index = openOutcomeIndex(temporary);
+    let slice;
+    index.transaction(() => {
+      const indexedEvents = [];
+      slice = consumeLogSlice(
+        wal,
+        0,
+        (event, startByte, endByte) =>
+          indexedEvents.push({ event, startByte, endByte }),
+        { repairTail }
+      );
+      index.replaceFromFoldState(
+        outcomeFoldEngine.foldState(indexedEvents.map((item) => item.event)),
+        indexedEvents
+      );
+      index.setSource(
+        laneIndexSourceIdentity(wal, slice.endByte, slice.endLine),
+        'full'
+      );
+      index.acceptProjection();
+    });
+    if (!index.integrityCheck()) fail('rebuilt SQLite outcome index failed integrity check');
+    index.close();
+    index = null;
+    replaceOutcomeIndexFile(temporary, target);
+    removeLegacyLaneIndex();
+    const reopened = openOutcomeIndex(target);
+    reopened.build = 'full';
+    return reopened;
+  } catch (error) {
+    if (index) index.close();
+    removeIndexFiles(temporary);
+    throw error;
   }
 }
 
-function syncCommittedLaneIndex({ repairTail = false, readOnly = false } = {}) {
-  const file = logFile();
-  let state = loadPersistedLaneIndex();
-  const canIncrement = state && laneIndexMatchesFile(state, file);
-  let indexedThrough = 0;
-  let indexedLines = 0;
-  if (!canIncrement) {
-    state = emptyLaneIndexState();
-    const slice = consumeLogSlice(file, 0, (event, start, end) => applyIndexedEvent(state, event, start, end), {
-      repairTail,
-      readOnly,
-    });
-    indexedThrough = slice.endByte;
-    indexedLines = slice.endLine;
-    state.lastBuild = 'full';
-  } else {
-    const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
-    if (size > state.source.indexedThrough) {
-      const slice = consumeLogSlice(
-        file,
-        state.source.indexedThrough,
-        (event, start, end) => applyIndexedEvent(state, event, start, end),
-        { repairTail, readOnly, startLine: state.source.indexedLines || 0 }
-      );
-      indexedThrough = slice.endByte;
-      indexedLines = slice.endLine;
-      state.lastBuild = 'incremental';
-    } else {
-      indexedThrough = size;
-      indexedLines = state.source.indexedLines || 0;
-      state.lastBuild = 'hot';
+function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFull = false } = {}) {
+  if (process.env._DRIFTSEAL_TEST_DISABLE_OUTCOME_INDEX === '1') return null;
+  const wal = logFile();
+  const target = laneIndexFile();
+  if (!target) return null;
+  if (readOnly) {
+    if (!fs.existsSync(target)) return null;
+    try {
+      const index = openOutcomeIndex(target, { readOnly: true });
+      if (
+        !index.projectionTrusted() ||
+        !laneIndexMatchesFile(index.source(), wal, { exact: true })
+      ) {
+        index.close();
+        return null;
+      }
+      index.build = 'hot';
+      return index;
+    } catch {
+      return null;
     }
   }
-  state.source = laneIndexSourceIdentity(file, indexedThrough, indexedLines);
-  linkLaneIndex(state);
-  if (state.lastBuild !== 'hot') persistLaneIndex(state, { readOnly });
-  return state;
+  if (forceFull || !fs.existsSync(target)) {
+    try {
+      return rebuildCommittedOutcomeIndex({ repairTail });
+    } catch (error) {
+      if (error instanceof SqliteUnavailableError) return null;
+      throw error;
+    }
+  }
+  let index;
+  try {
+    index = openOutcomeIndex(target);
+    const source = index.source();
+    if (!index.projectionTrusted() || !laneIndexMatchesFile(source, wal)) {
+      index.close();
+      return rebuildCommittedOutcomeIndex({ repairTail });
+    }
+    const size = fs.existsSync(wal) ? fs.statSync(wal).size : 0;
+    if (size === source.indexedThrough) {
+      index.build = 'hot';
+      removeLegacyLaneIndex();
+      return index;
+    }
+    let slice;
+    index.transaction(() => {
+      slice = consumeLogSlice(
+        wal,
+        source.indexedThrough,
+        (event, start, end) =>
+          index.applyEvent(event, start, end, { applyFoldEvent, defaultLane: DEFAULT_LANE }),
+        {
+          repairTail,
+          startLine: source.indexedLines || 0,
+        }
+      );
+      index.setSource(
+        laneIndexSourceIdentity(wal, slice.endByte, slice.endLine),
+        'incremental'
+      );
+      index.acceptProjection();
+    });
+    index.build = 'incremental';
+    removeLegacyLaneIndex();
+    return index;
+  } catch (error) {
+    if (index) index.close();
+    if (error instanceof DriftSealError) throw error;
+    if (error instanceof SqliteUnavailableError) return null;
+    return rebuildCommittedOutcomeIndex({ repairTail });
+  }
 }
 
-function applyOverlayToLaneIndex(state, overlayEvents) {
-  if (!overlayEvents || overlayEvents.length === 0) return state;
-  const next = cloneLaneIndexState(state);
-  for (const event of overlayEvents) applyFoldEvent(next, event);
-  linkLaneIndex(next);
-  return next;
-}
-
-function foldedRecordsFromLaneIndex(state) {
-  const records = state.order.map((id) => state.records.get(id)).filter(Boolean);
-  records.lanes = state.lanes;
+function attachIndexedOverlay(index, committed, plan, { readOnly = false } = {}) {
+  const lanes = index.laneCatalog();
+  if (!plan || plan.alreadyCommitted || plan.records.length === 0) {
+    committed.lanes = lanes;
+    return committed;
+  }
+  if (!readOnly && plan.mappings.length > 0) writeJsonl(plan.park, plan.records);
+  const overlay = fold(plan.records.map((record) => record.event));
+  for (const record of overlay) {
+    let lane = lanes.get(record.lane);
+    if (!lane) {
+      const foldedLane = overlay.lanes.get(record.lane);
+      lane = {
+        name: record.lane,
+        description: foldedLane ? foldedLane.description : null,
+        addedAt: foldedLane ? foldedLane.addedAt : null,
+        inferred: foldedLane ? foldedLane.inferred === true : true,
+        head: null,
+        count: 0,
+        visible: 0,
+      };
+      lanes.set(record.lane, lane);
+    }
+    lane.count = (lane.count || 0) + 1;
+    if (!record.reclaimed) lane.visible = (lane.visible || 0) + 1;
+  }
+  const records = [...committed, ...overlay];
+  records.lanes = lanes;
   return records;
 }
 
-function loadOutcomeView({ repairTail = false, readOnly = false } = {}) {
-  const committed = syncCommittedLaneIndex({ repairTail, readOnly });
-  const park = inProgressFile();
+function queryOutcomeView(index, park, { repairTail = false, readOnly = false } = {}) {
+  const committed = index.queryAll();
   if (!park || !fs.existsSync(park)) {
-    return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
+    committed.lanes = index.laneCatalog();
+    return { index: null, records: committed };
+  }
+  const plan = planIndexedInProgressOverlay(index, park, { repairTail, readOnly });
+  if (plan && plan.alreadyCommitted && !readOnly) discardInProgressLog(park);
+  return {
+    index: null,
+    records: attachIndexedOverlay(index, committed, plan, { readOnly }),
+  };
+}
+
+function recoverableOutcomeIndexError(error) {
+  return (
+    error instanceof OutcomeIndexError ||
+    /^SQLITE_|^ERR_SQLITE_/.test(String(error && error.code))
+  );
+}
+
+function loadOutcomeView({ repairTail = false, readOnly = false } = {}) {
+  const park = inProgressFile();
+  let index = syncCommittedLaneIndex({ repairTail, readOnly });
+  if (!index) {
+    const records = fold(readEvents({ repairTail, readOnly }));
+    return { index: null, records };
   }
   try {
-    const committedEvents = readJsonlRecordsFromFile(logFile(), { repairTail, readOnly }).map(
-      (record) => record.event
-    );
-    const overlay = planInProgressOverlay(committedEvents, park, { repairTail, readOnly });
-    if (!overlay || overlay.alreadyCommitted) {
-      if (overlay && overlay.alreadyCommitted && !readOnly) discardInProgressLog(park);
-      return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
+    return queryOutcomeView(index, park, { repairTail, readOnly });
+  } catch (error) {
+    index.close();
+    index = null;
+    if (readOnly && (error.code === 'ENOENT' || recoverableOutcomeIndexError(error))) {
+      return { index: null, records: fold(readEvents({ repairTail, readOnly })) };
     }
-    if (!readOnly && overlay.mappings.length > 0) writeJsonl(park, overlay.records);
-    const state = applyOverlayToLaneIndex(
-      committed,
-      overlay.records.map((record) => record.event)
-    );
-    return { state, records: foldedRecordsFromLaneIndex(state) };
-  } catch (err) {
-    if (readOnly && err && err.code === 'ENOENT') {
-      return { state: committed, records: foldedRecordsFromLaneIndex(committed) };
-    }
-    throw err;
+    if (!recoverableOutcomeIndexError(error)) throw error;
+    index = syncCommittedLaneIndex({ repairTail, forceFull: true });
+    if (!index) return { index: null, records: fold(readEvents({ repairTail })) };
+    return queryOutcomeView(index, park, { repairTail });
+  } finally {
+    if (index) index.close();
   }
 }
 
@@ -1211,6 +1080,53 @@ function selectLastLogRecords(records, current, n) {
   if (extras.length === 0) return clipped;
   const order = new Map(records.map((record, index) => [record.id, index]));
   return [...clipped, ...extras].sort((left, right) => order.get(left.id) - order.get(right.id));
+}
+
+function indexedLaneSummary(state, name) {
+  const lane = state.lanes.get(name);
+  return {
+    name,
+    description: lane ? lane.description : null,
+    addedAt: lane ? lane.addedAt : null,
+    inferred: Boolean(lane && lane.inferred),
+    visible: lane ? lane.visible : 0,
+    count: lane ? lane.count : 0,
+  };
+}
+
+function tryLoadRecentOutcomeView(n, { includeReclaimed = false, repairTail = false, readOnly = false } = {}) {
+  const park = inProgressFile();
+  let index = syncCommittedLaneIndex({ repairTail, readOnly });
+  if (!index) return null;
+  const query = () => {
+    const plan =
+      park && fs.existsSync(park)
+        ? planIndexedInProgressOverlay(index, park, { repairTail, readOnly })
+        : null;
+    if (plan && plan.alreadyCommitted && !readOnly) discardInProgressLog(park);
+    const overlayView = attachIndexedOverlay(index, [], plan, { readOnly });
+    const state = { lanes: overlayView.lanes };
+    const { current, missing } = resolveCurrentLane(state);
+    const committed = index.queryRecent(current, n, { includeReclaimed });
+    const records = selectLastLogRecords(
+      [...committed, ...overlayView],
+      current,
+      n
+    );
+    return { state, records, current, missing };
+  };
+  try {
+    return query();
+  } catch (error) {
+    if (readOnly && error && error.code === 'ENOENT') return null;
+    index.close();
+    index = null;
+    if (readOnly) return null;
+    index = syncCommittedLaneIndex({ repairTail, forceFull: true });
+    return query();
+  } finally {
+    if (index) index.close();
+  }
 }
 
 function liveWorktreeOutcomeLog() {
@@ -1292,6 +1208,27 @@ function planInProgressOverlay(committedEvents, park, { repairTail = false, read
   }
   const remapped = remapTheirsRecords(overlayRecords, committedEvents, new Map(), new Map());
   return { park, records: remapped.records, mappings: remapped.mappings, alreadyCommitted: false };
+}
+
+function planIndexedInProgressOverlay(index, park, { repairTail = false, readOnly = false } = {}) {
+  if (!park || !fs.existsSync(park)) return null;
+  const overlayRecords = readJsonlRecordsFromFile(park, { repairTail, readOnly });
+  const overlayEvents = overlayRecords.map((record) => record.event);
+  if (overlayEvents.length === 0 || index.containsEventSequence(overlayEvents)) {
+    return { park, records: [], mappings: [], alreadyCommitted: true };
+  }
+  const remapped = remapTheirsRecords(
+    overlayRecords,
+    index.outcomeStartEvents(),
+    new Map(),
+    new Map()
+  );
+  return {
+    park,
+    records: remapped.records,
+    mappings: remapped.mappings,
+    alreadyCommitted: false,
+  };
 }
 
 function discardInProgressLog(park) {
@@ -1867,77 +1804,20 @@ function withMutationLocks(resources, action, { tryWaitMs } = {}) {
 }
 
 function outcomeContractHash(record) {
-  return contentHash(JSON.stringify({
-    outcome: record.outcome,
-    extensions: record.extensions.map(({ extension, acceptance, verify, decisions }) => ({
-      extension,
-      acceptance,
-      verify,
-      decisions,
-    })),
-    acceptance: record.acceptance,
-    verify: record.verify,
-    decisions: record.decisions,
-  }));
+  return outcomeFoldEngine.outcomeContractHash(record);
 }
 
 function newOutcomeRecord(ev) {
-  const record = {
-    id: ev.id,
-    tsBegin: ev.ts,
-    outcome: ev.outcome,
-    extensions: [],
-    acceptance: Array.isArray(ev.acceptance) ? ev.acceptance : [],
-    verify: ev.verify || null,
-    beginHead: ev.head || null,
-    decisions: Array.isArray(ev.decisions) ? ev.decisions : [],
-    logVersion: ev.logVersion || 1,
-    schemaVersion: ev.schemaVersion || 1,
-    lane: ev.lane || DEFAULT_LANE,
-    decisionPrepares: [],
-    decisionTerminals: [],
-    decisionUpdates: [],
-    verificationAttempts: [],
-    verification: null,
-    status: 'in_progress',
-    tsEnd: null,
-    note: null,
-    verifyResult: null,
-    endHead: null,
-    reclaimed: false,
-    reclaimReason: null,
-    reclaimedAt: null,
-    imported: null,
-    contractHash: null,
-  };
-  record.contractHash = outcomeContractHash(record);
-  return record;
+  return outcomeFoldEngine.newOutcomeRecord(ev);
 }
 
 /** Fold the event stream into one record per outcome. Legacy v1 events are accepted for migration. */
 function fold(events) {
-  const state = {
-    records: new Map(),
-    reconciliations: new Map(),
-    order: [],
-    lanes: emptyLaneCatalog(),
-  };
-  for (const ev of events) applyFoldEvent(state, ev);
-  const folded = state.order.map((id) => state.records.get(id));
-  folded.lanes = state.lanes;
-  return folded;
+  return outcomeFoldEngine.fold(events);
 }
 
 function qualifyingDecisionUpdates(record, decisionId) {
-  return record.decisionUpdates.filter((update) => {
-    if (update.decisionId !== decisionId) return false;
-    if (record.logVersion === 1 && record.schemaVersion < 2) return true;
-    return (
-      update.type === 'decision_reconcile_commit' &&
-      (update.logVersion === LOG_VERSION || (update.schemaVersion || 1) >= 2) &&
-      typeof update.fileHash === 'string'
-    );
-  });
+  return outcomeFoldEngine.qualifyingDecisionUpdates(record, decisionId);
 }
 
 function openOutcome(records) {
@@ -6294,16 +6174,47 @@ const commands = {
       'all-lanes': 'boolean',
     }, 'log');
     if (positionals.length > 0) fail(usageFor('log'));
+    const n = flags.last === undefined ? null : positiveInteger(flags.last, '--last');
+    const allLanes = flags['all-lanes'] === true;
+    const parkedV1 = legacyParkedIntent();
+    if (
+      n !== null &&
+      !allLanes &&
+      !parkedV1 &&
+      process.env._DRIFTSEAL_TEST_DISABLE_RECENT_INDEX !== '1'
+    ) {
+      const recent = tryLoadRecentOutcomeView(n, {
+        includeReclaimed: flags.all === true,
+        repairTail: true,
+        readOnly,
+      });
+      if (recent) {
+        const { state, records, current, missing } = recent;
+        warnMissingCurrentLane(missing);
+        const customLanes = state.lanes.size > 1;
+        if (customLanes || current !== DEFAULT_LANE || missing) {
+          const summary = indexedLaneSummary(state, current);
+          printLine(`lane: ${current} (${summary.visible} visible / ${summary.count} in lane)`);
+        }
+        if (records.length === 0) {
+          printLine('log is empty');
+          return [];
+        }
+        printLine(records.map((record) => render(record, { currentLane: current })).join('\n\n'));
+        return records.map(publicOutcome);
+      }
+    }
+    if (process.env._DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX === '1' && n !== null && !allLanes) {
+      fail('recent lane index fast path was not used');
+    }
     const view = loadOutcomeView({ repairTail: true, readOnly });
     let records = view.records;
-    const parkedV1 = legacyParkedIntent();
     if (parkedV1 && !records.some((record) => record.id === parkedV1.id && record.status === 'in_progress')) {
       records = Object.assign([...records, parkedV1], { lanes: records.lanes });
     }
     const catalog = records.lanes || emptyLaneCatalog();
     const { current, missing } = resolveCurrentLane(view.records);
     warnMissingCurrentLane(missing);
-    const allLanes = flags['all-lanes'] === true;
     if (!allLanes) {
       records = Object.assign(selectLaneLogRecords(records, current), { lanes: catalog });
     }
@@ -6313,8 +6224,7 @@ const commands = {
       printLine(renderLaneLine(view.records, current));
     }
     let shown = visible;
-    if (flags.last) {
-      const n = positiveInteger(flags.last, '--last');
+    if (n !== null) {
       shown = selectLastLogRecords(visible, current, n);
     }
     if (shown.length === 0) {
@@ -7035,9 +6945,52 @@ function repositoryOutcomeLogFiles() {
   return files;
 }
 
+function indexedMigrationEvent(file) {
+  if (
+    canonicalPath(file) !== canonicalPath(logFile()) ||
+    !laneIndexFile() ||
+    !fs.existsSync(laneIndexFile())
+  ) {
+    return { usable: false, migration: null };
+  }
+  let index;
+  try {
+    index = openOutcomeIndex(laneIndexFile(), { readOnly: true });
+    const source = index.source();
+    if (!laneIndexMatchesFile(source, file)) {
+      return { usable: false, migration: null };
+    }
+    let migration = index.migrationEvent();
+    const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+    if (size > source.indexedThrough) {
+      consumeLogSlice(
+        file,
+        source.indexedThrough,
+        (event) => {
+          if (event.type === 'migration' && event.id === 'v1-to-v2') migration = event;
+        },
+        {
+          readOnly: true,
+          startLine: source.indexedLines || 0,
+        }
+      );
+    }
+    return { usable: true, migration };
+  } catch {
+    return { usable: false, migration: null };
+  } finally {
+    if (index) index.close();
+  }
+}
+
 function repositoryMigrationEvent() {
   for (const file of repositoryOutcomeLogFiles()) {
     try {
+      const indexed = indexedMigrationEvent(file);
+      if (indexed.usable) {
+        if (indexed.migration) return indexed.migration;
+        continue;
+      }
       const migration = findMigrationEvent(file);
       if (migration) return migration;
     } catch {
@@ -7305,6 +7258,7 @@ function repositoryRoot(root) {
 }
 
 function runCommand(argv, { root = process.cwd(), isolateStorage = false, capture = true } = {}) {
+  assertSupportedNode();
   if (!Array.isArray(argv) || argv.some((arg) => typeof arg !== 'string')) {
     fail('command arguments must be an array of strings');
   }
@@ -7365,6 +7319,7 @@ function appendFlag(argv, flag, value) {
 }
 
 function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
+  assertSupportedNode();
   const fixedRoot = repositoryRoot(root);
   let lastReadOnly = false;
   const call = (argv) => {
@@ -7501,6 +7456,7 @@ function createApi({ root = process.cwd(), isolateStorage = false } = {}) {
 
 function main() {
   try {
+    assertSupportedNode();
     const result = dispatch(process.argv.slice(2));
     process.exitCode = result.exitCode;
   } catch (err) {

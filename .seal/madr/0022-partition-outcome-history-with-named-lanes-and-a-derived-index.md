@@ -60,3 +60,17 @@ Duplicate lane_add last-writes the description instead of failing the fold. lane
 Status: Accepted → Accepted
 
 Heads, reverse links, and WAL byte ranges remain in the derived index for a seek path that is not consumed yet; incremental rebuild uses indexedThrough and indexedLines. Custom-home sidecar gitignore is written only when the WAL sits inside a Git worktree.
+
+<!-- driftseal-reconciliation: cf785e0f-42c1-49bf-b890-660ef98921ad -->
+### 2026-08-22T07:09:25.513Z — Outcome `2026-08-22-003`
+
+Status: Accepted → Accepted
+
+Hot log --last N now follows persisted lane heads and reverse links until it selects N visible outcomes, while parked overlays, unbounded logs, and all-lanes reads retain the full fold path. WAL byte ranges and compact random-access sidecars remain deferred.
+
+<!-- driftseal-reconciliation: ec5edafc-5589-4f8e-98dd-130c9acf0711 -->
+### 2026-08-24T03:05:20.495Z — Outcome `2026-08-24-001`
+
+Status: Accepted → Accepted
+
+Named lanes now use relational indexes over lane, reclaimed, status, and ordinal instead of persisted head/reverse-link JSON snapshots. Park overlays and migration preflight consume indexed committed facts; events.jsonl remains canonical.
