@@ -806,14 +806,17 @@ function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
     index = openOutcomeIndex(temporary);
     let slice;
     index.transaction(() => {
-      index.clear();
-      index.ensureLane(DEFAULT_LANE);
+      const indexedEvents = [];
       slice = consumeLogSlice(
         wal,
         0,
-        (event, start, end) =>
-          index.applyEvent(event, start, end, { applyFoldEvent, defaultLane: DEFAULT_LANE }),
+        (event, startByte, endByte) =>
+          indexedEvents.push({ event, startByte, endByte }),
         { repairTail }
+      );
+      index.replaceFromFoldState(
+        outcomeFoldEngine.foldState(indexedEvents.map((item) => item.event)),
+        indexedEvents
       );
       index.setSource(
         laneIndexSourceIdentity(wal, slice.endByte, slice.endLine),
