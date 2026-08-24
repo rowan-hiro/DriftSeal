@@ -72,6 +72,12 @@ const VERIFICATION_OUTPUT_CHUNK_BYTES = 64 * 1024;
 const CAPTURE_OUTPUT_EDGE_CHARACTERS = 32 * 1024;
 const CAPTURE_OUTPUT_OMISSION = '\n... [driftseal captured output truncated] ...\n';
 const LOCAL_OUTCOME_PROVENANCE_FILE = '.driftseal-local-outcome.json';
+const outcomeFoldEngine = createOutcomeFold({
+  fail,
+  contentHash,
+  logVersion: LOG_VERSION,
+  defaultLane: DEFAULT_LANE,
+});
 
 class DriftSealError extends Error {
   constructor(message) {
@@ -610,9 +616,7 @@ function legacyLaneIndexFile() {
 }
 
 function emptyLaneCatalog() {
-  return new Map([
-    [DEFAULT_LANE, { name: DEFAULT_LANE, description: null, addedAt: null, head: null, count: 0, visible: 0 }],
-  ]);
+  return outcomeFoldEngine.emptyLaneCatalog();
 }
 
 function readCurrentLaneName() {
@@ -695,6 +699,10 @@ function laneIndexMatchesFile(source, file, { exact = false } = {}) {
 }
 
 function applyFoldEvent(state, ev) {
+  return outcomeFoldEngine.applyFoldEvent(state, ev);
+}
+
+function legacyApplyFoldEvent(state, ev) {
   const { records, reconciliations, order, lanes } = state;
   const ensureLane = (name) => {
     if (lanes.has(name)) return;
@@ -1879,77 +1887,20 @@ function withMutationLocks(resources, action, { tryWaitMs } = {}) {
 }
 
 function outcomeContractHash(record) {
-  return contentHash(JSON.stringify({
-    outcome: record.outcome,
-    extensions: record.extensions.map(({ extension, acceptance, verify, decisions }) => ({
-      extension,
-      acceptance,
-      verify,
-      decisions,
-    })),
-    acceptance: record.acceptance,
-    verify: record.verify,
-    decisions: record.decisions,
-  }));
+  return outcomeFoldEngine.outcomeContractHash(record);
 }
 
 function newOutcomeRecord(ev) {
-  const record = {
-    id: ev.id,
-    tsBegin: ev.ts,
-    outcome: ev.outcome,
-    extensions: [],
-    acceptance: Array.isArray(ev.acceptance) ? ev.acceptance : [],
-    verify: ev.verify || null,
-    beginHead: ev.head || null,
-    decisions: Array.isArray(ev.decisions) ? ev.decisions : [],
-    logVersion: ev.logVersion || 1,
-    schemaVersion: ev.schemaVersion || 1,
-    lane: ev.lane || DEFAULT_LANE,
-    decisionPrepares: [],
-    decisionTerminals: [],
-    decisionUpdates: [],
-    verificationAttempts: [],
-    verification: null,
-    status: 'in_progress',
-    tsEnd: null,
-    note: null,
-    verifyResult: null,
-    endHead: null,
-    reclaimed: false,
-    reclaimReason: null,
-    reclaimedAt: null,
-    imported: null,
-    contractHash: null,
-  };
-  record.contractHash = outcomeContractHash(record);
-  return record;
+  return outcomeFoldEngine.newOutcomeRecord(ev);
 }
 
 /** Fold the event stream into one record per outcome. Legacy v1 events are accepted for migration. */
 function fold(events) {
-  const state = {
-    records: new Map(),
-    reconciliations: new Map(),
-    order: [],
-    lanes: emptyLaneCatalog(),
-  };
-  for (const ev of events) applyFoldEvent(state, ev);
-  const folded = state.order.map((id) => state.records.get(id));
-  folded.lanes = state.lanes;
-  return folded;
+  return outcomeFoldEngine.fold(events);
 }
 
 function qualifyingDecisionUpdates(record, decisionId) {
-  return record.decisionUpdates.filter((update) => {
-    if (update.decisionId !== decisionId) return false;
-    if (record.logVersion === 1 && record.schemaVersion < 2) return true;
-    return (
-      update.type === 'decision_reconcile_commit' &&
-      (update.logVersion === LOG_VERSION || (update.schemaVersion || 1) >= 2) &&
-      typeof update.fileHash === 'string'
-    );
-  });
+  return outcomeFoldEngine.qualifyingDecisionUpdates(record, decisionId);
 }
 
 function openOutcome(records) {

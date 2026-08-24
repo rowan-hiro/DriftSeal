@@ -7,8 +7,30 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { DatabaseSync } = require('../lib/sqlite-runtime.js');
 
 const DRIFTSEAL = path.join(__dirname, '..', 'bin', 'driftseal.js');
+
+function sqliteIndexSnapshot(file) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    const metadata = Object.fromEntries(
+      db
+        .prepare('SELECT key, value FROM meta')
+        .all()
+        .map((row) => [row.key, JSON.parse(row.value)])
+    );
+    const lanes = db.prepare('SELECT * FROM lanes ORDER BY name').all();
+    const outcomes = db
+      .prepare(
+        'SELECT id, ordinal, lane, status, reclaimed, first_byte, last_byte FROM outcomes ORDER BY ordinal'
+      )
+      .all();
+    return { metadata, lanes, outcomes };
+  } finally {
+    db.close();
+  }
+}
 
 function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-test-'));
@@ -5666,11 +5688,12 @@ test('the derived lane index incrementally follows WAL growth and rebuilds after
   run(['begin', 'first']);
   run(['end', '--status', 'abandoned', '--note', 'one']);
   run(['log']);
-  const indexFile = path.join(dir, 'outcomes', '.lane-index.json');
+  const indexFile = path.join(dir, 'outcomes', '.outcome-index.sqlite');
   assert.equal(fs.existsSync(indexFile), true);
-  const first = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-  assert.equal(first.lastBuild, 'full');
-  assert.ok(first.lanes.main.head);
+  const first = sqliteIndexSnapshot(indexFile);
+  assert.equal(first.metadata.lastBuild, 'full');
+  assert.equal(first.outcomes.length, 1);
+  assert.equal(first.outcomes[0].lane, 'main');
 
   run(['lane', 'add', 'index']);
   run(['lane', 'switch', 'index']);
@@ -5679,23 +5702,25 @@ test('the derived lane index incrementally follows WAL growth and rebuilds after
     run(['end', '--status', 'abandoned', '--note', `n${i}`]);
   }
   run(['log']);
-  const second = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-  assert.equal(second.lastBuild, 'incremental');
-  assert.ok(second.source.indexedThrough > first.source.indexedThrough);
-  assert.ok(second.ranges[second.lanes.index.head]);
-  assert.equal(typeof second.ranges[second.lanes.index.head].firstByte, 'number');
+  const second = sqliteIndexSnapshot(indexFile);
+  assert.equal(second.metadata.lastBuild, 'incremental');
+  assert.ok(
+    second.metadata.source.indexedThrough > first.metadata.source.indexedThrough
+  );
+  assert.equal(second.outcomes.at(-1).lane, 'index');
+  assert.equal(typeof second.outcomes.at(-1).first_byte, 'number');
 
   fs.unlinkSync(indexFile);
   assert.match(run(['log']), /index work 7/);
-  const rebuilt = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-  assert.equal(rebuilt.lastBuild, 'full');
-  assert.equal(rebuilt.lanes.index.head, second.lanes.index.head);
+  const rebuilt = sqliteIndexSnapshot(indexFile);
+  assert.equal(rebuilt.metadata.lastBuild, 'full');
+  assert.equal(rebuilt.outcomes.at(-1).id, second.outcomes.at(-1).id);
 
   const prefix = fs.readFileSync(path.join(dir, 'outcomes', 'events.jsonl'));
   fs.writeFileSync(path.join(dir, 'outcomes', 'events.jsonl'), Buffer.concat([Buffer.from('\n'), prefix]));
   assert.match(run(['log', '--all-lanes']), /first/);
-  const afterRewrite = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
-  assert.equal(afterRewrite.lastBuild, 'full');
+  const afterRewrite = sqliteIndexSnapshot(indexFile);
+  assert.equal(afterRewrite.metadata.lastBuild, 'full');
 });
 
 test('log --last walks only the visible tail of the current lane index', () => {
@@ -5723,7 +5748,6 @@ test('log --last walks only the visible tail of the current lane index', () => {
     DRIFTSEAL_HOME: dir,
     DRIFTSEAL_DECISION_HOME: path.join(dir, 'madr'),
     _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1',
-    _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '4',
   };
   const recent = run(['log', '--last', '3'], { env });
   assert.match(recent, /main work 2/);
@@ -5733,7 +5757,6 @@ test('log --last walks only the visible tail of the current lane index', () => {
   assert.doesNotMatch(recent, /hidden main work/);
   assert.doesNotMatch(recent, /unrelated work/);
 
-  env._DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS = '3';
   const withReclaimed = run(['log', '--all', '--last', '3'], { env });
   assert.doesNotMatch(withReclaimed, /main work 2/);
   assert.match(withReclaimed, /main work 3/);
@@ -5757,17 +5780,16 @@ test('recent lane index rebuilds after assignment or sidecar loss and falls back
     DRIFTSEAL_HOME: dir,
     DRIFTSEAL_DECISION_HOME: path.join(dir, 'madr'),
     _DRIFTSEAL_TEST_REQUIRE_RECENT_INDEX: '1',
-    _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '2',
   };
   const assigned = run(['log', '--last', '2'], { env });
   assert.match(assigned, /move me/);
   assert.match(assigned, /existing index work/);
 
-  const indexFile = path.join(dir, 'outcomes', '.lane-index.json');
+  const indexFile = path.join(dir, 'outcomes', '.outcome-index.sqlite');
   fs.unlinkSync(indexFile);
-  assert.match(run(['log', '--last', '1'], { env: { ...env, _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '1' } }), /existing index work/);
+  assert.match(run(['log', '--last', '1'], { env }), /existing index work/);
   fs.writeFileSync(indexFile, '{broken\n');
-  assert.match(run(['log', '--last', '1'], { env: { ...env, _DRIFTSEAL_TEST_MAX_RECENT_INDEX_VISITS: '1' } }), /existing index work/);
+  assert.match(run(['log', '--last', '1'], { env }), /existing index work/);
 
   const repo = setupGitRepository('driftseal-recent-park-');
   repo.run(['begin', 'parked work']);
@@ -5826,7 +5848,7 @@ test('an outcome that names a missing lane still reads and can be repaired', () 
   const logPath = path.join(dir, 'outcomes', 'events.jsonl');
   const kept = events().filter((event) => event.type !== 'lane_add');
   fs.writeFileSync(logPath, `${kept.map(JSON.stringify).join('\n')}\n`);
-  fs.rmSync(path.join(dir, 'outcomes', '.lane-index.json'), { force: true });
+  fs.rmSync(path.join(dir, 'outcomes', '.outcome-index.sqlite'), { force: true });
 
   assert.match(run(['status']), /no outcome in progress/);
   assert.match(run(['log']), /index work/);
@@ -5897,7 +5919,7 @@ test('custom-home lane sidecars are gitignored next to the WAL', () => {
   run(['log']);
   const ignore = fs.readFileSync(path.join(dir, 'outcomes', '.gitignore'), 'utf8');
   assert.match(ignore, /^\.current-lane$/m);
-  assert.match(ignore, /^\.lane-index\.json$/m);
+  assert.match(ignore, /^\.outcome-index\.sqlite$/m);
 });
 
 test('non-git custom-home lane sidecars are not gitignored', () => {
@@ -5905,7 +5927,7 @@ test('non-git custom-home lane sidecars are not gitignored', () => {
   run(['lane', 'add', 'index']);
   run(['log']);
   assert.equal(fs.existsSync(path.join(dir, 'outcomes', '.gitignore')), false);
-  assert.equal(fs.existsSync(path.join(dir, 'outcomes', '.lane-index.json')), true);
+  assert.equal(fs.existsSync(path.join(dir, 'outcomes', '.outcome-index.sqlite')), true);
 });
 
 test('incremental WAL errors report the file line number', () => {
@@ -5927,7 +5949,7 @@ test('a duplicate lane_add still folds and last description wins', () => {
     logPath,
     `${JSON.stringify({ ...add, ts: new Date().toISOString(), description: 'second' })}\n`
   );
-  fs.rmSync(path.join(dir, 'outcomes', '.lane-index.json'), { force: true });
+  fs.rmSync(path.join(dir, 'outcomes', '.outcome-index.sqlite'), { force: true });
   assert.match(run(['status']), /no outcome in progress/);
   assert.match(run(['lane']), /second/);
   assert.match(run(['lane', 'switch', 'index']), /switched to lane index/);
@@ -5942,7 +5964,7 @@ test('a lane_assign that names a missing lane still folds', () => {
   const logPath = path.join(dir, 'outcomes', 'events.jsonl');
   const kept = events().filter((event) => event.type !== 'lane_add');
   fs.writeFileSync(logPath, `${kept.map(JSON.stringify).join('\n')}\n`);
-  fs.rmSync(path.join(dir, 'outcomes', '.lane-index.json'), { force: true });
+  fs.rmSync(path.join(dir, 'outcomes', '.outcome-index.sqlite'), { force: true });
   assert.match(run(['status']), /no outcome in progress/);
   assert.match(run(['log', '--all-lanes']), /assigned work/);
   assert.match(run(['lane']), /index/);
