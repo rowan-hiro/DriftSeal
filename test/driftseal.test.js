@@ -5822,7 +5822,7 @@ test('SQLite outcome index rebuilds after schema, row, or file corruption', () =
   db.close();
   assert.match(run(['log', '--last', '1']), /recover indexed outcome/);
   db = new DatabaseSync(indexFile, { readOnly: true });
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
   db.close();
 
   db = new DatabaseSync(indexFile);
