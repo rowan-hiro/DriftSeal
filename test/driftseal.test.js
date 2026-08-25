@@ -5958,7 +5958,8 @@ test('commands fall back to the canonical WAL when node:sqlite is unavailable', 
     DRIFTSEAL_DECISION_HOME: path.join(dir, 'madr'),
     _DRIFTSEAL_TEST_DISABLE_SQLITE: '1',
   };
-  assert.match(run(['--version'], { env }), /^3\.0\.0/);
+  const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(run(['--version'], { env }), `${metadata.version}\n`);
   assert.match(run(['log', '--last', '1'], { env }), /sqlite optional read model/);
   assert.equal(
     fs.existsSync(path.join(dir, 'outcomes', '.outcome-index.sqlite')),
