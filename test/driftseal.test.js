@@ -1425,8 +1425,8 @@ test('hook in a repository without any outcome log creates no directories', () =
 
   assert.equal(run(['hook', 'prompt'], { cwd: nested }), '');
   assert.equal(run(['hook', 'stop'], { cwd: nested }), '');
-  assert.equal(fs.existsSync(path.join(cwd, '.seal/outcomes')), false);
-  assert.equal(fs.existsSync(path.join(nested, '.seal/outcomes')), false);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal/outcomes', 'events.jsonl')), false);
+  assert.equal(fs.existsSync(path.join(nested, '.seal')), false);
 });
 
 test('normal lock release failures make the mutation fail visibly', () => {
