@@ -342,11 +342,11 @@ MADR tools, and the three migration tools. Resources are:
   DriftSeal; use `reclaim`, `unreclaim`, `lane`, and `absorb` instead of manual edits.
 - `.seal/madr/` stores numbered MADR documents.
 - `$DRIFTSEAL_HOME` replaces the `.seal` root.
-- The current lane lives in Git metadata for a default repository seal, or
-  beside a custom seal (`outcomes/.current-lane`). The derived SQLite outcome
-  index always sits next to the WAL (`outcomes/.outcome-index.sqlite`). When that
-  directory is inside a Git worktree, the index sidecars are gitignored. They
-  are reconstructable and are not part of the committed WAL.
+- The current lane and derived SQLite outcome index sit next to the WAL
+  (`outcomes/.current-lane` and `outcomes/.outcome-index.sqlite`). When that
+  directory is inside a Git worktree, those sidecars are gitignored. Each
+  worktree keeps its own ignored copies. They are reconstructable and are not
+  part of the committed WAL.
 - Advisory hooks remind agents about lifecycle state but never broaden the
   repository's `AGENTS.md` policy.
 

@@ -312,10 +312,10 @@ resources 为：
   `absorb`，不要手改。
 - `.seal/madr/` 保存编号化 MADR。
 - `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
-- 当前 lane 对默认 repo seal 存在 Git metadata 里，对自定义 seal 则放在旁边
-  （`outcomes/.current-lane`）。派生 SQLite outcome index 一律放在 WAL 旁边
-  （`outcomes/.outcome-index.sqlite`）。该目录在 Git worktree 内时，index sidecar
-  会被 gitignore。它们可以重建，不是 committed WAL 的一部分。
+- 当前 lane 与派生 SQLite outcome index 都放在 WAL 旁边（`outcomes/.current-lane`
+  与 `outcomes/.outcome-index.sqlite`）。该目录在 Git worktree 内时，这些 sidecar
+  会被 gitignore。每个 worktree 各自保留一份 ignored 副本。它们可以重建，不是
+  committed WAL 的一部分。
 - advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
 
 DriftSeal 不会替你判断 verification command 是否安全，也不会判断测试本身是否充分。

@@ -601,8 +601,14 @@ function worktreeMetadataFile(gitPath, cwd = process.cwd()) {
 }
 
 function currentLaneFile() {
-  if (isParkableOutcomeLog()) return worktreeMetadataFile(CURRENT_LANE_GIT_PATH);
+  // Keep the worktree-local pointer beside the WAL so agent sandboxes that
+  // deny .git writes can still switch lanes.
   return path.join(logDir(), '.current-lane');
+}
+
+function retiredGitMetadataCurrentLaneFile() {
+  if (!isParkableOutcomeLog()) return null;
+  return worktreeMetadataFile(CURRENT_LANE_GIT_PATH);
 }
 
 function laneIndexFile() {
@@ -625,12 +631,19 @@ function emptyLaneCatalog() {
   return outcomeFoldEngine.emptyLaneCatalog();
 }
 
-function readCurrentLaneName() {
-  const file = currentLaneFile();
-  if (!file || !fs.existsSync(file)) return DEFAULT_LANE;
+function readLaneNameFromFile(file) {
+  if (!file || !fs.existsSync(file)) return null;
   const name = fs.readFileSync(file, 'utf8').trim();
-  if (!name) return DEFAULT_LANE;
+  if (!name) return null;
   return normalizeLaneName(name);
+}
+
+function readCurrentLaneName() {
+  return (
+    readLaneNameFromFile(currentLaneFile()) ||
+    readLaneNameFromFile(retiredGitMetadataCurrentLaneFile()) ||
+    DEFAULT_LANE
+  );
 }
 
 function writeCurrentLaneName(name, { readOnly = false } = {}) {
@@ -640,6 +653,8 @@ function writeCurrentLaneName(name, { readOnly = false } = {}) {
   ensureDirectoryDurable(path.dirname(file));
   ensureDerivedLaneSidecarIgnore();
   atomicWriteFile(file, `${name}\n`, 0o600);
+  const retired = retiredGitMetadataCurrentLaneFile();
+  if (retired) fs.rmSync(retired, { force: true });
 }
 
 function existingAncestor(dir) {

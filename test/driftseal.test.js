@@ -6089,6 +6089,44 @@ test('custom-home lane sidecars are gitignored next to the WAL', () => {
   assert.match(ignore, /^\.\.outcome-index\.sqlite\.\*\.tmp$/m);
 });
 
+test('default repo seals keep the current lane beside the WAL', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-default-lane-pointer-');
+  git(['add', ...PROTOCOL_TRACKED]);
+  git(['commit', '-m', 'base']);
+  run(['lane', 'add', 'index']);
+  run(['lane', 'switch', 'index']);
+  const laneFile = path.join(cwd, '.seal', 'outcomes', '.current-lane');
+  const gitMetadataLane = path.resolve(
+    cwd,
+    git(['rev-parse', '--git-path', 'driftseal-v2-current-lane']).trim()
+  );
+  assert.equal(fs.readFileSync(laneFile, 'utf8').trim(), 'index');
+  assert.equal(fs.existsSync(gitMetadataLane), false);
+  const status = git(['status', '--short', '--', '.seal/outcomes']);
+  assert.doesNotMatch(status, /\.current-lane/);
+});
+
+test('a leftover Git-metadata current-lane file is read then removed on write', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-retire-git-lane-');
+  git(['add', ...PROTOCOL_TRACKED]);
+  git(['commit', '-m', 'base']);
+  run(['lane', 'add', 'index']);
+  const gitMetadataLane = path.resolve(
+    cwd,
+    git(['rev-parse', '--git-path', 'driftseal-v2-current-lane']).trim()
+  );
+  fs.mkdirSync(path.dirname(gitMetadataLane), { recursive: true });
+  fs.writeFileSync(gitMetadataLane, 'index\n');
+  assert.match(run(['lane']), /current lane: index/);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal', 'outcomes', '.current-lane')), false);
+  run(['lane', 'switch', 'main']);
+  assert.equal(fs.existsSync(gitMetadataLane), false);
+  assert.equal(
+    fs.readFileSync(path.join(cwd, '.seal', 'outcomes', '.current-lane'), 'utf8').trim(),
+    'main'
+  );
+});
+
 test('default repo seals keep the SQLite index beside the WAL', () => {
   const { cwd, git, run } = setupGitRepository('driftseal-default-index-');
   git(['add', ...PROTOCOL_TRACKED]);
