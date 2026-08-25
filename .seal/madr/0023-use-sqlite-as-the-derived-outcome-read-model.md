@@ -62,3 +62,10 @@ Retired Git-metadata SQLite cleanup is best-effort after adopting a leftover dat
 Status: Accepted → Accepted
 
 Index persistence inside a Git worktree requires the complete WAL-directory ignore contract, including atomic temp names for lane, park, and provenance sidecars. status and log fold instead of planting or upgrading that file.
+
+<!-- driftseal-reconciliation: f464ee28-dad8-4e69-a687-40574abf711c -->
+### 2026-08-25T07:03:13.478Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Confirmed: index persistence still requires the complete ignore contract, and absorb only upgrades that file when writing the current v2 WAL.

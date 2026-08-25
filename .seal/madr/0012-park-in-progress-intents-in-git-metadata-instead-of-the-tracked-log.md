@@ -63,3 +63,10 @@ Park the open outcome beside the WAL at outcomes/.in-progress.jsonl, not in Git 
 Status: Accepted → Accepted
 
 Title and chosen option now name the WAL-adjacent park sidecar. Open outcomes in a default Git-repository seal stay in outcomes/.in-progress.jsonl; custom homes still write the WAL directly.
+
+<!-- driftseal-reconciliation: 48c65dba-c4fe-4026-8393-c24d84700635 -->
+### 2026-08-25T07:03:13.403Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Confirmed: default Git-repository seals park beside the WAL; absorb does not plant that ignore contract onto a v1 intent-log merge.
