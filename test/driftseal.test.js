@@ -286,10 +286,12 @@ function protocolV12(content) {
     );
 }
 
+const PROTOCOL_TRACKED = ['.gitattributes', 'AGENTS.md', '.seal/outcomes/.gitignore'];
+
 /** A committed repository whose open outcomes are parked in Git metadata. */
 function setupParkedRepository(prefix) {
   const repo = setupGitRepository(prefix);
-  repo.git(['add', '.gitattributes', 'AGENTS.md']);
+  repo.git(['add', ...PROTOCOL_TRACKED]);
   repo.git(['commit', '-m', 'base protocol']);
   const park = path.resolve(
     repo.cwd,
@@ -5132,7 +5134,7 @@ test('absorb --git performs a 3-way merge and init installs the driver', () => {
 
 test('begin parks an open outcome so git merge does not need a log-only commit', () => {
   const { cwd, git, run } = setupGitRepository('driftseal-git-park-begin-');
-  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['add', ...PROTOCOL_TRACKED]);
   git(['commit', '-m', 'base protocol']);
 
   run(['begin', 'shared']);
@@ -6089,7 +6091,7 @@ test('custom-home lane sidecars are gitignored next to the WAL', () => {
 
 test('default repo seals keep the SQLite index beside the WAL', () => {
   const { cwd, git, run } = setupGitRepository('driftseal-default-index-');
-  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['add', ...PROTOCOL_TRACKED]);
   git(['commit', '-m', 'base']);
   run(['begin', 'index beside wal']);
   run(['end', '--status', 'abandoned', '--note', 'done']);
@@ -6113,7 +6115,7 @@ test('default repo seals keep the SQLite index beside the WAL', () => {
 
 test('a leftover Git-metadata SQLite index is removed on the next sync', () => {
   const { cwd, git, run } = setupGitRepository('driftseal-retire-git-index-');
-  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['add', ...PROTOCOL_TRACKED]);
   git(['commit', '-m', 'base']);
   const gitMetadataIndex = path.resolve(
     cwd,

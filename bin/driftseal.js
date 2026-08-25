@@ -642,8 +642,18 @@ function writeCurrentLaneName(name, { readOnly = false } = {}) {
   atomicWriteFile(file, `${name}\n`, 0o600);
 }
 
+function existingAncestor(dir) {
+  let current = path.resolve(dir);
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
 function ensureDerivedLaneSidecarIgnore() {
-  if (!isGitWorkTree(logDir())) return;
+  if (!isGitWorkTree(existingAncestor(logDir()))) return { changed: false, target: null };
   const ignoreFile = path.join(logDir(), '.gitignore');
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
   let next = current;
@@ -661,9 +671,10 @@ function ensureDerivedLaneSidecarIgnore() {
     if (next && !next.endsWith('\n')) next += '\n';
     next += `${name}\n`;
   }
-  if (next === current) return;
+  if (next === current) return { changed: false, target: ignoreFile };
   ensureDirectoryDurable(logDir());
   atomicWriteFile(ignoreFile, next, 0o644);
+  return { changed: true, target: ignoreFile };
 }
 
 function hashFilePrefix(file, length) {
@@ -6698,10 +6709,11 @@ const commands = {
     } catch (err) {
       printLine(`warning: could not configure git merge driver: ${err && err.message ? err.message : err}`);
     }
+    const indexIgnore = ensureDerivedLaneSidecarIgnore();
 
     if (localLog) warnIfDefaultLogsTracked();
 
-    if (updated === current && !attributes.changed && !driver.changed) {
+    if (updated === current && !attributes.changed && !driver.changed && !indexIgnore.changed) {
       printLine('AGENTS.md already contains the DriftSeal protocols; nothing to do');
       return { changed: false, target };
     }
@@ -6714,6 +6726,9 @@ const commands = {
     }
     if (driver.changed) {
       printLine('Configured local git merge driver for DriftSeal outcome logs');
+    }
+    if (indexIgnore.changed) {
+      printLine(`Configured derived outcome-index ignore: ${indexIgnore.target}`);
     }
     return { changed: true, target };
   },
