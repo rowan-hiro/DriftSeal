@@ -20,7 +20,8 @@
  *
  * Seal root: $DRIFTSEAL_HOME, or .seal in cwd.
  * Outcome log: <seal-root>/outcomes/events.jsonl.
- * In a Git worktree, an open outcome is parked beside the WAL until end.
+ * In a default Git-repository seal, an open outcome is parked beside the WAL until end.
+ * Custom $DRIFTSEAL_HOME seals write open outcomes directly to the WAL.
  * MADR records: <seal-root>/madr/.
  */
 
@@ -3419,6 +3420,7 @@ const SKILL_RELEASE_DIGESTS = new Set([
   '38e89060ff37ecdd663eae73a3e0c646d6bb220fc8232a5762356375d84ba69b', // 2.1.0 outcome lanes
   'b4b2cc27ea71c5777b5eb9b67d861fbe1da43f31ab5d422d6a877e0cad592493', // 2.1.0 lane re-anchor recovery
   '6c49523c2f4a36ea1cd9d0b4e793ea3cdbd9d299174cf1f9a0a54f3d9a7cd331', // workspace park sidecar wording
+  '678cbaa8380f75f7a45d634010b500e51a59b06ea759eaf23cff2980142662f0', // default-seal parking help wording
 ]);
 
 function skillInstallUsage() {
@@ -6848,7 +6850,7 @@ seal root: $DRIFTSEAL_HOME, or .seal in the current directory
 outcome log: <seal-root>/outcomes/events.jsonl
 MADR records: <seal-root>/madr/
 $DRIFTSEAL_DECISION_HOME is a v1-only default for migration source detection; v2 runtime ignores it.
-In a Git worktree, begin parks an open outcome beside the WAL until end, so merge does not need a log-only commit.`);
+In a default Git-repository seal, begin parks an open outcome beside the WAL until end, so merge does not need a log-only commit. Custom $DRIFTSEAL_HOME seals write that open outcome directly to events.jsonl.`);
     return null;
   },
 

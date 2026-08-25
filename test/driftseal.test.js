@@ -349,7 +349,8 @@ test('--version and -V print the package version', () => {
   assert.match(run(['help']), /driftseal init \[--lang <tag>\] \[--local-log\]/);
   assert.match(run(['help']), /driftseal verify/);
   assert.match(run(['help']), /driftseal lane/);
-  assert.match(run(['help']), /parks an open outcome beside the WAL until end/);
+  assert.match(run(['help']), /default Git-repository seal/);
+  assert.match(run(['help']), /Custom \$DRIFTSEAL_HOME seals write that open outcome directly to events\.jsonl/);
   assert.match(runFail(['--version', 'extra']).stderr, /usage: driftseal --version \| -V/);
 });
 
