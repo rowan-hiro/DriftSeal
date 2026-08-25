@@ -25,7 +25,7 @@ Acceptance-bound verification executes a shell command stored in the intent log.
 
 ## Decision Outcome
 
-Always disclose the exact command before execution. Commands from a local park sidecar or a matching local provenance marker run normally. An open outcome found only in the outcome log, without matching local provenance, requires the explicit `--allow-tracked-command` CLI flag or `allowTrackedCommand` API/MCP input. Provenance sits beside the WAL (`outcomes/.driftseal-local-outcome.json`) and is gitignored when that directory is inside a Git worktree, so copying the log and sidecar does not transfer trust. A leftover Git-metadata provenance file is still read until the next write. Provenance is removed when the outcome closes. Missing, malformed, or copied provenance is treated as untrusted.
+Always disclose the exact command before execution. Commands from a local park sidecar or a matching local provenance marker run normally. An open outcome found only in the outcome log, without matching local provenance, requires the explicit `--allow-tracked-command` CLI flag or `allowTrackedCommand` API/MCP input. Provenance sits beside the WAL (`outcomes/.driftseal-local-outcome.json`) and is gitignored when that directory is inside a Git worktree, so copying the log and sidecar does not transfer trust. Provenance is removed when the outcome closes. Missing, malformed, or copied provenance is treated as untrusted.
 
 ## Consequences
 
@@ -56,3 +56,10 @@ Accepted in v2: verification commands without matching local outcome provenance 
 Status: Accepted → Accepted
 
 Local verification provenance sits beside the WAL at outcomes/.driftseal-local-outcome.json, not in Git metadata. A leftover Git-metadata provenance file is still read until the next write.
+
+<!-- driftseal-reconciliation: 6fa20532-8ea8-45bc-a261-afe1bf3f9476 -->
+### 2026-08-25T07:21:00.063Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 local verification provenance lives only beside the WAL. Leftover Git-metadata provenance files are no longer read.

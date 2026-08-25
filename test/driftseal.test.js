@@ -6107,27 +6107,6 @@ test('default repo seals keep the current lane beside the WAL', () => {
   assert.doesNotMatch(status, /\.current-lane/);
 });
 
-test('a leftover Git-metadata current-lane file is read then removed on write', () => {
-  const { cwd, git, run } = setupGitRepository('driftseal-retire-git-lane-');
-  git(['add', ...PROTOCOL_TRACKED]);
-  git(['commit', '-m', 'base']);
-  run(['lane', 'add', 'index']);
-  const gitMetadataLane = path.resolve(
-    cwd,
-    git(['rev-parse', '--git-path', 'driftseal-v2-current-lane']).trim()
-  );
-  fs.mkdirSync(path.dirname(gitMetadataLane), { recursive: true });
-  fs.writeFileSync(gitMetadataLane, 'index\n');
-  assert.match(run(['lane']), /current lane: index/);
-  assert.equal(fs.existsSync(path.join(cwd, '.seal', 'outcomes', '.current-lane')), false);
-  run(['lane', 'switch', 'main']);
-  assert.equal(fs.existsSync(gitMetadataLane), false);
-  assert.equal(
-    fs.readFileSync(path.join(cwd, '.seal', 'outcomes', '.current-lane'), 'utf8').trim(),
-    'main'
-  );
-});
-
 test('default repo seals keep the SQLite index beside the WAL', () => {
   const { cwd, git, run } = setupGitRepository('driftseal-default-index-');
   git(['add', ...PROTOCOL_TRACKED]);
@@ -6154,21 +6133,6 @@ test('default repo seals keep the SQLite index beside the WAL', () => {
   assert.match(ignore, /^\.\.driftseal-local-outcome\.json\.\*\.tmp$/m);
   const status = git(['status', '--short', '--', '.seal/outcomes']);
   assert.doesNotMatch(status, /\.outcome-index\.sqlite/);
-});
-
-test('lane switch succeeds when retired Git-metadata current-lane cannot be removed', () => {
-  const { cwd, git, run } = setupGitRepository('driftseal-lane-switch-readonly-git-');
-  git(['add', ...PROTOCOL_TRACKED]);
-  git(['commit', '-m', 'base']);
-  run(['lane', 'add', 'index']);
-  const gitMetadataLane = path.resolve(
-    cwd,
-    git(['rev-parse', '--git-path', 'driftseal-v2-current-lane']).trim()
-  );
-  fs.mkdirSync(gitMetadataLane, { recursive: true });
-  assert.match(run(['lane', 'switch', 'index']), /switched to lane index/);
-  assert.equal(fs.readFileSync(path.join(cwd, '.seal', 'outcomes', '.current-lane'), 'utf8').trim(), 'index');
-  assert.match(run(['lane']), /current lane: index/);
 });
 
 test('status and log do not plant sidecar ignore on an unupgraded repository', () => {
@@ -6235,45 +6199,6 @@ test('default repo seals park an open outcome beside the WAL', () => {
   assert.equal(fs.existsSync(gitPark), false);
   assert.equal(fs.existsSync(path.join(cwd, '.seal', 'outcomes', 'events.jsonl')), false);
   assert.equal(git(['status', '--porcelain']), '');
-});
-
-test('a leftover Git-metadata park is read then adopted on the next write', () => {
-  const { cwd, git, run } = setupGitRepository('driftseal-adopt-git-park-');
-  git(['add', ...PROTOCOL_TRACKED]);
-  git(['commit', '-m', 'base']);
-  run(['begin', 'legacy park']);
-  const workspace = workspaceParkFile(cwd);
-  const gitPark = path.resolve(
-    cwd,
-    git(['rev-parse', '--git-path', 'driftseal-v2-in-progress.jsonl']).trim()
-  );
-  fs.mkdirSync(path.dirname(gitPark), { recursive: true });
-  fs.renameSync(workspace, gitPark);
-  assert.match(run(['status']), /legacy park/);
-  assert.equal(fs.existsSync(workspace), false);
-  run(['extend', 'still the same outcome']);
-  assert.equal(fs.existsSync(workspace), true);
-  assert.equal(fs.existsSync(gitPark), false);
-  assert.match(run(['status']), /still the same outcome/);
-});
-
-test('a leftover Git-metadata SQLite index is removed on the next sync', () => {
-  const { cwd, git, run } = setupGitRepository('driftseal-retire-git-index-');
-  git(['add', ...PROTOCOL_TRACKED]);
-  git(['commit', '-m', 'base']);
-  const gitMetadataIndex = path.resolve(
-    cwd,
-    git(['rev-parse', '--git-path', 'driftseal-v3-outcome-index.sqlite']).trim()
-  );
-  fs.mkdirSync(path.dirname(gitMetadataIndex), { recursive: true });
-  fs.writeFileSync(gitMetadataIndex, 'retired git-metadata index');
-  fs.writeFileSync(`${gitMetadataIndex}-wal`, 'retired wal');
-  run(['begin', 'retire old index']);
-  run(['end', '--status', 'abandoned', '--note', 'done']);
-  run(['log']);
-  assert.equal(fs.existsSync(gitMetadataIndex), false);
-  assert.equal(fs.existsSync(`${gitMetadataIndex}-wal`), false);
-  assert.equal(fs.existsSync(path.join(cwd, '.seal', 'outcomes', '.outcome-index.sqlite')), true);
 });
 
 test('non-git custom-home lane sidecars are not gitignored', () => {

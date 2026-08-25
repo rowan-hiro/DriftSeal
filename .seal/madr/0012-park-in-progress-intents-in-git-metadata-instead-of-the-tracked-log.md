@@ -25,7 +25,7 @@ driftseal begin appends to the tracked events.jsonl, which dirties the worktree.
 
 ## Decision Outcome
 
-In a Git worktree using the default seal, begin and later events for the open outcome are parked in a worktree-local gitignored sidecar beside the WAL (`.seal/outcomes/.in-progress.jsonl`). end atomically appends the closed record to the tracked log. If a parked id collides with events that landed during merge, remap it the same way absorb remaps incoming worktree ids. `$DRIFTSEAL_HOME` and non-Git directories keep writing directly to `events.jsonl`. A leftover Git-metadata park is still read and adopted on the next write.
+In a Git worktree using the default seal, begin and later events for the open outcome are parked in a worktree-local gitignored sidecar beside the WAL (`.seal/outcomes/.in-progress.jsonl`). end atomically appends the closed record to the tracked log. If a parked id collides with events that landed during merge, remap it the same way absorb remaps incoming worktree ids. `$DRIFTSEAL_HOME` and non-Git directories keep writing directly to `events.jsonl`.
 
 ## Consequences
 
@@ -70,3 +70,10 @@ Title and chosen option now name the WAL-adjacent park sidecar. Open outcomes in
 Status: Accepted → Accepted
 
 Confirmed: default Git-repository seals park beside the WAL; absorb does not plant that ignore contract onto a v1 intent-log merge.
+
+<!-- driftseal-reconciliation: 1ea33381-2691-446d-8570-9f35dc66b50c -->
+### 2026-08-25T07:20:59.999Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 default Git-repository seals park only at outcomes/.in-progress.jsonl. Leftover Git-metadata parks are no longer read or adopted.

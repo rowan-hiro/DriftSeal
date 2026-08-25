@@ -59,11 +59,7 @@ const PROTOCOL_VERSION = '2.1';
 const DEFAULT_LOG_LANGUAGE = 'en';
 const DEFAULT_LANE = 'main';
 const LANE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
-const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
 const IN_PROGRESS_SIDECAR = '.in-progress.jsonl';
-const CURRENT_LANE_GIT_PATH = 'driftseal-v2-current-lane';
-const LANE_INDEX_GIT_PATH = 'driftseal-v3-outcome-index.sqlite';
-const LEGACY_LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
 const WORKSPACE_SIDECAR_IGNORE_NAMES = Object.freeze([
   '.current-lane',
   '.lane-index.json',
@@ -590,13 +586,6 @@ function gitWorktreeRoot(cwd = process.cwd()) {
   return gitCapture(['rev-parse', '--show-toplevel'], cwd);
 }
 
-function worktreeInProgressFile(cwd = process.cwd()) {
-  if (!isGitWorkTree(cwd)) return null;
-  const gitPath = gitCapture(['rev-parse', '--git-path', IN_PROGRESS_GIT_PATH], cwd);
-  if (!gitPath) return null;
-  return path.resolve(cwd, gitPath);
-}
-
 function isParkableOutcomeLog() {
   if (process.env.DRIFTSEAL_HOME) return false;
   const root = gitWorktreeRoot();
@@ -613,19 +602,8 @@ function inProgressFile() {
   return inProgressFileForLog(logFile());
 }
 
-function retiredGitMetadataInProgressFile() {
-  if (!isParkableOutcomeLog()) return null;
-  return worktreeInProgressFile();
-}
-
 function existingInProgressFileForLog(file) {
-  const current = inProgressFileForLog(file);
-  if (current && fs.existsSync(current)) return current;
-  if (shouldAttachInProgress(file)) {
-    const retired = worktreeInProgressFile();
-    if (retired && fs.existsSync(retired)) return retired;
-  }
-  return current;
+  return inProgressFileForLog(file);
 }
 
 function existingInProgressFile() {
@@ -638,26 +616,7 @@ function adoptInProgressFile() {
   if (!current) return null;
   ensureDerivedLaneSidecarIgnore();
   ensureDirectoryDurable(path.dirname(current));
-  const retired = retiredGitMetadataInProgressFile();
-  if (retired && fs.existsSync(retired)) {
-    if (!fs.existsSync(current)) {
-      try {
-        fs.copyFileSync(retired, current);
-        fs.chmodSync(current, 0o600);
-      } catch {
-        return retired;
-      }
-    }
-    removeRetiredPath(retired);
-  }
   return current;
-}
-
-function worktreeMetadataFile(gitPath, cwd = process.cwd()) {
-  if (!isGitWorkTree(cwd)) return null;
-  const resolved = gitCapture(['rev-parse', '--git-path', gitPath], cwd);
-  if (!resolved) return null;
-  return path.resolve(cwd, resolved);
 }
 
 function currentLaneFile() {
@@ -666,24 +625,13 @@ function currentLaneFile() {
   return path.join(logDir(), '.current-lane');
 }
 
-function retiredGitMetadataCurrentLaneFile() {
-  if (!isParkableOutcomeLog()) return null;
-  return worktreeMetadataFile(CURRENT_LANE_GIT_PATH);
-}
-
 function laneIndexFile() {
   // Keep the disposable index beside the WAL so agent sandboxes that deny
   // .git writes can still rebuild it inside the workspace.
   return path.join(logDir(), '.outcome-index.sqlite');
 }
 
-function retiredGitMetadataIndexFile() {
-  if (!isParkableOutcomeLog()) return null;
-  return worktreeMetadataFile(LANE_INDEX_GIT_PATH);
-}
-
 function legacyLaneIndexFile() {
-  if (isParkableOutcomeLog()) return worktreeMetadataFile(LEGACY_LANE_INDEX_GIT_PATH);
   return path.join(logDir(), '.lane-index.json');
 }
 
@@ -699,11 +647,7 @@ function readLaneNameFromFile(file) {
 }
 
 function readCurrentLaneName() {
-  return (
-    readLaneNameFromFile(currentLaneFile()) ||
-    readLaneNameFromFile(retiredGitMetadataCurrentLaneFile()) ||
-    DEFAULT_LANE
-  );
+  return readLaneNameFromFile(currentLaneFile()) || DEFAULT_LANE;
 }
 
 function writeCurrentLaneName(name, { readOnly = false } = {}) {
@@ -713,7 +657,6 @@ function writeCurrentLaneName(name, { readOnly = false } = {}) {
   ensureDirectoryDurable(path.dirname(file));
   ensureDerivedLaneSidecarIgnore();
   atomicWriteFile(file, `${name}\n`, 0o600);
-  removeRetiredPath(retiredGitMetadataCurrentLaneFile());
 }
 
 function existingAncestor(dir) {
@@ -926,51 +869,8 @@ function replaceOutcomeIndexFile(temporary, target) {
   fsyncDirectory(path.dirname(target));
 }
 
-function removeRetiredPath(file) {
-  if (!file) return;
-  try {
-    fs.rmSync(file, { force: true });
-  } catch (error) {
-    printLine(
-      `warning: could not remove retired Git-metadata file ${file}: ${
-        error && error.message ? error.message : error
-      }`
-    );
-  }
-}
-
-function removeRetiredIndexFiles(file) {
-  if (!file) return;
-  try {
-    removeIndexFiles(file);
-  } catch (error) {
-    printLine(
-      `warning: could not remove retired Git-metadata index ${file}: ${
-        error && error.message ? error.message : error
-      }`
-    );
-  }
-}
-
-function adoptRetiredGitMetadataIndex() {
-  const target = laneIndexFile();
-  const retired = retiredGitMetadataIndexFile();
-  if (!target || !retired || !fs.existsSync(retired)) return;
-  if (!fs.existsSync(target)) {
-    try {
-      fs.copyFileSync(retired, target);
-      fs.chmodSync(target, 0o600);
-    } catch {
-      // Rebuild from the WAL when the retired Git-metadata copy cannot be read.
-    }
-  }
-  removeRetiredIndexFiles(retired);
-}
-
 function removeLegacyLaneIndex() {
-  const legacy = legacyLaneIndexFile();
-  if (legacy) removeRetiredPath(legacy);
-  removeRetiredIndexFiles(retiredGitMetadataIndexFile());
+  fs.rmSync(legacyLaneIndexFile(), { force: true });
 }
 
 function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
@@ -1025,7 +925,6 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
   const target = laneIndexFile();
   if (!target) return null;
   if (!readOnly && !canPersistDerivedOutcomeIndex()) return null;
-  if (!readOnly) adoptRetiredGitMetadataIndex();
   if (readOnly) {
     if (!fs.existsSync(target)) return null;
     try {
@@ -1304,7 +1203,7 @@ function readJsonlRecordsFromFile(file, { repairTail = false, readOnly = false }
   if (
     readOnly &&
     process.env._DRIFTSEAL_TEST_UNLINK_PARK_BEFORE_READ === '1' &&
-    (path.basename(file) === IN_PROGRESS_GIT_PATH || path.basename(file) === IN_PROGRESS_SIDECAR)
+    path.basename(file) === IN_PROGRESS_SIDECAR
   ) {
     // Simulate a writer flushing and unlinking the park between the existence
     // check and the read; the next attempt sees the park as absent.
@@ -1386,21 +1285,8 @@ function planIndexedInProgressOverlay(index, park, { repairTail = false, readOnl
 }
 
 function discardInProgressLog(park) {
-  try {
-    fs.unlinkSync(park);
-    fsyncDirectory(path.dirname(park));
-  } catch (error) {
-    const retired = retiredGitMetadataInProgressFile();
-    if (retired && path.resolve(park) === path.resolve(retired)) {
-      printLine(
-        `warning: could not remove retired Git-metadata park ${park}: ${
-          error && error.message ? error.message : error
-        }`
-      );
-      return;
-    }
-    throw error;
-  }
+  fs.rmSync(park, { force: true });
+  fsyncDirectory(path.dirname(park));
 }
 
 function reconcileInProgressRecords(
@@ -1602,7 +1488,7 @@ function appendEvent(event) {
   if (event.type === 'begin') return appendEventTo(park, event);
   if (!open || open.id !== event.id) return appendEventTo(logFile(), event);
   if (event.type !== 'end') return appendEventTo(park, event);
-  // Close in the tracked log, never in Git metadata: the parked records move first, so the
+  // Close in the tracked log, never only in the park: the parked records move first, so the
   // closing record cannot end up somewhere a clone or a removed worktree would drop it.
   const remapped = flushInProgressLog();
   if (process.env._DRIFTSEAL_TEST_CRASH_AFTER_IN_PROGRESS_FLUSH === '1') {
@@ -1617,14 +1503,6 @@ function contentHash(content) {
 
 function localOutcomeProvenanceFile() {
   return path.join(logDir(), LOCAL_OUTCOME_PROVENANCE_FILE);
-}
-
-function retiredGitMetadataProvenanceFile() {
-  const root = gitWorktreeRoot();
-  if (!root) return null;
-  const key = contentHash(path.resolve(logFile())).slice(0, 16);
-  const gitPath = gitCapture(['rev-parse', '--git-path', `driftseal-local-outcome-${key}.json`]);
-  return gitPath ? path.resolve(process.cwd(), gitPath) : null;
 }
 
 function localOutcomeLogIdentity() {
@@ -1655,7 +1533,6 @@ function writeLocalOutcomeProvenance(event) {
     }) + '\n',
     0o600
   );
-  removeRetiredPath(retiredGitMetadataProvenanceFile());
 }
 
 function parseLocalOutcomeProvenance(file) {
@@ -1677,8 +1554,7 @@ function parseLocalOutcomeProvenance(file) {
 }
 
 function readLocalOutcomeProvenance() {
-  return parseLocalOutcomeProvenance(localOutcomeProvenanceFile()) ||
-    parseLocalOutcomeProvenance(retiredGitMetadataProvenanceFile());
+  return parseLocalOutcomeProvenance(localOutcomeProvenanceFile());
 }
 
 function hasMatchingLocalOutcomeProvenance(outcome) {
@@ -1704,7 +1580,6 @@ function clearLocalOutcomeProvenance(id) {
     fs.unlinkSync(file);
     fsyncDirectory(path.dirname(file));
   }
-  removeRetiredPath(retiredGitMetadataProvenanceFile());
 }
 
 function atomicWriteFile(target, content, createMode = 0o644) {
@@ -3967,10 +3842,7 @@ function hookLogFile() {
     const candidate = path.join(current, '.seal', 'outcomes', 'events.jsonl');
     const workspacePark = path.join(current, '.seal', 'outcomes', IN_PROGRESS_SIDECAR);
     if (fs.existsSync(candidate) || fs.existsSync(workspacePark)) return candidate;
-    if (root && path.resolve(root) === current) {
-      const park = worktreeInProgressFile(current);
-      if (park && fs.existsSync(park)) return candidate;
-    }
+    if (root && path.resolve(root) === current) return null;
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
@@ -4803,9 +4675,6 @@ function finishAbsorb({
   allowConflict = false,
   followupMessage = null,
 }) {
-  if (sameResolvedPath(outputFile, logFile()) || shouldAttachInProgress(outputFile)) {
-    ensureDerivedLaneSidecarIgnore();
-  }
   // A parked outcome is local even though the tracked log never saw it.
   const park = shouldAttachInProgress(outputFile)
     ? dryRun

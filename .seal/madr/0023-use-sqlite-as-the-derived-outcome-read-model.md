@@ -69,3 +69,10 @@ Index persistence inside a Git worktree requires the complete WAL-directory igno
 Status: Accepted → Accepted
 
 Confirmed: index persistence still requires the complete ignore contract, and absorb only upgrades that file when writing the current v2 WAL.
+
+<!-- driftseal-reconciliation: 66313497-5ded-4041-b659-336965d6b0f9 -->
+### 2026-08-25T07:21:00.191Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 SQLite indexes live only at outcomes/.outcome-index.sqlite. Leftover Git-metadata databases are no longer adopted.

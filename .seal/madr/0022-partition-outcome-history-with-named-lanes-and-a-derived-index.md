@@ -88,3 +88,10 @@ Store the current-lane pointer beside the WAL at outcomes/.current-lane so agent
 Status: Accepted → Accepted
 
 Retired Git-metadata current-lane cleanup is best-effort and cannot fail lane switch after the workspace sidecar is written. status and log on an unupgraded default repo do not plant the WAL-directory gitignore.
+
+<!-- driftseal-reconciliation: a55202d6-122e-4900-a38f-65fef91ab568 -->
+### 2026-08-25T07:21:00.127Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 current-lane state is only outcomes/.current-lane. Leftover Git-metadata lane pointers are no longer read or removed.
