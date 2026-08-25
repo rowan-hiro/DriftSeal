@@ -1,0 +1,7 @@
+.current-lane
+.lane-index.json
+.outcome-index.sqlite
+.outcome-index.sqlite-journal
+.outcome-index.sqlite-wal
+.outcome-index.sqlite-shm
+..outcome-index.sqlite.*.tmp

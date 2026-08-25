@@ -156,13 +156,13 @@ has, `status`, `log`, and `lane` fall back to `main` with a warning; `begin`
 still refuses until you `lane switch main` or add the lane. `log --last N` can
 return more than N records when an open outcome sits on another lane.
 
-A derived SQLite outcome index stores folded records in Git metadata (or beside
-a custom seal). It is a disposable read model; `events.jsonl` remains the only
-canonical history. Incremental sync follows `indexedThrough` and
-`indexedLines`. File identity makes unchanged hot reads constant-time, while a
-full checksum of the previously indexed WAL prefix validates every incremental
-catch-up. A source rewrite, incompatible schema, malformed indexed row, or
-SQLite read error triggers a full rebuild.
+A derived SQLite outcome index stores folded records beside the WAL
+(`outcomes/.outcome-index.sqlite`). It is a disposable read model;
+`events.jsonl` remains the only canonical history. Incremental sync follows
+`indexedThrough` and `indexedLines`. File identity makes unchanged hot reads
+constant-time, while a full checksum of the previously indexed WAL prefix
+validates every incremental catch-up. A source rewrite, incompatible schema,
+malformed indexed row, or SQLite read error triggers a full rebuild.
 
 `log --last N` uses a `(lane, reclaimed, ordinal)` SQLite index and reads only
 the selected outcome rows plus open outcomes from other lanes. Parked events
@@ -171,9 +171,10 @@ identities, so an open outcome does not force a committed-WAL scan. When a
 lock-free read sees a missing or stale database, DriftSeal folds the canonical
 WAL in memory instead of serving stale index data. Stored WAL byte ranges remain
 available for future projections but are not required for recent-log lookup.
-The database is reconstructable and is not committed with the log. Custom-home
-sidecars sit next to `events.jsonl`; when that directory is inside a Git
-worktree, they are listed in its `.gitignore`.
+The database is reconstructable and is not committed with the log. Sidecars sit
+next to `events.jsonl`; when that directory is inside a Git worktree, they are
+listed in its `.gitignore`. Keeping the file in the workspace avoids agent
+sandboxes that deny writes under `.git/`.
 
 ## Decisions and MADR
 
@@ -341,11 +342,11 @@ MADR tools, and the three migration tools. Resources are:
   DriftSeal; use `reclaim`, `unreclaim`, `lane`, and `absorb` instead of manual edits.
 - `.seal/madr/` stores numbered MADR documents.
 - `$DRIFTSEAL_HOME` replaces the `.seal` root.
-- The current lane and derived SQLite outcome index live in Git metadata for a default
-  repository seal, or beside a custom seal (`outcomes/.current-lane` and
-  `outcomes/.outcome-index.sqlite`). When the custom seal sits inside a Git
-  worktree, those sidecars are gitignored. They are reconstructable and are not
-  part of the committed WAL.
+- The current lane lives in Git metadata for a default repository seal, or
+  beside a custom seal (`outcomes/.current-lane`). The derived SQLite outcome
+  index always sits next to the WAL (`outcomes/.outcome-index.sqlite`). When that
+  directory is inside a Git worktree, the index sidecars are gitignored. They
+  are reconstructable and are not part of the committed WAL.
 - Advisory hooks remind agents about lifecycle state but never broaden the
   repository's `AGENTS.md` policy.
 

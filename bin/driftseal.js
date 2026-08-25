@@ -606,8 +606,14 @@ function currentLaneFile() {
 }
 
 function laneIndexFile() {
-  if (isParkableOutcomeLog()) return worktreeMetadataFile(LANE_INDEX_GIT_PATH);
+  // Keep the disposable index beside the WAL so agent sandboxes that deny
+  // .git writes can still rebuild it inside the workspace.
   return path.join(logDir(), '.outcome-index.sqlite');
+}
+
+function retiredGitMetadataIndexFile() {
+  if (!isParkableOutcomeLog()) return null;
+  return worktreeMetadataFile(LANE_INDEX_GIT_PATH);
 }
 
 function legacyLaneIndexFile() {
@@ -637,7 +643,6 @@ function writeCurrentLaneName(name, { readOnly = false } = {}) {
 }
 
 function ensureDerivedLaneSidecarIgnore() {
-  if (isParkableOutcomeLog()) return;
   if (!isGitWorkTree(logDir())) return;
   const ignoreFile = path.join(logDir(), '.gitignore');
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
@@ -819,6 +824,8 @@ function replaceOutcomeIndexFile(temporary, target) {
 function removeLegacyLaneIndex() {
   const legacy = legacyLaneIndexFile();
   if (legacy) fs.rmSync(legacy, { force: true });
+  const retired = retiredGitMetadataIndexFile();
+  if (retired) removeIndexFiles(retired);
 }
 
 function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {

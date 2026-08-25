@@ -141,19 +141,21 @@ lane 不能改名或删除。`lane add` 打错的名字会一直出现在 `drift
 直到 `lane switch main` 或把该 lane 加回来。`log --last N` 在 open outcome 属于
 别的 lane 时，返回条数可以多于 N。
 
-派生的 SQLite outcome index 放在 Git metadata（或自定义 seal 旁边）。它只是可以
-随时删除重建的 read model；`events.jsonl` 仍是唯一 canonical history。增量同步跟随
-`indexedThrough` 和 `indexedLines`。未变化的 hot read 用 file identity 做常量时间
-校验；增量追赶前会校验此前全部 WAL prefix 的 checksum。source 被改写、schema
-不兼容、indexed row 损坏或 SQLite read 失败时，DriftSeal 会全量重建。
+派生的 SQLite outcome index 放在 WAL 旁边（`outcomes/.outcome-index.sqlite`）。
+它只是可以随时删除重建的 read model；`events.jsonl` 仍是唯一 canonical history。
+增量同步跟随 `indexedThrough` 和 `indexedLines`。未变化的 hot read 用 file
+identity 做常量时间校验；增量追赶前会校验此前全部 WAL prefix 的 checksum。
+source 被改写、schema 不兼容、indexed row 损坏或 SQLite read 失败时，DriftSeal
+会全量重建。
 
 `log --last N` 使用 `(lane, reclaimed, ordinal)` SQLite index，只读取命中的 outcome
 row，并补上其他 lane 的 open outcome。parked event 会依据 index 中保存的 committed
 event identity 做定向 overlay，不再因此重扫 committed WAL。无锁读取遇到缺失或 stale
 database 时，会在内存中 fold canonical WAL，绝不会返回 stale index。保存的 WAL byte
 range 留给后续 projection 使用，但 recent-log lookup 不依赖它。database 可以重建，
-不会随 log 一起提交。自定义 home 下的 sidecar 放在 `events.jsonl` 旁边；该目录在 Git
-worktree 内时，由目录里的 `.gitignore` 忽略。
+不会随 log 一起提交。sidecar 放在 `events.jsonl` 旁边；该目录在 Git worktree
+内时，由目录里的 `.gitignore` 忽略。文件留在工作树里，避免被默认禁止写入
+`.git/` 的 agent sandbox 拦住。
 
 ## Decision 与 MADR
 
@@ -310,10 +312,10 @@ resources 为：
   `absorb`，不要手改。
 - `.seal/madr/` 保存编号化 MADR。
 - `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
-- 当前 lane 与派生 SQLite outcome index 对默认 repo seal 存在 Git metadata 里，对自定义 seal
-  则放在旁边（`outcomes/.current-lane` 与 `outcomes/.outcome-index.sqlite`）。自定义
-  seal 在 Git worktree 内时，这些 sidecar 会被 gitignore。它们可以重建，不是
-  committed WAL 的一部分。
+- 当前 lane 对默认 repo seal 存在 Git metadata 里，对自定义 seal 则放在旁边
+  （`outcomes/.current-lane`）。派生 SQLite outcome index 一律放在 WAL 旁边
+  （`outcomes/.outcome-index.sqlite`）。该目录在 Git worktree 内时，index sidecar
+  会被 gitignore。它们可以重建，不是 committed WAL 的一部分。
 - advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
 
 DriftSeal 不会替你判断 verification command 是否安全，也不会判断测试本身是否充分。
