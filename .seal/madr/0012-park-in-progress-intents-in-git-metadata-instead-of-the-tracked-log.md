@@ -25,14 +25,14 @@ driftseal begin appends to the tracked events.jsonl, which dirties the worktree.
 
 ## Decision Outcome
 
-In a Git worktree using the default .intent-log, begin and later events for the open intent are parked in a worktree-local file under the Git directory. end atomically appends the closed record to the tracked log. If a parked id collides with events that landed during merge, remap it the same way absorb remaps incoming worktree ids. DRIFTSEAL_HOME and non-Git directories keep writing directly to events.jsonl.
+In a Git worktree using the default seal, begin and later events for the open outcome are parked in a worktree-local gitignored sidecar beside the WAL (`.seal/outcomes/.in-progress.jsonl`). end atomically appends the closed record to the tracked log. If a parked id collides with events that landed during merge, remap it the same way absorb remaps incoming worktree ids. `$DRIFTSEAL_HOME` and non-Git directories keep writing directly to `events.jsonl`. A leftover Git-metadata park is still read and adopted on the next write.
 
 ## Consequences
 
 * git merge can run while an intent is in progress without a log-only commit
 * Switching branches with an open intent carries that intent with the worktree
 * end is the first time the tracked log becomes dirty for that round
-* A parked intent lives only in local Git metadata: removing the worktree (git worktree remove/prune) or deleting the clone discards the still-open record, and it is never shared by push or clone. Only end makes the round durable in the tracked log, so an in-progress intent should not be left parked indefinitely.
+* A parked outcome lives only in a gitignored worktree sidecar: removing the worktree or deleting the clone discards the still-open record, and it is never shared by push or clone. Only end makes the round durable in the tracked log, so an in-progress outcome should not be left parked indefinitely.
 
 ## Decision History
 

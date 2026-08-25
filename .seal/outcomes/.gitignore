@@ -1,7 +1,10 @@
 .current-lane
 .lane-index.json
+.in-progress.jsonl
+.driftseal-local-outcome.json
 .outcome-index.sqlite
 .outcome-index.sqlite-journal
 .outcome-index.sqlite-wal
 .outcome-index.sqlite-shm
 ..outcome-index.sqlite.*.tmp
+..outcome-index.sqlite.*.tmp-*

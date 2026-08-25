@@ -66,8 +66,9 @@ fresh clone because Git config is local to each clone.
 
 Use `driftseal init --lang <BCP-47-tag>` to choose the prose language stored in
 outcome and MADR records. Use `--local-log` only when `.seal/` should remain
-untracked; DriftSeal reports tracked state but does not edit `.gitignore` or the
-Git index.
+untracked; DriftSeal reports tracked state but does not edit the repository-root
+`.gitignore` or the Git index. When the seal sits inside a Git worktree, `init`
+may still write `.seal/outcomes/.gitignore` so derived sidecars stay untracked.
 
 ## Core workflow
 
@@ -293,9 +294,10 @@ migrated state.
 
 ## Git and merge behavior
 
-In a Git worktree, `begin` parks the open outcome in Git metadata so it does not
-dirty the tracked log. `end` flushes the lineage to
-`.seal/outcomes/events.jsonl`. The event log is append-only during normal work.
+In a Git worktree, `begin` parks the open outcome beside the WAL
+(`.seal/outcomes/.in-progress.jsonl`, gitignored) so it does not dirty the
+tracked log. `end` flushes the lineage to `.seal/outcomes/events.jsonl`. The
+event log is append-only during normal work.
 
 After a merge collision, run:
 
@@ -342,11 +344,13 @@ MADR tools, and the three migration tools. Resources are:
   DriftSeal; use `reclaim`, `unreclaim`, `lane`, and `absorb` instead of manual edits.
 - `.seal/madr/` stores numbered MADR documents.
 - `$DRIFTSEAL_HOME` replaces the `.seal` root.
-- The current lane and derived SQLite outcome index sit next to the WAL
-  (`outcomes/.current-lane` and `outcomes/.outcome-index.sqlite`). When that
-  directory is inside a Git worktree, those sidecars are gitignored. Each
-  worktree keeps its own ignored copies. They are reconstructable and are not
-  part of the committed WAL.
+- The current lane, parked open outcome, local verification provenance, and
+  derived SQLite outcome index sit next to the WAL (`outcomes/.current-lane`,
+  `outcomes/.in-progress.jsonl`, `outcomes/.driftseal-local-outcome.json`, and
+  `outcomes/.outcome-index.sqlite`). When that directory is inside a Git
+  worktree, those sidecars are gitignored. A default repository seal keeps one
+  ignored copy per worktree; a shared `$DRIFTSEAL_HOME` shares them. They are
+  reconstructable and are not part of the committed WAL.
 - Advisory hooks remind agents about lifecycle state but never broaden the
   repository's `AGENTS.md` policy.
 

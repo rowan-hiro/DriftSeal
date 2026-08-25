@@ -60,7 +60,8 @@ attribute，并配置本地 Git merge driver。Git config 不会随 clone 传播
 
 `driftseal init --lang <BCP-47-tag>` 用来指定 outcome 与 MADR 正文的语言。
 `--local-log` 会让 `.seal/` 保持本地、不被跟踪；DriftSeal 只报告当前 tracked 状态，
-不会替你修改 `.gitignore` 或 Git index。
+不会替你修改仓库根目录的 `.gitignore` 或 Git index。seal 在 Git worktree 内时，
+`init` 仍可能写入 `.seal/outcomes/.gitignore`，用来忽略派生 sidecar。
 
 ## 基本工作流
 
@@ -264,8 +265,9 @@ tools 可以立刻看到 migration 后的状态。
 
 ## Git 与 merge
 
-在 Git worktree 中，`begin` 会把 open outcome park 到 Git metadata，避免弄脏 tracked
-log；`end` 再把完整 lineage 写入 `.seal/outcomes/events.jsonl`。正常工作期间 event log
+在 Git worktree 中，`begin` 会把 open outcome park 到 WAL 旁边
+（`.seal/outcomes/.in-progress.jsonl`，已被 gitignore），避免弄脏 tracked log；
+`end` 再把完整 lineage 写入 `.seal/outcomes/events.jsonl`。正常工作期间 event log
 保持 append-only。
 
 发生 merge collision 后执行：
@@ -312,10 +314,12 @@ resources 为：
   `absorb`，不要手改。
 - `.seal/madr/` 保存编号化 MADR。
 - `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
-- 当前 lane 与派生 SQLite outcome index 都放在 WAL 旁边（`outcomes/.current-lane`
-  与 `outcomes/.outcome-index.sqlite`）。该目录在 Git worktree 内时，这些 sidecar
-  会被 gitignore。每个 worktree 各自保留一份 ignored 副本。它们可以重建，不是
-  committed WAL 的一部分。
+- 当前 lane、parked open outcome、本地 verification provenance 与派生 SQLite
+  outcome index 都放在 WAL 旁边（`outcomes/.current-lane`、
+  `outcomes/.in-progress.jsonl`、`outcomes/.driftseal-local-outcome.json`、
+  `outcomes/.outcome-index.sqlite`）。该目录在 Git worktree 内时，这些 sidecar
+  会被 gitignore。默认 repo seal 下每个 worktree 各自一份；共享的
+  `$DRIFTSEAL_HOME` 则会共用。它们可以重建，不是 committed WAL 的一部分。
 - advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
 
 DriftSeal 不会替你判断 verification command 是否安全，也不会判断测试本身是否充分。

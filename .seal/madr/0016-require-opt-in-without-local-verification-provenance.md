@@ -25,7 +25,7 @@ Acceptance-bound verification executes a shell command stored in the intent log.
 
 ## Decision Outcome
 
-Always disclose the exact command before execution. Commands from a local Git park or a matching local provenance marker run normally. An open intent found only in the intent log, without matching local provenance, requires the explicit --allow-tracked-command CLI flag or allowTrackedCommand API/MCP input. Custom-log provenance stays in Git metadata when a worktree is available; non-Git provenance uses a sidecar bound to the local intent log's file identity, so copying the log and sidecar does not transfer trust. Provenance is removed when the intent closes. Missing, malformed, or copied provenance is treated as untrusted.
+Always disclose the exact command before execution. Commands from a local park sidecar or a matching local provenance marker run normally. An open outcome found only in the outcome log, without matching local provenance, requires the explicit `--allow-tracked-command` CLI flag or `allowTrackedCommand` API/MCP input. Provenance sits beside the WAL (`outcomes/.driftseal-local-outcome.json`) and is gitignored when that directory is inside a Git worktree, so copying the log and sidecar does not transfer trust. A leftover Git-metadata provenance file is still read until the next write. Provenance is removed when the outcome closes. Missing, malformed, or copied provenance is treated as untrusted.
 
 ## Consequences
 

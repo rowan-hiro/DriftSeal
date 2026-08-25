@@ -24,7 +24,7 @@ Orthogonal capabilities share one append-only events.jsonl. After merge, log --l
 
 ## Decision Outcome
 
-Keep a single WAL. Tag each outcome with one named lane (default main). Store the current lane per worktree in Git metadata. Default log and re-anchor follow the current lane. Refuse switching while an outcome is open. Persist a derived, local lane index as a reconstructable fold cache; rebuild incrementally from indexedThrough and indexedLines, or fully when the log identity changes. Per-lane heads, reverse links, and WAL byte ranges are stored for a seek path that is not consumed yet. Do not put parent pointers in canonical events, and do not allow one open outcome per lane in a shared worktree.
+Keep a single WAL. Tag each outcome with one named lane (default main). Store the current lane per worktree in a gitignored sidecar beside the WAL (`outcomes/.current-lane`). A shared `$DRIFTSEAL_HOME` shares that pointer. Default log and re-anchor follow the current lane. Refuse switching while an outcome is open. Persist a derived, local lane index as a reconstructable fold cache beside the WAL; rebuild incrementally from indexedThrough and indexedLines, or fully when the log identity changes. Do not put parent pointers in canonical events, and do not allow one open outcome per lane in a shared worktree.
 
 ## Consequences
 
