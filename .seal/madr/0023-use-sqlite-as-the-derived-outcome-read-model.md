@@ -41,3 +41,10 @@ Raise the runtime floor to Node.js 22.13 and use built-in node:sqlite for a disp
 Status: Accepted → Accepted
 
 DriftSeal 3.0 uses built-in node:sqlite on Node.js 22.13+ for a reconstructable outcome read model. One canonical fold bulk-builds the database; WAL tails update affected rows transactionally; exact source and projection checks trigger safe rebuilds or canonical fallback.
+
+<!-- driftseal-reconciliation: f83ad242-6cf5-4cfc-b3b9-7b9f53371118 -->
+### 2026-08-25T02:55:43.161Z — Outcome `2026-08-25-001`
+
+Status: Accepted → Accepted
+
+Keep the disposable SQLite index beside the WAL at outcomes/.outcome-index.sqlite so agent sandboxes that deny .git writes can rebuild it. Reject Git metadata for the database; current lane can stay there. Init plants the sidecar gitignore before begin parks an outcome.
