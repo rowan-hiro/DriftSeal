@@ -8,3 +8,6 @@
 .outcome-index.sqlite-shm
 ..outcome-index.sqlite.*.tmp
 ..outcome-index.sqlite.*.tmp-*
+..current-lane.*.tmp
+..in-progress.jsonl.*.tmp
+..driftseal-local-outcome.json.*.tmp

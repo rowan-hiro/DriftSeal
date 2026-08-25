@@ -75,6 +75,9 @@ const WORKSPACE_SIDECAR_IGNORE_NAMES = Object.freeze([
   '.outcome-index.sqlite-shm',
   '..outcome-index.sqlite.*.tmp',
   '..outcome-index.sqlite.*.tmp-*',
+  '..current-lane.*.tmp',
+  '..in-progress.jsonl.*.tmp',
+  '..driftseal-local-outcome.json.*.tmp',
 ]);
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
@@ -723,14 +726,42 @@ function existingAncestor(dir) {
   return current;
 }
 
+function listedIgnoreNames(content) {
+  return new Set(
+    content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+  );
+}
+
+function workspaceSidecarIgnoreFile() {
+  return path.join(logDir(), '.gitignore');
+}
+
+function gitContainedOutcomeLog() {
+  return isGitWorkTree(existingAncestor(logDir()));
+}
+
+function workspaceSidecarIgnoreComplete() {
+  const ignoreFile = workspaceSidecarIgnoreFile();
+  if (!fs.existsSync(ignoreFile)) return false;
+  const listed = listedIgnoreNames(fs.readFileSync(ignoreFile, 'utf8'));
+  return WORKSPACE_SIDECAR_IGNORE_NAMES.every((name) => listed.has(name));
+}
+
+function canPersistDerivedOutcomeIndex() {
+  return !gitContainedOutcomeLog() || workspaceSidecarIgnoreComplete();
+}
+
 function ensureDerivedLaneSidecarIgnore() {
-  if (!isGitWorkTree(existingAncestor(logDir()))) return { changed: false, target: null };
-  const ignoreFile = path.join(logDir(), '.gitignore');
+  if (!gitContainedOutcomeLog()) return { changed: false, target: null };
+  const ignoreFile = workspaceSidecarIgnoreFile();
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
+  const listed = listedIgnoreNames(current);
   let next = current;
   for (const name of WORKSPACE_SIDECAR_IGNORE_NAMES) {
-    const present = next.split(/\r?\n/).some((line) => line.trim() === name);
-    if (present) continue;
+    if (listed.has(name)) continue;
     if (next && !next.endsWith('\n')) next += '\n';
     next += `${name}\n`;
   }
@@ -921,10 +952,6 @@ function removeRetiredIndexFiles(file) {
   }
 }
 
-function workspaceSidecarIgnorePresent() {
-  return fs.existsSync(path.join(logDir(), '.gitignore'));
-}
-
 function adoptRetiredGitMetadataIndex() {
   const target = laneIndexFile();
   const retired = retiredGitMetadataIndexFile();
@@ -950,9 +977,8 @@ function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
   const wal = logFile();
   const target = laneIndexFile();
   if (!target) return null;
-  if (isParkableOutcomeLog() && !workspaceSidecarIgnorePresent()) return null;
+  if (!canPersistDerivedOutcomeIndex()) return null;
   ensureDirectoryDurable(path.dirname(target));
-  ensureDerivedLaneSidecarIgnore();
   const temporary = temporaryIndexPath(target);
   removeIndexFiles(temporary);
   let index;
@@ -998,7 +1024,7 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
   const wal = logFile();
   const target = laneIndexFile();
   if (!target) return null;
-  if (!readOnly && isParkableOutcomeLog() && !workspaceSidecarIgnorePresent()) return null;
+  if (!readOnly && !canPersistDerivedOutcomeIndex()) return null;
   if (!readOnly) adoptRetiredGitMetadataIndex();
   if (readOnly) {
     if (!fs.existsSync(target)) return null;
@@ -1560,6 +1586,7 @@ function parkedOpenOutcome(park) {
 }
 
 function appendEvent(event) {
+  ensureDerivedLaneSidecarIgnore();
   const park = adoptInProgressFile();
   if (!park) {
     const stored = appendEventTo(logFile(), event);
@@ -4776,6 +4803,7 @@ function finishAbsorb({
   allowConflict = false,
   followupMessage = null,
 }) {
+  ensureDerivedLaneSidecarIgnore();
   // A parked outcome is local even though the tracked log never saw it.
   const park = shouldAttachInProgress(outputFile)
     ? dryRun
@@ -7369,6 +7397,14 @@ function dispatch(argv) {
           resources = [path.dirname(hookFile)];
         } else if (legacyParkedIntent()) {
           resources = [path.dirname(legacyIntentLogFile())];
+        } else if (!fs.existsSync(logDir())) {
+          // Do not mkdir a cwd-relative seal just to lock a read: status/log
+          // from a subdirectory would otherwise plant packages/**/.seal.
+          const data = fn(rest, { readOnly: true });
+          return {
+            data,
+            exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0,
+          };
         } else {
           resources = [logDir()];
         }

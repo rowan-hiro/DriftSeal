@@ -1,4 +1,4 @@
-# 12. Park in-progress intents in Git metadata instead of the tracked log
+# 12. Park in-progress outcomes beside the WAL instead of the tracked log
 
 Date: 2026-08-14
 
@@ -21,7 +21,7 @@ driftseal begin appends to the tracked events.jsonl, which dirties the worktree.
 * Commit the begin event before every merge
 * Stash events.jsonl around git merge
 * Ignore the intent log with a Git skip-worktree bit
-* Park the open intent in Git metadata until end (chosen)
+* Park the open outcome in a gitignored sidecar beside the WAL until end (chosen)
 
 ## Decision Outcome
 
@@ -56,3 +56,10 @@ Accepted in v2: open outcomes remain parked in Git metadata, using a v2-specific
 Status: Accepted → Accepted
 
 Park the open outcome beside the WAL at outcomes/.in-progress.jsonl, not in Git metadata. Hooks and absorb read that sidecar next to the WAL being folded. A leftover Git-metadata park is still read and adopted on the next write.
+
+<!-- driftseal-reconciliation: e07a4942-f78b-4075-9ea2-55bdb160aca5 -->
+### 2026-08-25T06:59:57.493Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Title and chosen option now name the WAL-adjacent park sidecar. Open outcomes in a default Git-repository seal stay in outcomes/.in-progress.jsonl; custom homes still write the WAL directly.

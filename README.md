@@ -294,10 +294,11 @@ migrated state.
 
 ## Git and merge behavior
 
-In a Git worktree, `begin` parks the open outcome beside the WAL
+In a default Git-repository seal, `begin` parks the open outcome beside the WAL
 (`.seal/outcomes/.in-progress.jsonl`, gitignored) so it does not dirty the
-tracked log. `end` flushes the lineage to `.seal/outcomes/events.jsonl`. The
-event log is append-only during normal work.
+tracked log. Custom `$DRIFTSEAL_HOME` seals write that open outcome directly to
+`events.jsonl`. `end` flushes a parked lineage to `.seal/outcomes/events.jsonl`.
+The event log is append-only during normal work.
 
 After a merge collision, run:
 
@@ -344,13 +345,19 @@ MADR tools, and the three migration tools. Resources are:
   DriftSeal; use `reclaim`, `unreclaim`, `lane`, and `absorb` instead of manual edits.
 - `.seal/madr/` stores numbered MADR documents.
 - `$DRIFTSEAL_HOME` replaces the `.seal` root.
-- The current lane, parked open outcome, local verification provenance, and
-  derived SQLite outcome index sit next to the WAL (`outcomes/.current-lane`,
-  `outcomes/.in-progress.jsonl`, `outcomes/.driftseal-local-outcome.json`, and
-  `outcomes/.outcome-index.sqlite`). When that directory is inside a Git
-  worktree, those sidecars are gitignored. A default repository seal keeps one
-  ignored copy per worktree; a shared `$DRIFTSEAL_HOME` shares them. They are
-  reconstructable and are not part of the committed WAL.
+- The derived SQLite outcome index and the current-lane pointer sit next to the
+  WAL (`outcomes/.outcome-index.sqlite`, `outcomes/.current-lane`). The index is
+  reconstructable from `events.jsonl`; a missing or stale current-lane pointer
+  falls back to `main`. A default repository seal also parks the open outcome and
+  local verification provenance beside the WAL
+  (`outcomes/.in-progress.jsonl`, `outcomes/.driftseal-local-outcome.json`). Those
+  two files are not reconstructable: deleting the park discards the still-open
+  outcome, and deleting provenance changes verifier trust. Custom
+  `$DRIFTSEAL_HOME` seals write open outcomes directly to the WAL and still keep
+  provenance beside that log. When the outcomes directory is inside a Git
+  worktree, the sidecars are gitignored. A default repository seal keeps one
+  ignored copy per worktree; a shared `$DRIFTSEAL_HOME` shares the files that
+  exist there.
 - Advisory hooks remind agents about lifecycle state but never broaden the
   repository's `AGENTS.md` policy.
 

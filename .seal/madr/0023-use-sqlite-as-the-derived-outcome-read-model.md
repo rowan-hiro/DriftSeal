@@ -55,3 +55,10 @@ Keep the disposable SQLite index beside the WAL at outcomes/.outcome-index.sqlit
 Status: Accepted → Accepted
 
 Retired Git-metadata SQLite cleanup is best-effort after adopting a leftover database. The WAL-directory gitignore covers rebuild journals named ..outcome-index.sqlite.*.tmp-*. status and log do not plant that ignore file. Current lane also lives beside the WAL, not in Git metadata.
+
+<!-- driftseal-reconciliation: 9208149d-7f43-43bd-86ca-e9b27544f482 -->
+### 2026-08-25T06:59:57.568Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Index persistence inside a Git worktree requires the complete WAL-directory ignore contract, including atomic temp names for lane, park, and provenance sidecars. status and log fold instead of planting or upgrading that file.
