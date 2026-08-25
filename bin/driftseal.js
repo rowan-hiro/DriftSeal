@@ -4803,7 +4803,9 @@ function finishAbsorb({
   allowConflict = false,
   followupMessage = null,
 }) {
-  ensureDerivedLaneSidecarIgnore();
+  if (sameResolvedPath(outputFile, logFile()) || shouldAttachInProgress(outputFile)) {
+    ensureDerivedLaneSidecarIgnore();
+  }
   // A parked outcome is local even though the tracked log never saw it.
   const park = shouldAttachInProgress(outputFile)
     ? dryRun
