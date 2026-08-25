@@ -601,9 +601,13 @@ function isParkableOutcomeLog() {
   return path.resolve(logFile()) === path.resolve(root, '.seal', 'outcomes', 'events.jsonl');
 }
 
+function inProgressFileForLog(file) {
+  return path.join(path.dirname(file), IN_PROGRESS_SIDECAR);
+}
+
 function inProgressFile() {
   if (!isParkableOutcomeLog()) return null;
-  return path.join(logDir(), IN_PROGRESS_SIDECAR);
+  return inProgressFileForLog(logFile());
 }
 
 function retiredGitMetadataInProgressFile() {
@@ -611,12 +615,19 @@ function retiredGitMetadataInProgressFile() {
   return worktreeInProgressFile();
 }
 
-function existingInProgressFile() {
-  const current = inProgressFile();
+function existingInProgressFileForLog(file) {
+  const current = inProgressFileForLog(file);
   if (current && fs.existsSync(current)) return current;
-  const retired = retiredGitMetadataInProgressFile();
-  if (retired && fs.existsSync(retired)) return retired;
+  if (shouldAttachInProgress(file)) {
+    const retired = worktreeInProgressFile();
+    if (retired && fs.existsSync(retired)) return retired;
+  }
   return current;
+}
+
+function existingInProgressFile() {
+  if (!isParkableOutcomeLog()) return null;
+  return existingInProgressFileForLog(logFile());
 }
 
 function adoptInProgressFile() {
@@ -1390,7 +1401,7 @@ function readEventsSnapshot(file, { repairTail = false, readOnly = false } = {})
     reconcileInProgressRecords(events, {
       repairTail,
       readOnly,
-      park: existingInProgressFile(),
+      park: existingInProgressFileForLog(file),
     }).map((record) => record.event)
   );
 }
@@ -4768,8 +4779,8 @@ function finishAbsorb({
   // A parked outcome is local even though the tracked log never saw it.
   const park = shouldAttachInProgress(outputFile)
     ? dryRun
-      ? existingInProgressFile()
-      : adoptInProgressFile() || existingInProgressFile()
+      ? existingInProgressFileForLog(outputFile)
+      : adoptInProgressFile() || existingInProgressFileForLog(outputFile)
     : null;
   const plan = planInProgressOverlay(result.map((record) => record.event), park, {
     repairTail: true,
