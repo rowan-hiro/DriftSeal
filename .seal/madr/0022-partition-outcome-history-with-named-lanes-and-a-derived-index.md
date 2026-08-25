@@ -81,3 +81,10 @@ Named lanes now use relational indexes over lane, reclaimed, status, and ordinal
 Status: Accepted → Accepted
 
 Store the current-lane pointer beside the WAL at outcomes/.current-lane so agent sandboxes that deny .git writes can switch lanes. Each worktree keeps its own ignored sidecar; a leftover Git-metadata pointer is read until the next write, then removed.
+
+<!-- driftseal-reconciliation: e98a23d9-82a0-47cb-a2f9-f328c5283ea0 -->
+### 2026-08-25T06:27:52.227Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Retired Git-metadata current-lane cleanup is best-effort and cannot fail lane switch after the workspace sidecar is written. status and log on an unupgraded default repo do not plant the WAL-directory gitignore.

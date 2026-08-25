@@ -48,3 +48,10 @@ DriftSeal 3.0 uses built-in node:sqlite on Node.js 22.13+ for a reconstructable 
 Status: Accepted → Accepted
 
 Keep the disposable SQLite index beside the WAL at outcomes/.outcome-index.sqlite so agent sandboxes that deny .git writes can rebuild it. Reject Git metadata for the database; current lane can stay there. Init plants the sidecar gitignore before begin parks an outcome.
+
+<!-- driftseal-reconciliation: 6e0e17a4-ea70-41fb-8d9a-a0a728a5e946 -->
+### 2026-08-25T06:27:52.302Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Retired Git-metadata SQLite cleanup is best-effort after adopting a leftover database. The WAL-directory gitignore covers rebuild journals named ..outcome-index.sqlite.*.tmp-*. status and log do not plant that ignore file. Current lane also lives beside the WAL, not in Git metadata.

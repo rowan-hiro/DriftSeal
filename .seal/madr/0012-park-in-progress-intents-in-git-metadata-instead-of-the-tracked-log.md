@@ -49,3 +49,10 @@ Confirmed accepted; added the consequence that a parked intent lives only in loc
 Status: Accepted → Accepted
 
 Accepted in v2: open outcomes remain parked in Git metadata, using a v2-specific park path and flushing closed lineage into .seal/outcomes/events.jsonl.
+
+<!-- driftseal-reconciliation: ecb0b30d-3086-4470-978a-710805d71d52 -->
+### 2026-08-25T06:27:52.072Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Park the open outcome beside the WAL at outcomes/.in-progress.jsonl, not in Git metadata. Hooks and absorb read that sidecar next to the WAL being folded. A leftover Git-metadata park is still read and adopted on the next write.

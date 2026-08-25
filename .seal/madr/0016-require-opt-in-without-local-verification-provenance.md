@@ -49,3 +49,10 @@ Expanded the trust boundary from Git tracking to matching local provenance, pres
 Status: Accepted → Accepted
 
 Accepted in v2: verification commands without matching local outcome provenance still require explicit inspection and opt-in.
+
+<!-- driftseal-reconciliation: f19db3c9-b074-4f38-9ca3-9a5144fe34f6 -->
+### 2026-08-25T06:27:52.150Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Local verification provenance sits beside the WAL at outcomes/.driftseal-local-outcome.json, not in Git metadata. A leftover Git-metadata provenance file is still read until the next write.
