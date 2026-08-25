@@ -60,7 +60,8 @@ attribute，并配置本地 Git merge driver。Git config 不会随 clone 传播
 
 `driftseal init --lang <BCP-47-tag>` 用来指定 outcome 与 MADR 正文的语言。
 `--local-log` 会让 `.seal/` 保持本地、不被跟踪；DriftSeal 只报告当前 tracked 状态，
-不会替你修改 `.gitignore` 或 Git index。
+不会替你修改仓库根目录的 `.gitignore` 或 Git index。seal 在 Git worktree 内时，
+`init` 仍可能写入 `.seal/outcomes/.gitignore`，用来忽略派生 sidecar。
 
 ## 基本工作流
 
@@ -141,19 +142,21 @@ lane 不能改名或删除。`lane add` 打错的名字会一直出现在 `drift
 直到 `lane switch main` 或把该 lane 加回来。`log --last N` 在 open outcome 属于
 别的 lane 时，返回条数可以多于 N。
 
-派生的 SQLite outcome index 放在 Git metadata（或自定义 seal 旁边）。它只是可以
-随时删除重建的 read model；`events.jsonl` 仍是唯一 canonical history。增量同步跟随
-`indexedThrough` 和 `indexedLines`。未变化的 hot read 用 file identity 做常量时间
-校验；增量追赶前会校验此前全部 WAL prefix 的 checksum。source 被改写、schema
-不兼容、indexed row 损坏或 SQLite read 失败时，DriftSeal 会全量重建。
+派生的 SQLite outcome index 放在 WAL 旁边（`outcomes/.outcome-index.sqlite`）。
+它只是可以随时删除重建的 read model；`events.jsonl` 仍是唯一 canonical history。
+增量同步跟随 `indexedThrough` 和 `indexedLines`。未变化的 hot read 用 file
+identity 做常量时间校验；增量追赶前会校验此前全部 WAL prefix 的 checksum。
+source 被改写、schema 不兼容、indexed row 损坏或 SQLite read 失败时，DriftSeal
+会全量重建。
 
 `log --last N` 使用 `(lane, reclaimed, ordinal)` SQLite index，只读取命中的 outcome
 row，并补上其他 lane 的 open outcome。parked event 会依据 index 中保存的 committed
 event identity 做定向 overlay，不再因此重扫 committed WAL。无锁读取遇到缺失或 stale
 database 时，会在内存中 fold canonical WAL，绝不会返回 stale index。保存的 WAL byte
 range 留给后续 projection 使用，但 recent-log lookup 不依赖它。database 可以重建，
-不会随 log 一起提交。自定义 home 下的 sidecar 放在 `events.jsonl` 旁边；该目录在 Git
-worktree 内时，由目录里的 `.gitignore` 忽略。
+不会随 log 一起提交。sidecar 放在 `events.jsonl` 旁边；该目录在 Git worktree
+内时，由目录里的 `.gitignore` 忽略。文件留在工作树里，避免被默认禁止写入
+`.git/` 的 agent sandbox 拦住。
 
 ## Decision 与 MADR
 
@@ -262,9 +265,11 @@ tools 可以立刻看到 migration 后的状态。
 
 ## Git 与 merge
 
-在 Git worktree 中，`begin` 会把 open outcome park 到 Git metadata，避免弄脏 tracked
-log；`end` 再把完整 lineage 写入 `.seal/outcomes/events.jsonl`。正常工作期间 event log
-保持 append-only。
+在默认 Git-repository seal 中，`begin` 会把 open outcome park 到 WAL 旁边
+（`.seal/outcomes/.in-progress.jsonl`，已被 gitignore），避免弄脏 tracked log。
+自定义 `$DRIFTSEAL_HOME` 会把该 open outcome 直接写入 `events.jsonl`。`end`
+再把 parked lineage flush 到 `.seal/outcomes/events.jsonl`。正常工作期间 event
+log 保持 append-only。
 
 发生 merge collision 后执行：
 
@@ -310,10 +315,16 @@ resources 为：
   `absorb`，不要手改。
 - `.seal/madr/` 保存编号化 MADR。
 - `$DRIFTSEAL_HOME` 替换整个 `.seal` root。
-- 当前 lane 与派生 SQLite outcome index 对默认 repo seal 存在 Git metadata 里，对自定义 seal
-  则放在旁边（`outcomes/.current-lane` 与 `outcomes/.outcome-index.sqlite`）。自定义
-  seal 在 Git worktree 内时，这些 sidecar 会被 gitignore。它们可以重建，不是
-  committed WAL 的一部分。
+- 派生 SQLite outcome index 和当前 lane 指针放在 WAL 旁边
+  （`outcomes/.outcome-index.sqlite`、`outcomes/.current-lane`）。index 可以从
+  `events.jsonl` 重建；缺失或过期的 current-lane 会回退到 `main`。默认 repo
+  seal 还会把 open outcome 和本地 verification provenance park 在 WAL 旁边
+  （`outcomes/.in-progress.jsonl`、`outcomes/.driftseal-local-outcome.json`）。
+  这两份文件不能重建：删掉 park 会丢掉尚未 flush 的 open outcome，删掉
+  provenance 会改变 verifier 信任。自定义 `$DRIFTSEAL_HOME` 会把 open outcome
+  直接写入 WAL，provenance 仍放在该 log 旁边。outcomes 目录在 Git worktree 内时，
+  这些 sidecar 会被 gitignore。默认 repo seal 下每个 worktree 各自一份；共享的
+  `$DRIFTSEAL_HOME` 会共用那里实际存在的文件。
 - advisory hook 只提示 lifecycle 状态，不会扩大 repo 中 `AGENTS.md` 的政策边界。
 
 DriftSeal 不会替你判断 verification command 是否安全，也不会判断测试本身是否充分。

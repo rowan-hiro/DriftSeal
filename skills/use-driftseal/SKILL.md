@@ -47,13 +47,14 @@ If `status` or `log` fails with a duplicate id or with `multiple outcomes in
 progress`, or the outcome log has conflict markers, run `driftseal absorb`
 instead of editing `.seal/outcomes/events.jsonl`. When both sides still have an
 open outcome, add `--abandon-theirs` or `--abandon-ours`; this works whether your
-open outcome sits in the log or is parked in Git metadata. `driftseal init` also
+open outcome sits in the log or is parked beside the WAL. `driftseal init` also
 configures the local git merge driver; clones need `init` again for that driver.
 
-In a Git worktree, `begin` does not dirty the tracked outcome log, so `git merge`
-can run with an outcome still in progress. `end` writes the closed record to
-`.seal/outcomes/events.jsonl`; if it is interrupted, the outcome stays open
-there and `end` can be run again.
+In a default Git-repository seal, `begin` parks beside the WAL and does not dirty
+the tracked outcome log, so `git merge` can run with an outcome still in
+progress. Custom `$DRIFTSEAL_HOME` seals write that open outcome directly to
+`events.jsonl`. `end` writes the closed record to `.seal/outcomes/events.jsonl`;
+if it is interrupted, the outcome stays open there and `end` can be run again.
 
 For a v1 repository, do not reinterpret or delete the old logs directly. Use
 `driftseal migrate v1-to-v2 inspect`, prepare a reviewed grouping plan, apply

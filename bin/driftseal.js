@@ -20,7 +20,8 @@
  *
  * Seal root: $DRIFTSEAL_HOME, or .seal in cwd.
  * Outcome log: <seal-root>/outcomes/events.jsonl.
- * In a Git worktree, an open outcome is parked in Git metadata until end.
+ * In a default Git-repository seal, an open outcome is parked beside the WAL until end.
+ * Custom $DRIFTSEAL_HOME seals write open outcomes directly to the WAL.
  * MADR records: <seal-root>/madr/.
  */
 
@@ -59,10 +60,22 @@ const PROTOCOL_VERSION = '2.1';
 const DEFAULT_LOG_LANGUAGE = 'en';
 const DEFAULT_LANE = 'main';
 const LANE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
-const IN_PROGRESS_GIT_PATH = 'driftseal-v2-in-progress.jsonl';
-const CURRENT_LANE_GIT_PATH = 'driftseal-v2-current-lane';
-const LANE_INDEX_GIT_PATH = 'driftseal-v3-outcome-index.sqlite';
-const LEGACY_LANE_INDEX_GIT_PATH = 'driftseal-v2-lane-index.json';
+const IN_PROGRESS_SIDECAR = '.in-progress.jsonl';
+const WORKSPACE_SIDECAR_IGNORE_NAMES = Object.freeze([
+  '.current-lane',
+  '.lane-index.json',
+  '.in-progress.jsonl',
+  '.driftseal-local-outcome.json',
+  '.outcome-index.sqlite',
+  '.outcome-index.sqlite-journal',
+  '.outcome-index.sqlite-wal',
+  '.outcome-index.sqlite-shm',
+  '..outcome-index.sqlite.*.tmp',
+  '..outcome-index.sqlite.*.tmp-*',
+  '..current-lane.*.tmp',
+  '..in-progress.jsonl.*.tmp',
+  '..driftseal-local-outcome.json.*.tmp',
+]);
 const LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_INIT_STALE_MS = 5 * 1000;
 const READ_ONLY_NOTICE = '(read-only: another mutation holds the lock; tail repair skipped)';
@@ -574,13 +587,6 @@ function gitWorktreeRoot(cwd = process.cwd()) {
   return gitCapture(['rev-parse', '--show-toplevel'], cwd);
 }
 
-function worktreeInProgressFile(cwd = process.cwd()) {
-  if (!isGitWorkTree(cwd)) return null;
-  const gitPath = gitCapture(['rev-parse', '--git-path', IN_PROGRESS_GIT_PATH], cwd);
-  if (!gitPath) return null;
-  return path.resolve(cwd, gitPath);
-}
-
 function isParkableOutcomeLog() {
   if (process.env.DRIFTSEAL_HOME) return false;
   const root = gitWorktreeRoot();
@@ -588,30 +594,45 @@ function isParkableOutcomeLog() {
   return path.resolve(logFile()) === path.resolve(root, '.seal', 'outcomes', 'events.jsonl');
 }
 
-function inProgressFile() {
-  if (!isParkableOutcomeLog()) return null;
-  return worktreeInProgressFile();
+function inProgressFileForLog(file) {
+  return path.join(path.dirname(file), IN_PROGRESS_SIDECAR);
 }
 
-function worktreeMetadataFile(gitPath, cwd = process.cwd()) {
-  if (!isGitWorkTree(cwd)) return null;
-  const resolved = gitCapture(['rev-parse', '--git-path', gitPath], cwd);
-  if (!resolved) return null;
-  return path.resolve(cwd, resolved);
+function inProgressFile() {
+  if (!isParkableOutcomeLog()) return null;
+  return inProgressFileForLog(logFile());
+}
+
+function existingInProgressFileForLog(file) {
+  return inProgressFileForLog(file);
+}
+
+function existingInProgressFile() {
+  if (!isParkableOutcomeLog()) return null;
+  return existingInProgressFileForLog(logFile());
+}
+
+function adoptInProgressFile() {
+  const current = inProgressFile();
+  if (!current) return null;
+  ensureDerivedLaneSidecarIgnore();
+  ensureDirectoryDurable(path.dirname(current));
+  return current;
 }
 
 function currentLaneFile() {
-  if (isParkableOutcomeLog()) return worktreeMetadataFile(CURRENT_LANE_GIT_PATH);
+  // Keep the worktree-local pointer beside the WAL so agent sandboxes that
+  // deny .git writes can still switch lanes.
   return path.join(logDir(), '.current-lane');
 }
 
 function laneIndexFile() {
-  if (isParkableOutcomeLog()) return worktreeMetadataFile(LANE_INDEX_GIT_PATH);
+  // Keep the disposable index beside the WAL so agent sandboxes that deny
+  // .git writes can still rebuild it inside the workspace.
   return path.join(logDir(), '.outcome-index.sqlite');
 }
 
 function legacyLaneIndexFile() {
-  if (isParkableOutcomeLog()) return worktreeMetadataFile(LEGACY_LANE_INDEX_GIT_PATH);
   return path.join(logDir(), '.lane-index.json');
 }
 
@@ -619,12 +640,15 @@ function emptyLaneCatalog() {
   return outcomeFoldEngine.emptyLaneCatalog();
 }
 
-function readCurrentLaneName() {
-  const file = currentLaneFile();
-  if (!file || !fs.existsSync(file)) return DEFAULT_LANE;
+function readLaneNameFromFile(file) {
+  if (!file || !fs.existsSync(file)) return null;
   const name = fs.readFileSync(file, 'utf8').trim();
-  if (!name) return DEFAULT_LANE;
+  if (!name) return null;
   return normalizeLaneName(name);
+}
+
+function readCurrentLaneName() {
+  return readLaneNameFromFile(currentLaneFile()) || DEFAULT_LANE;
 }
 
 function writeCurrentLaneName(name, { readOnly = false } = {}) {
@@ -636,29 +660,59 @@ function writeCurrentLaneName(name, { readOnly = false } = {}) {
   atomicWriteFile(file, `${name}\n`, 0o600);
 }
 
+function existingAncestor(dir) {
+  let current = path.resolve(dir);
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
+function listedIgnoreNames(content) {
+  return new Set(
+    content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+  );
+}
+
+function workspaceSidecarIgnoreFile() {
+  return path.join(logDir(), '.gitignore');
+}
+
+function gitContainedOutcomeLog() {
+  return isGitWorkTree(existingAncestor(logDir()));
+}
+
+function workspaceSidecarIgnoreComplete() {
+  const ignoreFile = workspaceSidecarIgnoreFile();
+  if (!fs.existsSync(ignoreFile)) return false;
+  const listed = listedIgnoreNames(fs.readFileSync(ignoreFile, 'utf8'));
+  return WORKSPACE_SIDECAR_IGNORE_NAMES.every((name) => listed.has(name));
+}
+
+function canPersistDerivedOutcomeIndex() {
+  return !gitContainedOutcomeLog() || workspaceSidecarIgnoreComplete();
+}
+
 function ensureDerivedLaneSidecarIgnore() {
-  if (isParkableOutcomeLog()) return;
-  if (!isGitWorkTree(logDir())) return;
-  const ignoreFile = path.join(logDir(), '.gitignore');
+  if (!gitContainedOutcomeLog()) return { changed: false, target: null };
+  const ignoreFile = workspaceSidecarIgnoreFile();
   let current = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
+  const listed = listedIgnoreNames(current);
   let next = current;
-  for (const name of [
-    '.current-lane',
-    '.lane-index.json',
-    '.outcome-index.sqlite',
-    '.outcome-index.sqlite-journal',
-    '.outcome-index.sqlite-wal',
-    '.outcome-index.sqlite-shm',
-    '..outcome-index.sqlite.*.tmp',
-  ]) {
-    const present = next.split(/\r?\n/).some((line) => line.trim() === name);
-    if (present) continue;
+  for (const name of WORKSPACE_SIDECAR_IGNORE_NAMES) {
+    if (listed.has(name)) continue;
     if (next && !next.endsWith('\n')) next += '\n';
     next += `${name}\n`;
   }
-  if (next === current) return;
+  if (next === current) return { changed: false, target: ignoreFile };
   ensureDirectoryDurable(logDir());
   atomicWriteFile(ignoreFile, next, 0o644);
+  return { changed: true, target: ignoreFile };
 }
 
 function hashFilePrefix(file, length) {
@@ -817,16 +871,15 @@ function replaceOutcomeIndexFile(temporary, target) {
 }
 
 function removeLegacyLaneIndex() {
-  const legacy = legacyLaneIndexFile();
-  if (legacy) fs.rmSync(legacy, { force: true });
+  fs.rmSync(legacyLaneIndexFile(), { force: true });
 }
 
 function rebuildCommittedOutcomeIndex({ repairTail = false } = {}) {
   const wal = logFile();
   const target = laneIndexFile();
   if (!target) return null;
+  if (!canPersistDerivedOutcomeIndex()) return null;
   ensureDirectoryDurable(path.dirname(target));
-  ensureDerivedLaneSidecarIgnore();
   const temporary = temporaryIndexPath(target);
   removeIndexFiles(temporary);
   let index;
@@ -872,6 +925,7 @@ function syncCommittedLaneIndex({ repairTail = false, readOnly = false, forceFul
   const wal = logFile();
   const target = laneIndexFile();
   if (!target) return null;
+  if (!readOnly && !canPersistDerivedOutcomeIndex()) return null;
   if (readOnly) {
     if (!fs.existsSync(target)) return null;
     try {
@@ -993,7 +1047,7 @@ function recoverableOutcomeIndexError(error) {
 }
 
 function loadOutcomeView({ repairTail = false, readOnly = false } = {}) {
-  const park = inProgressFile();
+  const park = existingInProgressFile();
   let index = syncCommittedLaneIndex({ repairTail, readOnly });
   if (!index) {
     const records = fold(readEvents({ repairTail, readOnly }));
@@ -1095,7 +1149,7 @@ function indexedLaneSummary(state, name) {
 }
 
 function tryLoadRecentOutcomeView(n, { includeReclaimed = false, repairTail = false, readOnly = false } = {}) {
-  const park = inProgressFile();
+  const park = existingInProgressFile();
   let index = syncCommittedLaneIndex({ repairTail, readOnly });
   if (!index) return null;
   const query = () => {
@@ -1150,7 +1204,7 @@ function readJsonlRecordsFromFile(file, { repairTail = false, readOnly = false }
   if (
     readOnly &&
     process.env._DRIFTSEAL_TEST_UNLINK_PARK_BEFORE_READ === '1' &&
-    path.basename(file) === IN_PROGRESS_GIT_PATH
+    path.basename(file) === IN_PROGRESS_SIDECAR
   ) {
     // Simulate a writer flushing and unlinking the park between the existence
     // check and the read; the next attempt sees the park as absent.
@@ -1232,13 +1286,13 @@ function planIndexedInProgressOverlay(index, park, { repairTail = false, readOnl
 }
 
 function discardInProgressLog(park) {
-  fs.unlinkSync(park);
+  fs.rmSync(park, { force: true });
   fsyncDirectory(path.dirname(park));
 }
 
 function reconcileInProgressRecords(
   committedEvents,
-  { repairTail = false, readOnly = false, park = inProgressFile() } = {}
+  { repairTail = false, readOnly = false, park = existingInProgressFile() } = {}
 ) {
   const plan = planInProgressOverlay(committedEvents, park, { repairTail, readOnly });
   if (!plan) return [];
@@ -1260,7 +1314,7 @@ function readEventsSnapshot(file, { repairTail = false, readOnly = false } = {})
     reconcileInProgressRecords(events, {
       repairTail,
       readOnly,
-      park: worktreeInProgressFile(),
+      park: existingInProgressFileForLog(file),
     }).map((record) => record.event)
   );
 }
@@ -1389,7 +1443,7 @@ function appendEventTo(file, event) {
  * Returns the outcome ids it had to remap.
  */
 function flushInProgressLog() {
-  const park = inProgressFile();
+  const park = adoptInProgressFile();
   if (!park || !fs.existsSync(park)) return new Map();
   const committedRecords = readJsonlRecordsFromFile(logFile());
   const plan = planInProgressOverlay(
@@ -1419,7 +1473,8 @@ function parkedOpenOutcome(park) {
 }
 
 function appendEvent(event) {
-  const park = inProgressFile();
+  ensureDerivedLaneSidecarIgnore();
+  const park = adoptInProgressFile();
   if (!park) {
     const stored = appendEventTo(logFile(), event);
     if (event.type === 'begin') writeLocalOutcomeProvenance(stored);
@@ -1434,7 +1489,7 @@ function appendEvent(event) {
   if (event.type === 'begin') return appendEventTo(park, event);
   if (!open || open.id !== event.id) return appendEventTo(logFile(), event);
   if (event.type !== 'end') return appendEventTo(park, event);
-  // Close in the tracked log, never in Git metadata: the parked records move first, so the
+  // Close in the tracked log, never only in the park: the parked records move first, so the
   // closing record cannot end up somewhere a clone or a removed worktree would drop it.
   const remapped = flushInProgressLog();
   if (process.env._DRIFTSEAL_TEST_CRASH_AFTER_IN_PROGRESS_FLUSH === '1') {
@@ -1448,11 +1503,7 @@ function contentHash(content) {
 }
 
 function localOutcomeProvenanceFile() {
-  const root = gitWorktreeRoot();
-  const key = contentHash(path.resolve(logFile())).slice(0, 16);
-  if (!root) return path.join(logDir(), LOCAL_OUTCOME_PROVENANCE_FILE);
-  const gitPath = gitCapture(['rev-parse', '--git-path', `driftseal-local-outcome-${key}.json`]);
-  return gitPath ? path.resolve(process.cwd(), gitPath) : null;
+  return path.join(logDir(), LOCAL_OUTCOME_PROVENANCE_FILE);
 }
 
 function localOutcomeLogIdentity() {
@@ -1471,6 +1522,7 @@ function localOutcomeProvenanceFingerprint({ id, ts, verify }) {
 function writeLocalOutcomeProvenance(event) {
   const file = localOutcomeProvenanceFile();
   if (!file) return;
+  ensureDerivedLaneSidecarIgnore();
   ensureDirectoryDurable(path.dirname(file));
   atomicWriteFile(
     file,
@@ -1484,8 +1536,7 @@ function writeLocalOutcomeProvenance(event) {
   );
 }
 
-function readLocalOutcomeProvenance() {
-  const file = localOutcomeProvenanceFile();
+function parseLocalOutcomeProvenance(file) {
   if (!file || !fs.existsSync(file)) return null;
   try {
     const provenance = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -1501,6 +1552,10 @@ function readLocalOutcomeProvenance() {
   } catch {
     return null;
   }
+}
+
+function readLocalOutcomeProvenance() {
+  return parseLocalOutcomeProvenance(localOutcomeProvenanceFile());
 }
 
 function hasMatchingLocalOutcomeProvenance(outcome) {
@@ -1519,11 +1574,13 @@ function hasMatchingLocalOutcomeProvenance(outcome) {
 }
 
 function clearLocalOutcomeProvenance(id) {
-  const file = localOutcomeProvenanceFile();
   const provenance = readLocalOutcomeProvenance();
-  if (!file || !provenance || provenance.id !== id) return;
-  fs.unlinkSync(file);
-  fsyncDirectory(path.dirname(file));
+  if (!provenance || provenance.id !== id) return;
+  const file = localOutcomeProvenanceFile();
+  if (file && fs.existsSync(file)) {
+    fs.unlinkSync(file);
+    fsyncDirectory(path.dirname(file));
+  }
 }
 
 function atomicWriteFile(target, content, createMode = 0o644) {
@@ -3362,6 +3419,8 @@ const SKILL_RELEASE_DIGESTS = new Set([
   '42a0549dff21483c0508ea4a79658e7bf05cd98f8af4238c95dbd23cdcde7ee6', // 2.0.0 outcome workflow
   '38e89060ff37ecdd663eae73a3e0c646d6bb220fc8232a5762356375d84ba69b', // 2.1.0 outcome lanes
   'b4b2cc27ea71c5777b5eb9b67d861fbe1da43f31ab5d422d6a877e0cad592493', // 2.1.0 lane re-anchor recovery
+  '6c49523c2f4a36ea1cd9d0b4e793ea3cdbd9d299174cf1f9a0a54f3d9a7cd331', // workspace park sidecar wording
+  '678cbaa8380f75f7a45d634010b500e51a59b06ea759eaf23cff2980142662f0', // default-seal parking help wording
 ]);
 
 function skillInstallUsage() {
@@ -3783,11 +3842,9 @@ function hookLogFile() {
   const root = gitWorktreeRoot(current);
   while (true) {
     const candidate = path.join(current, '.seal', 'outcomes', 'events.jsonl');
-    if (fs.existsSync(candidate)) return candidate;
-    if (root && path.resolve(root) === current) {
-      const park = worktreeInProgressFile(current);
-      if (park && fs.existsSync(park)) return candidate;
-    }
+    const workspacePark = path.join(current, '.seal', 'outcomes', IN_PROGRESS_SIDECAR);
+    if (fs.existsSync(candidate) || fs.existsSync(workspacePark)) return candidate;
+    if (root && path.resolve(root) === current) return null;
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
@@ -4620,8 +4677,12 @@ function finishAbsorb({
   allowConflict = false,
   followupMessage = null,
 }) {
-  // An outcome parked in Git metadata is part of our side even though the log never saw it.
-  const park = shouldAttachInProgress(outputFile) ? inProgressFile() : null;
+  // A parked outcome is local even though the tracked log never saw it.
+  const park = shouldAttachInProgress(outputFile)
+    ? dryRun
+      ? existingInProgressFileForLog(outputFile)
+      : adoptInProgressFile() || existingInProgressFileForLog(outputFile)
+    : null;
   const plan = planInProgressOverlay(result.map((record) => record.event), park, {
     repairTail: true,
   });
@@ -4992,7 +5053,7 @@ function runMachineVerification({ allowTrackedCommand = false } = {}) {
       fail(`outcome ${outcome.id} has no acceptance criteria; declare them with driftseal begin --accept`);
     }
     if (!outcome.verify) fail(`outcome ${outcome.id} has no verification command`);
-    const park = inProgressFile();
+    const park = existingInProgressFile();
     const parked = park ? parkedOpenOutcome(park) : null;
     const locallyProvenanced = hasMatchingLocalOutcomeProvenance(outcome);
     return {
@@ -6691,10 +6752,11 @@ const commands = {
     } catch (err) {
       printLine(`warning: could not configure git merge driver: ${err && err.message ? err.message : err}`);
     }
+    const indexIgnore = ensureDerivedLaneSidecarIgnore();
 
     if (localLog) warnIfDefaultLogsTracked();
 
-    if (updated === current && !attributes.changed && !driver.changed) {
+    if (updated === current && !attributes.changed && !driver.changed && !indexIgnore.changed) {
       printLine('AGENTS.md already contains the DriftSeal protocols; nothing to do');
       return { changed: false, target };
     }
@@ -6707,6 +6769,9 @@ const commands = {
     }
     if (driver.changed) {
       printLine('Configured local git merge driver for DriftSeal outcome logs');
+    }
+    if (indexIgnore.changed) {
+      printLine(`Configured derived outcome-index ignore: ${indexIgnore.target}`);
     }
     return { changed: true, target };
   },
@@ -6785,7 +6850,7 @@ seal root: $DRIFTSEAL_HOME, or .seal in the current directory
 outcome log: <seal-root>/outcomes/events.jsonl
 MADR records: <seal-root>/madr/
 $DRIFTSEAL_DECISION_HOME is a v1-only default for migration source detection; v2 runtime ignores it.
-In a Git worktree, begin parks an open outcome in Git metadata until end, so merge does not need a log-only commit.`);
+In a default Git-repository seal, begin parks an open outcome beside the WAL until end, so merge does not need a log-only commit. Custom $DRIFTSEAL_HOME seals write that open outcome directly to events.jsonl.`);
     return null;
   },
 
@@ -7197,7 +7262,7 @@ function dispatch(argv) {
         if (cmd === 'hook') {
           // Hooks read the nearest ancestor log, not the cwd-relative one: lock
           // the directory of the file the hook will actually read (the park a
-          // writer flushes under that same lock lives in the repo's Git metadata).
+          // writer flushes under that same lock lives beside the WAL).
           // With no ancestor log the hook prints nothing, so skip locking — this
           // also avoids creating a spurious <cwd>/.intent-log.
           const hookFile = hookLogFile();
@@ -7205,6 +7270,14 @@ function dispatch(argv) {
           resources = [path.dirname(hookFile)];
         } else if (legacyParkedIntent()) {
           resources = [path.dirname(legacyIntentLogFile())];
+        } else if (!fs.existsSync(logDir())) {
+          // Do not mkdir a cwd-relative seal just to lock a read: status/log
+          // from a subdirectory would otherwise plant packages/**/.seal.
+          const data = fn(rest, { readOnly: true });
+          return {
+            data,
+            exitCode: data && Number.isInteger(data.exitCode) ? data.exitCode : 0,
+          };
         } else {
           resources = [logDir()];
         }

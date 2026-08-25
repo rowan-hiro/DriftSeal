@@ -24,7 +24,7 @@ Orthogonal capabilities share one append-only events.jsonl. After merge, log --l
 
 ## Decision Outcome
 
-Keep a single WAL. Tag each outcome with one named lane (default main). Store the current lane per worktree in Git metadata. Default log and re-anchor follow the current lane. Refuse switching while an outcome is open. Persist a derived, local lane index as a reconstructable fold cache; rebuild incrementally from indexedThrough and indexedLines, or fully when the log identity changes. Per-lane heads, reverse links, and WAL byte ranges are stored for a seek path that is not consumed yet. Do not put parent pointers in canonical events, and do not allow one open outcome per lane in a shared worktree.
+Keep a single WAL. Tag each outcome with one named lane (default main). Store the current lane per worktree in a gitignored sidecar beside the WAL (`outcomes/.current-lane`). A shared `$DRIFTSEAL_HOME` shares that pointer. Default log and re-anchor follow the current lane. Refuse switching while an outcome is open. Persist a derived, local lane index as a reconstructable fold cache beside the WAL; rebuild incrementally from indexedThrough and indexedLines, or fully when the log identity changes. Do not put parent pointers in canonical events, and do not allow one open outcome per lane in a shared worktree.
 
 ## Consequences
 
@@ -74,3 +74,24 @@ Hot log --last N now follows persisted lane heads and reverse links until it sel
 Status: Accepted → Accepted
 
 Named lanes now use relational indexes over lane, reclaimed, status, and ordinal instead of persisted head/reverse-link JSON snapshots. Park overlays and migration preflight consume indexed committed facts; events.jsonl remains canonical.
+
+<!-- driftseal-reconciliation: c7c825b7-1729-4eb6-b390-a16732813ecb -->
+### 2026-08-25T03:04:30.862Z — Outcome `2026-08-25-002`
+
+Status: Accepted → Accepted
+
+Store the current-lane pointer beside the WAL at outcomes/.current-lane so agent sandboxes that deny .git writes can switch lanes. Each worktree keeps its own ignored sidecar; a leftover Git-metadata pointer is read until the next write, then removed.
+
+<!-- driftseal-reconciliation: e98a23d9-82a0-47cb-a2f9-f328c5283ea0 -->
+### 2026-08-25T06:27:52.227Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Retired Git-metadata current-lane cleanup is best-effort and cannot fail lane switch after the workspace sidecar is written. status and log on an unupgraded default repo do not plant the WAL-directory gitignore.
+
+<!-- driftseal-reconciliation: a55202d6-122e-4900-a38f-65fef91ab568 -->
+### 2026-08-25T07:21:00.127Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 current-lane state is only outcomes/.current-lane. Leftover Git-metadata lane pointers are no longer read or removed.

@@ -41,3 +41,38 @@ Raise the runtime floor to Node.js 22.13 and use built-in node:sqlite for a disp
 Status: Accepted → Accepted
 
 DriftSeal 3.0 uses built-in node:sqlite on Node.js 22.13+ for a reconstructable outcome read model. One canonical fold bulk-builds the database; WAL tails update affected rows transactionally; exact source and projection checks trigger safe rebuilds or canonical fallback.
+
+<!-- driftseal-reconciliation: f83ad242-6cf5-4cfc-b3b9-7b9f53371118 -->
+### 2026-08-25T02:55:43.161Z — Outcome `2026-08-25-001`
+
+Status: Accepted → Accepted
+
+Keep the disposable SQLite index beside the WAL at outcomes/.outcome-index.sqlite so agent sandboxes that deny .git writes can rebuild it. Reject Git metadata for the database; current lane can stay there. Init plants the sidecar gitignore before begin parks an outcome.
+
+<!-- driftseal-reconciliation: 6e0e17a4-ea70-41fb-8d9a-a0a728a5e946 -->
+### 2026-08-25T06:27:52.302Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Retired Git-metadata SQLite cleanup is best-effort after adopting a leftover database. The WAL-directory gitignore covers rebuild journals named ..outcome-index.sqlite.*.tmp-*. status and log do not plant that ignore file. Current lane also lives beside the WAL, not in Git metadata.
+
+<!-- driftseal-reconciliation: 9208149d-7f43-43bd-86ca-e9b27544f482 -->
+### 2026-08-25T06:59:57.568Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Index persistence inside a Git worktree requires the complete WAL-directory ignore contract, including atomic temp names for lane, park, and provenance sidecars. status and log fold instead of planting or upgrading that file.
+
+<!-- driftseal-reconciliation: f464ee28-dad8-4e69-a687-40574abf711c -->
+### 2026-08-25T07:03:13.478Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Confirmed: index persistence still requires the complete ignore contract, and absorb only upgrades that file when writing the current v2 WAL.
+
+<!-- driftseal-reconciliation: 66313497-5ded-4041-b659-336965d6b0f9 -->
+### 2026-08-25T07:21:00.191Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 SQLite indexes live only at outcomes/.outcome-index.sqlite. Leftover Git-metadata databases are no longer adopted.

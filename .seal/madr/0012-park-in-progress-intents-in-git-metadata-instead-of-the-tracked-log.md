@@ -1,4 +1,4 @@
-# 12. Park in-progress intents in Git metadata instead of the tracked log
+# 12. Park in-progress outcomes beside the WAL instead of the tracked log
 
 Date: 2026-08-14
 
@@ -21,18 +21,18 @@ driftseal begin appends to the tracked events.jsonl, which dirties the worktree.
 * Commit the begin event before every merge
 * Stash events.jsonl around git merge
 * Ignore the intent log with a Git skip-worktree bit
-* Park the open intent in Git metadata until end (chosen)
+* Park the open outcome in a gitignored sidecar beside the WAL until end (chosen)
 
 ## Decision Outcome
 
-In a Git worktree using the default .intent-log, begin and later events for the open intent are parked in a worktree-local file under the Git directory. end atomically appends the closed record to the tracked log. If a parked id collides with events that landed during merge, remap it the same way absorb remaps incoming worktree ids. DRIFTSEAL_HOME and non-Git directories keep writing directly to events.jsonl.
+In a Git worktree using the default seal, begin and later events for the open outcome are parked in a worktree-local gitignored sidecar beside the WAL (`.seal/outcomes/.in-progress.jsonl`). end atomically appends the closed record to the tracked log. If a parked id collides with events that landed during merge, remap it the same way absorb remaps incoming worktree ids. `$DRIFTSEAL_HOME` and non-Git directories keep writing directly to `events.jsonl`.
 
 ## Consequences
 
 * git merge can run while an intent is in progress without a log-only commit
 * Switching branches with an open intent carries that intent with the worktree
 * end is the first time the tracked log becomes dirty for that round
-* A parked intent lives only in local Git metadata: removing the worktree (git worktree remove/prune) or deleting the clone discards the still-open record, and it is never shared by push or clone. Only end makes the round durable in the tracked log, so an in-progress intent should not be left parked indefinitely.
+* A parked outcome lives only in a gitignored worktree sidecar: removing the worktree or deleting the clone discards the still-open record, and it is never shared by push or clone. Only end makes the round durable in the tracked log, so an in-progress outcome should not be left parked indefinitely.
 
 ## Decision History
 
@@ -49,3 +49,31 @@ Confirmed accepted; added the consequence that a parked intent lives only in loc
 Status: Accepted → Accepted
 
 Accepted in v2: open outcomes remain parked in Git metadata, using a v2-specific park path and flushing closed lineage into .seal/outcomes/events.jsonl.
+
+<!-- driftseal-reconciliation: ecb0b30d-3086-4470-978a-710805d71d52 -->
+### 2026-08-25T06:27:52.072Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Park the open outcome beside the WAL at outcomes/.in-progress.jsonl, not in Git metadata. Hooks and absorb read that sidecar next to the WAL being folded. A leftover Git-metadata park is still read and adopted on the next write.
+
+<!-- driftseal-reconciliation: e07a4942-f78b-4075-9ea2-55bdb160aca5 -->
+### 2026-08-25T06:59:57.493Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Title and chosen option now name the WAL-adjacent park sidecar. Open outcomes in a default Git-repository seal stay in outcomes/.in-progress.jsonl; custom homes still write the WAL directly.
+
+<!-- driftseal-reconciliation: 48c65dba-c4fe-4026-8393-c24d84700635 -->
+### 2026-08-25T07:03:13.403Z — Outcome `2026-08-25-004`
+
+Status: Accepted → Accepted
+
+Confirmed: default Git-repository seals park beside the WAL; absorb does not plant that ignore contract onto a v1 intent-log merge.
+
+<!-- driftseal-reconciliation: 1ea33381-2691-446d-8570-9f35dc66b50c -->
+### 2026-08-25T07:20:59.999Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 default Git-repository seals park only at outcomes/.in-progress.jsonl. Leftover Git-metadata parks are no longer read or adopted.

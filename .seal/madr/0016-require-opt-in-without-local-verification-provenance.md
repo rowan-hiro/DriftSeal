@@ -25,7 +25,7 @@ Acceptance-bound verification executes a shell command stored in the intent log.
 
 ## Decision Outcome
 
-Always disclose the exact command before execution. Commands from a local Git park or a matching local provenance marker run normally. An open intent found only in the intent log, without matching local provenance, requires the explicit --allow-tracked-command CLI flag or allowTrackedCommand API/MCP input. Custom-log provenance stays in Git metadata when a worktree is available; non-Git provenance uses a sidecar bound to the local intent log's file identity, so copying the log and sidecar does not transfer trust. Provenance is removed when the intent closes. Missing, malformed, or copied provenance is treated as untrusted.
+Always disclose the exact command before execution. Commands from a local park sidecar or a matching local provenance marker run normally. An open outcome found only in the outcome log, without matching local provenance, requires the explicit `--allow-tracked-command` CLI flag or `allowTrackedCommand` API/MCP input. Provenance sits beside the WAL (`outcomes/.driftseal-local-outcome.json`) and is gitignored when that directory is inside a Git worktree, so copying the log and sidecar does not transfer trust. Provenance is removed when the outcome closes. Missing, malformed, or copied provenance is treated as untrusted.
 
 ## Consequences
 
@@ -49,3 +49,17 @@ Expanded the trust boundary from Git tracking to matching local provenance, pres
 Status: Accepted → Accepted
 
 Accepted in v2: verification commands without matching local outcome provenance still require explicit inspection and opt-in.
+
+<!-- driftseal-reconciliation: f19db3c9-b074-4f38-9ca3-9a5144fe34f6 -->
+### 2026-08-25T06:27:52.150Z — Outcome `2026-08-25-003`
+
+Status: Accepted → Accepted
+
+Local verification provenance sits beside the WAL at outcomes/.driftseal-local-outcome.json, not in Git metadata. A leftover Git-metadata provenance file is still read until the next write.
+
+<!-- driftseal-reconciliation: 6fa20532-8ea8-45bc-a261-afe1bf3f9476 -->
+### 2026-08-25T07:21:00.063Z — Outcome `2026-08-25-005`
+
+Status: Accepted → Accepted
+
+v3 local verification provenance lives only beside the WAL. Leftover Git-metadata provenance files are no longer read.

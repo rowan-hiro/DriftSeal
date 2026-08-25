@@ -286,15 +286,18 @@ function protocolV12(content) {
     );
 }
 
-/** A committed repository whose open outcomes are parked in Git metadata. */
+const PROTOCOL_TRACKED = ['.gitattributes', 'AGENTS.md', '.seal/outcomes/.gitignore'];
+
+function workspaceParkFile(cwd) {
+  return path.join(cwd, '.seal', 'outcomes', '.in-progress.jsonl');
+}
+
+/** A committed repository whose open outcomes are parked beside the WAL. */
 function setupParkedRepository(prefix) {
   const repo = setupGitRepository(prefix);
-  repo.git(['add', '.gitattributes', 'AGENTS.md']);
+  repo.git(['add', ...PROTOCOL_TRACKED]);
   repo.git(['commit', '-m', 'base protocol']);
-  const park = path.resolve(
-    repo.cwd,
-    repo.git(['rev-parse', '--git-path', 'driftseal-v2-in-progress.jsonl']).trim()
-  );
+  const park = workspaceParkFile(repo.cwd);
   return {
     ...repo,
     park,
@@ -346,7 +349,8 @@ test('--version and -V print the package version', () => {
   assert.match(run(['help']), /driftseal init \[--lang <tag>\] \[--local-log\]/);
   assert.match(run(['help']), /driftseal verify/);
   assert.match(run(['help']), /driftseal lane/);
-  assert.match(run(['help']), /parks an open outcome in Git metadata until end/);
+  assert.match(run(['help']), /default Git-repository seal/);
+  assert.match(run(['help']), /Custom \$DRIFTSEAL_HOME seals write that open outcome directly to events\.jsonl/);
   assert.match(runFail(['--version', 'extra']).stderr, /usage: driftseal --version \| -V/);
 });
 
@@ -1423,8 +1427,8 @@ test('hook in a repository without any outcome log creates no directories', () =
 
   assert.equal(run(['hook', 'prompt'], { cwd: nested }), '');
   assert.equal(run(['hook', 'stop'], { cwd: nested }), '');
-  assert.equal(fs.existsSync(path.join(cwd, '.seal/outcomes')), false);
-  assert.equal(fs.existsSync(path.join(nested, '.seal/outcomes')), false);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal/outcomes', 'events.jsonl')), false);
+  assert.equal(fs.existsSync(path.join(nested, '.seal')), false);
 });
 
 test('normal lock release failures make the mutation fail visibly', () => {
@@ -5132,7 +5136,7 @@ test('absorb --git performs a 3-way merge and init installs the driver', () => {
 
 test('begin parks an open outcome so git merge does not need a log-only commit', () => {
   const { cwd, git, run } = setupGitRepository('driftseal-git-park-begin-');
-  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['add', ...PROTOCOL_TRACKED]);
   git(['commit', '-m', 'base protocol']);
 
   run(['begin', 'shared']);
@@ -5204,10 +5208,7 @@ test('a different committed open outcome with the same id does not discard the p
     return true;
   });
 
-  const park = path.resolve(
-    cwd,
-    git(['rev-parse', '--git-path', 'driftseal-v2-in-progress.jsonl']).trim()
-  );
+  const park = workspaceParkFile(cwd);
   const parked = fs
     .readFileSync(park, 'utf8')
     .trim()
@@ -5352,7 +5353,7 @@ test('a linked decision reconciliation stays parked until end', () => {
   ]);
 });
 
-test('hook reminders see an outcome that only exists in Git metadata', () => {
+test('hook reminders see an outcome that only exists in the park sidecar', () => {
   const { cwd, run } = setupParkedRepository('driftseal-git-park-hook-');
   const id = run(['begin', 'parked work']).trim();
   assert.equal(fs.existsSync(path.join(cwd, '.seal/outcomes', 'events.jsonl')), false);
@@ -5906,10 +5907,7 @@ test('SQLite recent-log output matches a full WAL fold with a parked outcome', (
 test('indexed park recovery ignores committed event key order', () => {
   const repo = setupGitRepository('driftseal-sqlite-park-order-');
   const id = repo.run(['begin', 'key order independent park']).trim();
-  const park = path.resolve(
-    repo.cwd,
-    repo.git(['rev-parse', '--git-path', 'driftseal-v2-in-progress.jsonl']).trim()
-  );
+  const park = workspaceParkFile(repo.cwd);
   const event = JSON.parse(fs.readFileSync(park, 'utf8').trim());
   const reordered = Object.fromEntries(Object.entries(event).reverse());
   fs.writeFileSync(
@@ -5960,7 +5958,8 @@ test('commands fall back to the canonical WAL when node:sqlite is unavailable', 
     DRIFTSEAL_DECISION_HOME: path.join(dir, 'madr'),
     _DRIFTSEAL_TEST_DISABLE_SQLITE: '1',
   };
-  assert.match(run(['--version'], { env }), /^3\.0\.0/);
+  const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(run(['--version'], { env }), `${metadata.version}\n`);
   assert.match(run(['log', '--last', '1'], { env }), /sqlite optional read model/);
   assert.equal(
     fs.existsSync(path.join(dir, 'outcomes', '.outcome-index.sqlite')),
@@ -6080,11 +6079,128 @@ test('custom-home lane sidecars are gitignored next to the WAL', () => {
   run(['log']);
   const ignore = fs.readFileSync(path.join(dir, 'outcomes', '.gitignore'), 'utf8');
   assert.match(ignore, /^\.current-lane$/m);
+  assert.match(ignore, /^\.in-progress\.jsonl$/m);
+  assert.match(ignore, /^\.driftseal-local-outcome\.json$/m);
   assert.match(ignore, /^\.outcome-index\.sqlite$/m);
   assert.match(ignore, /^\.outcome-index\.sqlite-journal$/m);
   assert.match(ignore, /^\.outcome-index\.sqlite-wal$/m);
   assert.match(ignore, /^\.outcome-index\.sqlite-shm$/m);
   assert.match(ignore, /^\.\.outcome-index\.sqlite\.\*\.tmp$/m);
+  assert.match(ignore, /^\.\.outcome-index\.sqlite\.\*\.tmp-\*$/m);
+  assert.match(ignore, /^\.\.current-lane\.\*\.tmp$/m);
+  assert.match(ignore, /^\.\.in-progress\.jsonl\.\*\.tmp$/m);
+  assert.match(ignore, /^\.\.driftseal-local-outcome\.json\.\*\.tmp$/m);
+});
+
+test('default repo seals keep the current lane beside the WAL', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-default-lane-pointer-');
+  git(['add', ...PROTOCOL_TRACKED]);
+  git(['commit', '-m', 'base']);
+  run(['lane', 'add', 'index']);
+  run(['lane', 'switch', 'index']);
+  const laneFile = path.join(cwd, '.seal', 'outcomes', '.current-lane');
+  const gitMetadataLane = path.resolve(
+    cwd,
+    git(['rev-parse', '--git-path', 'driftseal-v2-current-lane']).trim()
+  );
+  assert.equal(fs.readFileSync(laneFile, 'utf8').trim(), 'index');
+  assert.equal(fs.existsSync(gitMetadataLane), false);
+  const status = git(['status', '--short', '--', '.seal/outcomes']);
+  assert.doesNotMatch(status, /\.current-lane/);
+});
+
+test('default repo seals keep the SQLite index beside the WAL', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-default-index-');
+  git(['add', ...PROTOCOL_TRACKED]);
+  git(['commit', '-m', 'base']);
+  run(['begin', 'index beside wal']);
+  run(['end', '--status', 'abandoned', '--note', 'done']);
+  run(['log']);
+  const indexFile = path.join(cwd, '.seal', 'outcomes', '.outcome-index.sqlite');
+  const gitMetadataIndex = path.resolve(
+    cwd,
+    git(['rev-parse', '--git-path', 'driftseal-v3-outcome-index.sqlite']).trim()
+  );
+  assert.equal(fs.existsSync(indexFile), true);
+  assert.equal(fs.existsSync(gitMetadataIndex), false);
+  const ignore = fs.readFileSync(path.join(cwd, '.seal', 'outcomes', '.gitignore'), 'utf8');
+  assert.match(ignore, /^\.outcome-index\.sqlite$/m);
+  assert.match(ignore, /^\.outcome-index\.sqlite-journal$/m);
+  assert.match(ignore, /^\.outcome-index\.sqlite-wal$/m);
+  assert.match(ignore, /^\.outcome-index\.sqlite-shm$/m);
+  assert.match(ignore, /^\.\.outcome-index\.sqlite\.\*\.tmp$/m);
+  assert.match(ignore, /^\.\.outcome-index\.sqlite\.\*\.tmp-\*$/m);
+  assert.match(ignore, /^\.\.current-lane\.\*\.tmp$/m);
+  assert.match(ignore, /^\.\.in-progress\.jsonl\.\*\.tmp$/m);
+  assert.match(ignore, /^\.\.driftseal-local-outcome\.json\.\*\.tmp$/m);
+  const status = git(['status', '--short', '--', '.seal/outcomes']);
+  assert.doesNotMatch(status, /\.outcome-index\.sqlite/);
+});
+
+test('status and log do not plant sidecar ignore on an unupgraded repository', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-no-plant-ignore-');
+  const ignore = path.join(cwd, '.seal', 'outcomes', '.gitignore');
+  fs.rmSync(ignore, { force: true });
+  git(['add', '.gitattributes', 'AGENTS.md']);
+  git(['commit', '-m', 'base without sidecar ignore']);
+  assert.match(run(['status']), /no outcome in progress/);
+  run(['log']);
+  assert.equal(fs.existsSync(ignore), false);
+  assert.doesNotMatch(git(['status', '--porcelain']), /\.seal\/outcomes/);
+});
+
+test('status and log do not upgrade an incomplete sidecar ignore', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-incomplete-ignore-read-');
+  const ignore = path.join(cwd, '.seal', 'outcomes', '.gitignore');
+  fs.writeFileSync(ignore, '.outcome-index.sqlite\n');
+  git(['add', '.gitattributes', 'AGENTS.md', ignore]);
+  git(['commit', '-m', 'incomplete sidecar ignore']);
+  assert.match(run(['status']), /no outcome in progress/);
+  run(['log']);
+  assert.equal(fs.readFileSync(ignore, 'utf8'), '.outcome-index.sqlite\n');
+  assert.equal(fs.existsSync(path.join(cwd, '.seal', 'outcomes', '.outcome-index.sqlite')), false);
+  assert.equal(git(['status', '--porcelain']), '');
+});
+
+test('begin upgrades an incomplete sidecar ignore', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-incomplete-ignore-begin-');
+  const ignore = path.join(cwd, '.seal', 'outcomes', '.gitignore');
+  fs.writeFileSync(ignore, '.outcome-index.sqlite\n');
+  git(['add', '.gitattributes', 'AGENTS.md', ignore]);
+  git(['commit', '-m', 'incomplete sidecar ignore']);
+  run(['begin', 'upgrade ignore']);
+  const upgraded = fs.readFileSync(ignore, 'utf8');
+  assert.match(upgraded, /^\.in-progress\.jsonl$/m);
+  assert.match(upgraded, /^\.\.current-lane\.\*\.tmp$/m);
+  assert.match(upgraded, /^\.\.in-progress\.jsonl\.\*\.tmp$/m);
+  assert.match(upgraded, /^\.\.driftseal-local-outcome\.json\.\*\.tmp$/m);
+});
+
+test('status from a subdirectory does not plant a nested seal', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-subdir-status-ignore-');
+  git(['add', ...PROTOCOL_TRACKED]);
+  git(['commit', '-m', 'base']);
+  const nested = path.join(cwd, 'packages', 'app');
+  fs.mkdirSync(nested, { recursive: true });
+  assert.match(run(['status'], { cwd: nested }), /no outcome in progress/);
+  run(['log'], { cwd: nested });
+  assert.equal(fs.existsSync(path.join(nested, '.seal')), false);
+  assert.doesNotMatch(git(['status', '--porcelain']), /packages/);
+});
+
+test('default repo seals park an open outcome beside the WAL', () => {
+  const { cwd, git, run } = setupGitRepository('driftseal-park-beside-wal-');
+  git(['add', ...PROTOCOL_TRACKED]);
+  git(['commit', '-m', 'base']);
+  run(['begin', 'park beside wal']);
+  assert.equal(fs.existsSync(workspaceParkFile(cwd)), true);
+  const gitPark = path.resolve(
+    cwd,
+    git(['rev-parse', '--git-path', 'driftseal-v2-in-progress.jsonl']).trim()
+  );
+  assert.equal(fs.existsSync(gitPark), false);
+  assert.equal(fs.existsSync(path.join(cwd, '.seal', 'outcomes', 'events.jsonl')), false);
+  assert.equal(git(['status', '--porcelain']), '');
 });
 
 test('non-git custom-home lane sidecars are not gitignored', () => {
