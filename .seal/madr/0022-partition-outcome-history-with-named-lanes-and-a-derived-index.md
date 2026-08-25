@@ -74,3 +74,10 @@ Hot log --last N now follows persisted lane heads and reverse links until it sel
 Status: Accepted → Accepted
 
 Named lanes now use relational indexes over lane, reclaimed, status, and ordinal instead of persisted head/reverse-link JSON snapshots. Park overlays and migration preflight consume indexed committed facts; events.jsonl remains canonical.
+
+<!-- driftseal-reconciliation: c7c825b7-1729-4eb6-b390-a16732813ecb -->
+### 2026-08-25T03:04:30.862Z — Outcome `2026-08-25-002`
+
+Status: Accepted → Accepted
+
+Store the current-lane pointer beside the WAL at outcomes/.current-lane so agent sandboxes that deny .git writes can switch lanes. Each worktree keeps its own ignored sidecar; a leftover Git-metadata pointer is read until the next write, then removed.
