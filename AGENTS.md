@@ -59,7 +59,7 @@ names, flags, status tokens, ids, and lane names in English.
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 `.seal/outcomes/events.jsonl` (or its configured equivalent) directly. Use
 `reclaim`/`unreclaim` for visibility markers and `absorb` after merge
-collisions. These operations preserve append-only single-lineage history.
+collisions or when Decision History outcome references are stale. These operations preserve append-only single-lineage history.
 
 Seal root: `.seal/` (override with `$DRIFTSEAL_HOME`); outcome log:
 `.seal/outcomes/events.jsonl`; commit `.seal/` with the code.
@@ -85,8 +85,8 @@ Keep MADR section headings, status tokens, and ids in English.
 Use `proposed|accepted|rejected|deferred|deprecated|superseded` statuses. Link
 existing MADRs from `begin` or `extend`, then reconcile each linked record
 with `driftseal decision update` before successful or partial closure. After a
-merge, `driftseal absorb` remaps colliding ids; it never auto-merges concurrent
-edits of a shared MADR.
+merge, `driftseal absorb` remaps colliding ids and repairs managed Decision History
+outcome references; it never auto-merges concurrent edits of a shared MADR.
 Commit `.seal/madr/` with the code.
 <!-- /driftseal-decisions -->
 

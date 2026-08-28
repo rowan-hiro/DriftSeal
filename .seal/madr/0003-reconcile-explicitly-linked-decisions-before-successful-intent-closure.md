@@ -82,3 +82,10 @@ Preserved all existing MADR trailing whitespace and blank lines during reconcili
 Status: Accepted → Accepted
 
 Accepted in v2: linked MADRs still require explicit reconciliation before completed or partial outcome closure, including links appended by extend.
+
+<!-- driftseal-reconciliation: a1ef0ccd-0b3b-447b-85fa-8821f5dce1fe -->
+### 2026-08-28T09:14:55.488Z — Outcome `2026-08-28-003`
+
+Status: Accepted → Accepted
+
+Confirmed reconciliation integrity during absorb: managed history headings now resolve through stable reconciliation IDs scoped to their MADR, and only hashes matching the exact pre-repair content are rebound. Open and interrupted reconciliations remain recoverable; unrelated edits still fail closure checks.

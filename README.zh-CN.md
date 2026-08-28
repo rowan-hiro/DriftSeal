@@ -196,7 +196,7 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 | `driftseal lane add\|switch\|assign\|show` | 按长期能力切分历史。 |
 | `driftseal reclaim [id ...] --reason "..." [--force]` | 通过 append-only marker 隐藏无意义的已关闭记录。 |
 | `driftseal unreclaim <id> --reason "..."` | 恢复 reclaimed record。 |
-| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | 合并另一条 lineage 并处理撞号。 |
+| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | 合并另一条 lineage，处理撞号，并修复 MADR Decision History 中的过期 outcome 引用。 |
 | `driftseal decision add\|update\|list\|show` | 管理 MADR。 |
 | `driftseal migrate v1-to-v2 inspect --json [migration paths]` | 规范化 v1 状态，供模型分组。 |
 | `driftseal migrate v1-to-v2 apply --plan <file> [migration paths]` | 校验分组计划，并在 v1 旁边创建 v2 seal。 |
@@ -283,6 +283,14 @@ driftseal absorb
 不要手改 JSONL。`absorb` 会给撞号的 outcome 与 decision id 重新编号，重新绑定受影响的
 contract hash，并拒绝自动合并 shared MADR 的并发编辑。若两条 lineage 都处于 open
 状态，必须显式选择 `--abandon-theirs` 或 `--abandon-ours`。
+
+`absorb` 还会通过 reconciliation ID 将 MADR 的 Decision History 条目与合并后的 log
+对应，修正其中的 outcome 引用，并同步匹配的内容 hash。默认处理当前 seal 的 `madr/`；
+导入其他 log 时，默认从该 log 的 `../madr/` 读取 MADR，可用 `--decisions` 指定其他来源。
+运行 `driftseal absorb --dry-run` 可预览修复；旧版本合并后留下的错链，即使 outcome ID
+已经没有冲突，也可以修复。找不到对应 reconciliation ID 的条目会保持原样。若 Git merge
+driver 提示 decision history 需要修复，运行 `driftseal absorb`，将修复后的 log 和 MADR
+加入 staging area，再完成 merge。
 
 ## Node API 与 MCP
 
