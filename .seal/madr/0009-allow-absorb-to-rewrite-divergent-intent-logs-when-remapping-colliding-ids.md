@@ -48,3 +48,10 @@ Confirmed the accepted absorb design while making decision handling three-way an
 Status: Accepted → Accepted
 
 Accepted in v2: absorb remains the only lineage rewrite for collision repair, now remaps outcome starts and rebinds contract hashes affected by decision-id changes.
+
+<!-- driftseal-reconciliation: 53bad3a2-9a36-4e9c-a458-fbecf3270be2 -->
+### 2026-08-28T09:14:55.633Z — Outcome `2026-08-28-003`
+
+Status: Accepted → Accepted
+
+Absorb now repairs managed MADR outcome references by reconciliation ID, including stale references left by older merges and remapped parked outcomes. Preserve local outcome IDs and remap the incoming lineage rather than globally renumbering by timestamp. The Git driver stops for worktree history repair, avoiding concurrent writes to MADRs that Git is merging; normal absorb repairs references and matching content hashes, with dry-run previews.

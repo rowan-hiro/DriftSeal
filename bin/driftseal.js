@@ -4226,6 +4226,69 @@ function rewriteDecisionId(content, newId) {
   return content.replace(/^# [0-9]+\. /, `# ${String(BigInt(newId))}. `);
 }
 
+function reconciliationOutcomes(records) {
+  return new Map(records
+    .filter((record) => record.event.type === 'decision_reconcile_prepare')
+    .map((record) => [record.event.reconciliationId, record.event]));
+}
+
+function rewriteDecisionHistory(content, decisionId, outcomes) {
+  let repairs = 0;
+  const rewritten = content.replace(
+    /^(<!-- [a-z][a-z0-9-]*-reconciliation: ([^>\r\n]+) -->\r?\n### [^\r\n]+ — (?:Outcome|Intent) `)(\d{4}-\d{2}-\d{2}-\d{3,})(`\r?$)/gm,
+    (entry, prefix, reconciliationId, outcomeId, suffix) => {
+      const prepare = outcomes.get(reconciliationId);
+      if (!prepare || normalizeDecisionId(prepare.decisionId) !== decisionId || prepare.id === outcomeId) {
+        return entry;
+      }
+      repairs++;
+      return `${prefix}${prepare.id}${suffix}`;
+    }
+  );
+  return { content: rewritten, repairs };
+}
+
+function planDecisionHistoryRepair(records, copies, entries) {
+  const outcomes = reconciliationOutcomes(records);
+  const targets = new Map(entries.map((entry) => [entry.file, entry]));
+  const plannedCopies = new Map(copies.map((copy) => [copy.toFile, copy]));
+  const hashMap = new Map();
+  let repairs = 0;
+  for (const copy of copies) {
+    if (copy.removeFile) targets.delete(copy.removeFile);
+  }
+  for (const copy of copies) {
+    targets.set(copy.toFile, {
+      file: copy.toFile,
+      id: normalizeDecisionId(copy.toFile.split('-')[0]),
+      content: copy.content,
+    });
+  }
+  for (const entry of targets.values()) {
+    const content = entry.content !== undefined ? entry.content : fs.readFileSync(entry.path, 'utf8');
+    const rewritten = rewriteDecisionHistory(content, entry.id, outcomes);
+    if (rewritten.repairs === 0) continue;
+    repairs += rewritten.repairs;
+    // Rebind only hashes that attest the exact pre-repair bytes. Unrelated edits
+    // must still fail reconciliation recovery or closure after this repair.
+    hashMap.set(contentHash(content), contentHash(rewritten.content));
+    plannedCopies.set(entry.file, {
+      fromFile: entry.file,
+      toFile: entry.file,
+      removeFile: null,
+      ...plannedCopies.get(entry.file),
+      content: rewritten.content,
+    });
+  }
+  const unchangedIds = new Map();
+  const rewrittenRecords = records.map((record) =>
+    ['oldHash', 'newHash', 'fileHash'].some((field) => hashMap.has(record.event[field]))
+      ? { event: remapEvent(record.event, unchangedIds, unchangedIds, hashMap) }
+      : record
+  );
+  return { records: rewrittenRecords, copies: [...plannedCopies.values()], repairs };
+}
+
 function splitDuplicateDecisions(entries) {
   const ours = [];
   const theirs = [];
@@ -4676,6 +4739,7 @@ function finishAbsorb({
   outcomeCount,
   allowConflict = false,
   followupMessage = null,
+  repairDecisionHistory = true,
 }) {
   // A parked outcome is local even though the tracked log never saw it.
   const park = shouldAttachInProgress(outputFile)
@@ -4703,22 +4767,32 @@ function finishAbsorb({
   // A parked overlay with nothing left open in it belongs in the tracked log, whether the
   // abandon flag just closed it or an interrupted end left it closed.
   const flushOverlay = parkedClosed || (overlay.length > 0 && !parkedOpen);
-  const merged = flushOverlay ? [...result, ...overlay] : result;
   const effective = [...result, ...overlay].map((record) => record.event);
   fold(effective);
   if (!conflict) openOutcome(fold(effective));
+  const history = repairDecisionHistory
+    ? planDecisionHistoryRepair(
+      [...result, ...overlay], copies, listDecisionEntries(decisionDir(), { allowDuplicates: true })
+    )
+    : { records: [...result, ...overlay], copies, repairs: 0 };
+  const repairedResult = history.records.slice(0, result.length);
+  const repairedOverlay = history.records.slice(result.length);
+  const merged = flushOverlay ? history.records : repairedResult;
+  fold(history.records.map((record) => record.event));
   if (!dryRun) {
     writeJsonl(outputFile, merged);
-    applyDecisionCopies(copies, dryRun);
+    applyDecisionCopies(history.copies, dryRun);
     if (plan) {
       if (plan.alreadyCommitted || flushOverlay) discardInProgressLog(park);
-      else if (plan.mappings.length > 0) writeJsonl(park, overlay);
+      else if (plan.mappings.length > 0 || repairedOverlay.some((record, i) => record !== overlay[i])) {
+        writeJsonl(park, repairedOverlay);
+      }
     }
   }
   if (
     outcomeCount === 0 &&
     allMappings.length === 0 &&
-    copies.length === 0 &&
+    history.copies.length === 0 &&
     !abandoned &&
     !flushOverlay
   ) {
@@ -4730,6 +4804,9 @@ function finishAbsorb({
       outcomeCount,
     });
   }
+  if (history.repairs > 0) {
+    printLine(`${dryRun ? 'would repair' : 'repaired'} ${history.repairs} decision history reference(s)`);
+  }
   if (conflict) {
     printLine('multiple outcomes remain in progress; re-run with --abandon-theirs or --abandon-ours');
   }
@@ -4737,7 +4814,7 @@ function finishAbsorb({
   return {
     mappings: allMappings,
     abandoned,
-    copies: copies.map((item) => item.toFile),
+    copies: history.copies.map((item) => item.toFile),
     outputFile,
     exitCode: conflict || followupMessage ? 1 : 0,
   };
@@ -4772,6 +4849,7 @@ function absorbFromStreams(ours, theirs, baseRecords, options) {
     outputFile: options.outputFile,
     allowConflict: options.allowConflict,
     followupMessage: options.followupMessage,
+    repairDecisionHistory: options.repairDecisionHistory,
     outcomeCount: streams.theirsNew.filter((record) => ['begin', 'import'].includes(record.event.type)).length,
   });
 }
@@ -4925,9 +5003,11 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
     followupMessage =
       'incoming Git tree could not be identified safely; re-run driftseal absorb after Git stops the merge';
   } else {
+    const oursDecisionEntries = gitDecisionEntries('HEAD');
+    const theirsDecisionEntries = gitDecisionEntries(otherHead);
     const decisionPlan = planDecisionAbsorb({
-      oursEntries: gitDecisionEntries('HEAD'),
-      theirsEntries: gitDecisionEntries(otherHead),
+      oursEntries: oursDecisionEntries,
+      theirsEntries: theirsDecisionEntries,
       baseEntries: mergeBase ? gitDecisionEntries(mergeBase) : [],
       baseIds: mergeBase
         ? gitDecisionIds(mergeBase)
@@ -4939,6 +5019,16 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
     if (requiresDecisionRepair) {
       followupMessage =
         'decision ids require worktree repair; run driftseal absorb, then stage the repaired logs';
+    } else {
+      const streams = mergeRecordStreams(ours.records, theirs.records, base.records);
+      const remapped = remapTheirsRecords(streams.theirsNew, ours.records.map((record) => record.event), new Map());
+      const outcomes = reconciliationOutcomes([...ours.records, ...remapped.records]);
+      if ([...oursDecisionEntries, ...theirsDecisionEntries].some((entry) =>
+        rewriteDecisionHistory(entry.content, entry.id, outcomes).repairs > 0
+      )) {
+        followupMessage =
+          'decision history requires worktree repair; run driftseal absorb, then stage the repaired logs';
+      }
     }
   }
   return absorbFromStreams(ours.records, theirs.records, base.records, {
@@ -4947,6 +5037,9 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
     outputFile: oursFile,
     allowConflict: !abandon,
     followupMessage,
+    // Git owns the worktree MADR merge. Stop for a normal absorb when history
+    // needs repair rather than racing Git by writing other paths from its driver.
+    repairDecisionHistory: false,
   });
 }
 

@@ -314,6 +314,16 @@ ids, rebinds affected contract hashes, and refuses concurrent edits of a shared
 MADR. If both lineages remain open, choose explicitly with `--abandon-theirs` or
 `--abandon-ours`.
 
+`absorb` also repairs managed MADR Decision History outcome references by joining
+their reconciliation IDs to the merged log, and rebinds matching content hashes.
+It uses the local seal's `madr/` directory by default; when importing another log,
+its sibling `../madr/` is the default source (`--decisions` overrides that source).
+Run `driftseal absorb --dry-run` to preview repairs, including stale references
+left by an older merge whose outcome IDs are already unique. Entries without a
+matching reconciliation ID are left unchanged. If the Git merge driver reports
+that decision history requires worktree repair, run `driftseal absorb`, stage the
+repaired log and MADRs, then finish the merge.
+
 ## Node API and MCP
 
 ```js

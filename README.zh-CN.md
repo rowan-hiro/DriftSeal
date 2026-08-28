@@ -284,6 +284,14 @@ driftseal absorb
 contract hash，并拒绝自动合并 shared MADR 的并发编辑。若两条 lineage 都处于 open
 状态，必须显式选择 `--abandon-theirs` 或 `--abandon-ours`。
 
+`absorb` 还会通过 reconciliation ID 将 MADR 的 Decision History 条目与合并后的 log
+对应，修正其中的 outcome 引用，并同步匹配的内容 hash。默认处理当前 seal 的 `madr/`；
+导入其他 log 时，默认从该 log 的 `../madr/` 读取 MADR，可用 `--decisions` 指定其他来源。
+运行 `driftseal absorb --dry-run` 可预览修复；旧版本合并后留下的错链，即使 outcome ID
+已经没有冲突，也可以修复。找不到对应 reconciliation ID 的条目会保持原样。若 Git merge
+driver 提示 decision history 需要修复，运行 `driftseal absorb`，将修复后的 log 和 MADR
+加入 staging area，再完成 merge。
+
 ## Node API 与 MCP
 
 ```js

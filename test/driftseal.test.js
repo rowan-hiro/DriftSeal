@@ -4881,6 +4881,7 @@ test('absorb remaps colliding decision ids and their event references', () => {
   theirs.run(['begin', 'use theirs', '--decision', '1']);
   theirs.run(['decision', 'update', '1', '--note', 'Confirmed theirs.']);
   theirs.run(['end', '--status', 'completed', '--note', 'done', '--verify-result', 'ok']);
+  const oursContent = ours.run(['decision', 'show', '1']);
 
   const out = ours.run([
     'absorb',
@@ -4894,7 +4895,77 @@ test('absorb remaps colliding decision ids and their event references', () => {
   assert.deepEqual(begins[1].decisions, ['0002']);
   assert.match(ours.run(['decision', 'list']), /0001/);
   assert.match(ours.run(['decision', 'list']), /0002/);
-  assert.match(ours.run(['decision', 'show', '2']), /Theirs choice/);
+  const incomingContent = ours.run(['decision', 'show', '2']);
+  assert.match(incomingContent, /Theirs choice/);
+  assert.ok(incomingContent.includes(`— Outcome \`${begins[1].id}\``));
+  assert.equal(ours.run(['decision', 'show', '1']), oursContent);
+});
+
+test('absorb repairs stale decision history by reconciliation ID even when outcome IDs are unique', () => {
+  const ours = setup();
+  const theirs = setup();
+  ours.run(['begin', 'unrelated work']);
+  ours.run(['end', '--status', 'abandoned']);
+  const decisionFile = theirs.run([
+    'decision', 'add', 'History choice', '-c', 'context', '-o', 'outcome',
+  ]).trim();
+  const unknownHistory = '\n<!-- legacy-reconciliation: unknown -->\n' +
+    '### 2000-01-01T00:00:00.000Z — Outcome `2000-01-01-001`\n';
+  fs.writeFileSync(decisionFile, (fs.readFileSync(decisionFile, 'utf8') + unknownHistory).replace(/\n/g, '\r\n'));
+  for (const name of ['first decision update', 'second decision update']) {
+    const id = theirs.run(['begin', name, '--decision', '1']).trim();
+    theirs.run(['decision', 'update', '1', '--note', `Keep literal Outcome \`${id}\` in prose.`]);
+    theirs.run(['end', '--status', 'partial']);
+  }
+  // Reproduce an older merge: only WAL outcome IDs were remapped, leaving MADR bytes and hashes intact.
+  const incoming = theirs.events().map((event) => ({
+    ...event,
+    id: event.id.replace(/\d+$/, (sequence) => String(Number(sequence) + 1).padStart(3, '0')),
+  }));
+  const logFile = path.join(ours.dir, 'outcomes', 'events.jsonl');
+  fs.writeFileSync(logFile, [...ours.events(), ...incoming].map(JSON.stringify).join('\n') + '\n');
+  fs.cpSync(path.join(theirs.dir, 'madr'), path.join(ours.dir, 'madr'), { recursive: true });
+  const localDecision = path.join(ours.dir, 'madr', path.basename(decisionFile));
+  const beforeLog = fs.readFileSync(logFile, 'utf8');
+  const beforeDecision = fs.readFileSync(localDecision, 'utf8');
+
+  assert.match(ours.run(['absorb', '--dry-run']), /2 decision history reference/);
+  assert.equal(fs.readFileSync(logFile, 'utf8'), beforeLog);
+  assert.equal(fs.readFileSync(localDecision, 'utf8'), beforeDecision);
+  assert.match(ours.run(['absorb']), /2 decision history reference/);
+  const repaired = fs.readFileSync(localDecision, 'utf8');
+  let expected = beforeDecision;
+  for (const prepare of theirs.events().filter((event) => event.type === 'decision_reconcile_prepare')) {
+    const remapped = incoming.find((event) => event.type === 'decision_reconcile_prepare' &&
+      event.reconciliationId === prepare.reconciliationId);
+    expected = expected.replace(
+      `<!-- driftseal-reconciliation: ${prepare.reconciliationId} -->\r\n### ${prepare.ts} — Outcome \`${prepare.id}\``,
+      `<!-- driftseal-reconciliation: ${prepare.reconciliationId} -->\r\n### ${prepare.ts} — Outcome \`${remapped.id}\``
+    );
+  }
+  assert.equal(repaired, expected);
+  const latest = ours.events().filter((event) => event.type === 'decision_reconcile_commit').at(-1);
+  assert.equal(latest.fileHash, crypto.createHash('sha256').update(repaired).digest('hex'));
+  assert.equal(ours.run(['absorb']).trim(), 'nothing to absorb');
+  assert.equal(fs.readFileSync(localDecision, 'utf8'), repaired);
+});
+
+test('absorb does not attest unrelated MADR edits while repairing outcome references', () => {
+  const ours = setup();
+  const theirs = setup();
+  ours.run(['begin', 'unrelated work']);
+  ours.run(['end', '--status', 'abandoned']);
+  const decisionFile = theirs.run([
+    'decision', 'add', 'Incoming choice', '-c', 'context', '-o', 'outcome',
+  ]).trim();
+  theirs.run(['begin', 'incoming work', '--decision', '1']);
+  theirs.run(['decision', 'update', '1', '--note', 'Confirmed.']);
+  fs.appendFileSync(decisionFile, '\nAn unrelated unverified edit.\n');
+
+  ours.run(['absorb', path.join(theirs.dir, 'outcomes', 'events.jsonl')]);
+  const incomingId = ours.events().find((event) => event.outcome === 'incoming work').id;
+  assert.ok(ours.run(['decision', 'show', '1']).includes(`— Outcome \`${incomingId}\``));
+  assert.match(ours.runFail(['end', '--status', 'partial']).stderr, /changed after its latest reconciliation/);
 });
 
 test('absorb rebinds contract hashes when linked decision ids are remapped', () => {
@@ -5490,6 +5561,63 @@ test('git merge stops on colliding decision ids and absorb preserves each side o
   const begins = events.filter((event) => event.type === 'begin');
   assert.deepEqual(begins.find((event) => event.outcome === 'main work').decisions, ['0001']);
   assert.deepEqual(begins.find((event) => event.outcome === 'feature work').decisions, ['0002']);
+});
+
+test('git merge stops for stale decision history and absorb repairs incoming-only MADR edits', () => {
+  const { cwd, git, gitFail, run } = setupGitRepository('driftseal-git-history-repair-');
+  run(['decision', 'add', 'Shared choice', '-c', 'context', '-o', 'outcome']);
+  const sharedId = run(['begin', 'shared work', '--decision', '1']).trim();
+  run(['decision', 'update', '1', '--note', 'Shared history.']);
+  run(['end', '--status', 'partial']);
+  git(['add', '.']);
+  git(['commit', '-m', 'base']);
+
+  git(['checkout', '-b', 'feature']);
+  run(['begin', 'feature decision work', '--decision', '1']);
+  run(['decision', 'update', '1', '--status', 'deprecated', '--note', 'Feature history.']);
+  run(['end', '--status', 'partial']);
+  git(['add', '.']);
+  git(['commit', '-m', 'feature']);
+
+  git(['checkout', 'main']);
+  run(['begin', 'unrelated main work']);
+  run(['end', '--status', 'abandoned']);
+  git(['add', '.']);
+  git(['commit', '-m', 'main']);
+  const mergeError = gitFail(['merge', 'feature', '--no-edit']);
+  assert.match(`${mergeError.stdout || ''}${mergeError.stderr || ''}`, /decision history requires worktree repair/);
+  assert.match(run(['absorb']), /1 decision history reference/);
+  const events = readJsonl(path.join(cwd, '.seal', 'outcomes', 'events.jsonl'));
+  const featureId = events.find((event) => event.outcome === 'feature decision work').id;
+  const decision = run(['decision', 'show', '1']);
+  assert.ok(decision.includes(`— Outcome \`${sharedId}\``));
+  assert.ok(decision.includes(`— Outcome \`${featureId}\``));
+  assert.match(decision, /## Status\n\nDeprecated/);
+  git(['add', '-A']);
+  git(['commit', '--no-edit']);
+  assert.equal(run(['absorb']).trim(), 'nothing to absorb');
+});
+
+test('absorb repairs the decision history and hashes of a remapped parked outcome', () => {
+  const { cwd, run } = setupGitRepository('driftseal-parked-history-repair-');
+  run(['begin', 'shared work']);
+  run(['end', '--status', 'abandoned']);
+  const theirs = setup();
+  fs.mkdirSync(path.join(theirs.dir, 'outcomes'), { recursive: true });
+  fs.copyFileSync(path.join(cwd, '.seal', 'outcomes', 'events.jsonl'), path.join(theirs.dir, 'outcomes', 'events.jsonl'));
+  theirs.run(['begin', 'incoming work']);
+  theirs.run(['end', '--status', 'abandoned']);
+
+  run(['decision', 'add', 'Local choice', '-c', 'context', '-o', 'outcome']);
+  const parkedId = run(['begin', 'parked work', '--decision', '1']).trim();
+  run(['decision', 'update', '1', '--note', 'Local history.']);
+  assert.match(run(['absorb', path.join(theirs.dir, 'outcomes', 'events.jsonl')]), /1 decision history reference/);
+  assert.doesNotMatch(run(['decision', 'show', '1']), new RegExp(parkedId));
+  assert.match(run(['end', '--status', 'partial']), /partial/);
+  const events = readJsonl(path.join(cwd, '.seal', 'outcomes', 'events.jsonl'));
+  const remappedId = events.find((event) => event.outcome === 'parked work').id;
+  assert.notEqual(remappedId, parkedId);
+  assert.ok(run(['decision', 'show', '1']).includes(`— Outcome \`${remappedId}\``));
 });
 
 test('absorb accepts an incoming-only edit to a decision from the shared Git base', () => {
