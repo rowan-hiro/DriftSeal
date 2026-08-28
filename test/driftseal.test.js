@@ -353,6 +353,7 @@ test('--version and -V print the package version', () => {
   assert.match(run(['help']), /driftseal lane/);
   assert.match(run(['help']), /default Git-repository seal/);
   assert.match(run(['help']), /Custom \$DRIFTSEAL_HOME seals write that open outcome directly to events\.jsonl/);
+  assert.match(run(['help']), /repairing stale MADR Decision History references/);
   assert.match(runFail(['--version', 'extra']).stderr, /usage: driftseal --version \| -V/);
 });
 
@@ -3303,6 +3304,8 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /\.seal\/outcomes\/events\.jsonl/);
   assert.match(first, /\.seal\/madr/);
   assert.match(first, /commit `\.seal\/` with the code/);
+  assert.match(first, /Decision History outcome references are stale/);
+  assert.match(first, /repairs managed Decision History/);
   assert.doesNotMatch(first, /\.intent-log|\.decision-log/);
   runIn(['init']);
   assert.equal(fs.readFileSync(agentsFile, 'utf8'), first);
@@ -3310,6 +3313,27 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
     fs.readFileSync(path.join(cwd, '.gitattributes'), 'utf8'),
     '.seal/outcomes/events.jsonl merge=driftseal\n'
   );
+});
+
+test('init upgrades 2.1 protocol that only mentioned absorb collisions', () => {
+  const { run } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v21-absorb-upgrade-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+  run(['init'], { cwd });
+  const current = fs.readFileSync(agentsFile, 'utf8');
+  const previous = current
+    .replace(
+      'collisions or when Decision History outcome references are stale',
+      'collisions'
+    )
+    .replace(
+      'remaps colliding ids and repairs managed Decision History\noutcome references; it never auto-merges concurrent edits of a shared MADR.',
+      'remaps colliding ids; it never auto-merges concurrent\nedits of a shared MADR.'
+    );
+  assert.notEqual(previous, current);
+  fs.writeFileSync(agentsFile, previous);
+  run(['init'], { cwd });
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), current);
 });
 
 test('init upgrades the released v1.4 protocol to protocol 2.1', () => {
@@ -4929,10 +4953,14 @@ test('absorb repairs stale decision history by reconciliation ID even when outco
   const beforeLog = fs.readFileSync(logFile, 'utf8');
   const beforeDecision = fs.readFileSync(localDecision, 'utf8');
 
-  assert.match(ours.run(['absorb', '--dry-run']), /2 decision history reference/);
+  const dry = ours.run(['absorb', '--dry-run']);
+  assert.match(dry, /would repair 2 decision history reference/);
+  assert.doesNotMatch(dry, /absorbed 0 outcome/);
   assert.equal(fs.readFileSync(logFile, 'utf8'), beforeLog);
   assert.equal(fs.readFileSync(localDecision, 'utf8'), beforeDecision);
-  assert.match(ours.run(['absorb']), /2 decision history reference/);
+  const repairedOut = ours.run(['absorb']);
+  assert.match(repairedOut, /repaired 2 decision history reference/);
+  assert.doesNotMatch(repairedOut, /absorbed 0 outcome/);
   const repaired = fs.readFileSync(localDecision, 'utf8');
   let expected = beforeDecision;
   for (const prepare of theirs.events().filter((event) => event.type === 'decision_reconcile_prepare')) {
@@ -5596,6 +5624,38 @@ test('git merge stops for stale decision history and absorb repairs incoming-onl
   git(['add', '-A']);
   git(['commit', '--no-edit']);
   assert.equal(run(['absorb']).trim(), 'nothing to absorb');
+});
+
+test('git merge stops for parked decision history when incoming remaps the parked id', () => {
+  const { git, gitFail, run } = setupGitRepository('driftseal-git-parked-history-stop-');
+  run(['decision', 'add', 'Shared choice', '-c', 'context', '-o', 'outcome']);
+  run(['begin', 'shared work']);
+  run(['end', '--status', 'abandoned']);
+  git(['add', '.']);
+  git(['commit', '-m', 'base']);
+
+  git(['checkout', '-b', 'feature']);
+  run(['begin', 'feature work']);
+  run(['end', '--status', 'abandoned']);
+  git(['add', '.']);
+  git(['commit', '-m', 'feature']);
+
+  git(['checkout', 'main']);
+  run(['begin', 'main committed work']);
+  run(['end', '--status', 'abandoned']);
+  git(['add', '.']);
+  git(['commit', '-m', 'main']);
+  const parkedId = run(['begin', 'parked work', '--decision', '1']).trim();
+  run(['decision', 'update', '1', '--note', 'Parked history.']);
+  const mergeError = gitFail(['merge', 'feature', '--no-edit']);
+  assert.match(`${mergeError.stdout || ''}${mergeError.stderr || ''}`, /decision history requires worktree repair/);
+  assert.match(run(['absorb']), /1 decision history reference/);
+  const status = run(['status']);
+  assert.match(status, /parked work/);
+  const remappedId = status.match(/(\d{4}-\d{2}-\d{2}-\d+)/)[1];
+  assert.notEqual(remappedId, parkedId);
+  assert.doesNotMatch(run(['decision', 'show', '1']), new RegExp(parkedId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.ok(run(['decision', 'show', '1']).includes(`— Outcome \`${remappedId}\``));
 });
 
 test('absorb repairs the decision history and hashes of a remapped parked outcome', () => {

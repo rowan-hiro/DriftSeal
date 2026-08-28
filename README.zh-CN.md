@@ -196,7 +196,7 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 | `driftseal lane add\|switch\|assign\|show` | 按长期能力切分历史。 |
 | `driftseal reclaim [id ...] --reason "..." [--force]` | 通过 append-only marker 隐藏无意义的已关闭记录。 |
 | `driftseal unreclaim <id> --reason "..."` | 恢复 reclaimed record。 |
-| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | 合并另一条 lineage 并处理撞号。 |
+| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | 合并另一条 lineage，处理撞号，并修复 MADR Decision History 中的过期 outcome 引用。 |
 | `driftseal decision add\|update\|list\|show` | 管理 MADR。 |
 | `driftseal migrate v1-to-v2 inspect --json [migration paths]` | 规范化 v1 状态，供模型分组。 |
 | `driftseal migrate v1-to-v2 apply --plan <file> [migration paths]` | 校验分组计划，并在 v1 旁边创建 v2 seal。 |

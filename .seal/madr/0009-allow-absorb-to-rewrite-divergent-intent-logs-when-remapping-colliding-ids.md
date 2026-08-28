@@ -55,3 +55,10 @@ Accepted in v2: absorb remains the only lineage rewrite for collision repair, no
 Status: Accepted → Accepted
 
 Absorb now repairs managed MADR outcome references by reconciliation ID, including stale references left by older merges and remapped parked outcomes. Preserve local outcome IDs and remap the incoming lineage rather than globally renumbering by timestamp. The Git driver stops for worktree history repair, avoiding concurrent writes to MADRs that Git is merging; normal absorb repairs references and matching content hashes, with dry-run previews.
+
+<!-- driftseal-reconciliation: a987f88a-c39b-4e8a-8a6a-8c95359d9215 -->
+### 2026-08-28T10:12:42.540Z — Outcome `2026-08-28-004`
+
+Status: Accepted → Accepted
+
+Confirmed the absorb history-repair design after review: Git detection now uses the same remap as a normal absorb, including the live park sidecar when %A is a temporary merge path, so parked Decision History cannot silently point at a remapped incoming outcome. History-only absorb reports repairs without a zero remap summary; MCP structured results include the count. Agent protocol, help, skill, README, and MCP describe the follow-up. Filename ids use the same /^(\d{4,})-/ pattern as listDecisionEntries. Timestamp-based global renumbering remains rejected.

@@ -2636,7 +2636,10 @@ Seal root: \`.seal/\` (override with \`$DRIFTSEAL_HOME\`); outcome log:
 ${INTENT_PROTOCOL_END}`;
 }
 
-function intentProtocolBlockV21(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+function intentProtocolBlockV21Text(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false, { historyRepair = true } = {}) {
+  const absorbWhen = historyRepair
+    ? 'collisions or when Decision History outcome references are stale'
+    : 'collisions';
   return `${INTENT_PROTOCOL_MARKER}
 <!-- driftseal-version: ${version} -->
 <!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
@@ -2688,11 +2691,19 @@ ${outcomeLogLanguageParagraph(language)}
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 \`.seal/outcomes/events.jsonl\` (or its configured equivalent) directly. Use
 \`reclaim\`/\`unreclaim\` for visibility markers and \`absorb\` after merge
-collisions. These operations preserve append-only single-lineage history.
+${absorbWhen}. These operations preserve append-only single-lineage history.
 
 Seal root: \`.seal/\` (override with \`$DRIFTSEAL_HOME\`); outcome log:
 \`.seal/outcomes/events.jsonl\`; ${localLog ? 'keep `.seal/` local and untracked.' : 'commit `.seal/` with the code.'}
 ${INTENT_PROTOCOL_END}`;
+}
+
+function intentProtocolBlockV21(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: true });
+}
+
+function intentProtocolBlockV21AbsorbCollisions(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: false });
 }
 
 function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
@@ -2991,7 +3002,19 @@ function protocolEol(content, eol) {
   return eol === '\n' ? content : content.replace(/\n/g, eol);
 }
 
+function decisionProtocolBlockAbsorbCollisions(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  return decisionProtocolBlockText(version, language, localLog, { historyRepair: false });
+}
+
 function decisionProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  if (String(version) === '2.0') return decisionProtocolBlockAbsorbCollisions(version, language, localLog);
+  return decisionProtocolBlockText(version, language, localLog, { historyRepair: true });
+}
+
+function decisionProtocolBlockText(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false, { historyRepair = true } = {}) {
+  const absorbSentence = historyRepair
+    ? 'After a\nmerge, `driftseal absorb` remaps colliding ids and repairs managed Decision History\noutcome references; it never auto-merges concurrent edits of a shared MADR.'
+    : 'After a\nmerge, `driftseal absorb` remaps colliding ids; it never auto-merges concurrent\nedits of a shared MADR.';
   return `${DECISION_PROTOCOL_MARKER}
 <!-- driftseal-decisions-version: ${version} -->
 <!-- driftseal-log-language: ${language} -->${localLog ? '\n<!-- driftseal-local-log: true -->' : ''}
@@ -3009,9 +3032,7 @@ ${decisionLogLanguageParagraph(language)}
 
 Use \`proposed|accepted|rejected|deferred|deprecated|superseded\` statuses. Link
 existing MADRs from \`begin\` or \`extend\`, then reconcile each linked record
-with \`driftseal decision update\` before successful or partial closure. After a
-merge, \`driftseal absorb\` remaps colliding ids; it never auto-merges concurrent
-edits of a shared MADR.
+with \`driftseal decision update\` before successful or partial closure. ${absorbSentence}
 ${localLog ? 'Keep `.seal/madr/` local and untracked.' : 'Commit `.seal/madr/` with the code.'}
 ${DECISION_PROTOCOL_END}`;
 }
@@ -3421,6 +3442,7 @@ const SKILL_RELEASE_DIGESTS = new Set([
   'b4b2cc27ea71c5777b5eb9b67d861fbe1da43f31ab5d422d6a877e0cad592493', // 2.1.0 lane re-anchor recovery
   '6c49523c2f4a36ea1cd9d0b4e793ea3cdbd9d299174cf1f9a0a54f3d9a7cd331', // workspace park sidecar wording
   '678cbaa8380f75f7a45d634010b500e51a59b06ea759eaf23cff2980142662f0', // default-seal parking help wording
+  'b5f2379fba311e19a5139dd6eb80795473fa6754fa959f90d4a36cc273b56e8f', // absorb Decision History repair
 ]);
 
 function skillInstallUsage() {
@@ -4226,6 +4248,12 @@ function rewriteDecisionId(content, newId) {
   return content.replace(/^# [0-9]+\. /, `# ${String(BigInt(newId))}. `);
 }
 
+function decisionIdFromFile(file) {
+  const match = path.basename(file).match(/^(\d{4,})-/);
+  if (!match) fail(`invalid decision filename: ${file}`);
+  return normalizeDecisionId(match[1]);
+}
+
 function reconciliationOutcomes(records) {
   return new Map(records
     .filter((record) => record.event.type === 'decision_reconcile_prepare')
@@ -4260,7 +4288,7 @@ function planDecisionHistoryRepair(records, copies, entries) {
   for (const copy of copies) {
     targets.set(copy.toFile, {
       file: copy.toFile,
-      id: normalizeDecisionId(copy.toFile.split('-')[0]),
+      id: decisionIdFromFile(copy.toFile),
       content: copy.content,
     });
   }
@@ -4789,6 +4817,12 @@ function finishAbsorb({
       }
     }
   }
+  const historyOnly =
+    history.repairs > 0 &&
+    outcomeCount === 0 &&
+    allMappings.length === 0 &&
+    !abandoned &&
+    !flushOverlay;
   if (
     outcomeCount === 0 &&
     allMappings.length === 0 &&
@@ -4797,7 +4831,7 @@ function finishAbsorb({
     !flushOverlay
   ) {
     printLine('nothing to absorb');
-  } else {
+  } else if (!historyOnly) {
     printAbsorbReport({
       mappings: allMappings,
       abandoned,
@@ -4816,11 +4850,12 @@ function finishAbsorb({
     abandoned,
     copies: history.copies.map((item) => item.toFile),
     outputFile,
+    repairs: history.repairs,
     exitCode: conflict || followupMessage ? 1 : 0,
   };
 }
 
-function absorbFromStreams(ours, theirs, baseRecords, options) {
+function planAbsorbMerge(ours, theirs, baseRecords, options = {}) {
   const streams = mergeRecordStreams(ours, theirs, baseRecords);
   const decisionPlan = planDecisionAbsorb({
     oursEntries: options.oursDecisionEntries || [],
@@ -4828,29 +4863,65 @@ function absorbFromStreams(ours, theirs, baseRecords, options) {
     baseEntries: options.baseDecisionEntries || [],
     baseIds: options.baseDecisionIds || new Set(),
   });
+  const oursRecords = [...streams.base, ...streams.oursNew];
   const remapped = remapTheirsRecords(
     dropDuplicateLaneAdds(
-      [...streams.base, ...streams.oursNew].map((record) => record.event),
+      oursRecords.map((record) => record.event),
       streams.theirsNew
     ),
-    [...streams.base, ...streams.oursNew].map((record) => record.event),
+    oursRecords.map((record) => record.event),
     decisionPlan.decisionMap,
     decisionPlan.hashMap
   );
-  const result = [...streams.base, ...streams.oursNew, ...remapped.records];
-  return finishAbsorb({
-    result,
-    oursRecords: [...streams.base, ...streams.oursNew],
+  return {
+    decisionPlan,
+    remapped,
+    result: [...oursRecords, ...remapped.records],
+    oursRecords,
     theirsRecords: [...streams.base, ...remapped.records],
     mappings: [...remapped.mappings, ...decisionPlan.mappings],
-    copies: decisionPlan.copies,
+    outcomeCount: streams.theirsNew.filter((record) => isOutcomeStart(record.event)).length,
+  };
+}
+
+function previewParkedOverlay(result, outputFile) {
+  // Git merge drivers often receive a temporary %A that is not the live WAL, so
+  // parked history still has to be previewed from the worktree sidecar.
+  const park = shouldAttachInProgress(outputFile)
+    ? existingInProgressFileForLog(outputFile)
+    : existingInProgressFile();
+  if (!park) return [];
+  const plan = planInProgressOverlay(
+    result.map((record) => record.event),
+    park,
+    { repairTail: true, readOnly: true }
+  );
+  return plan && !plan.alreadyCommitted ? plan.records : [];
+}
+
+function decisionHistoryNeedsRepair(records, entries) {
+  const outcomes = reconciliationOutcomes(records);
+  return entries.some((entry) => {
+    const content = entry.content !== undefined ? entry.content : fs.readFileSync(entry.path, 'utf8');
+    return rewriteDecisionHistory(content, entry.id, outcomes).repairs > 0;
+  });
+}
+
+function absorbFromStreams(ours, theirs, baseRecords, options) {
+  const merge = planAbsorbMerge(ours, theirs, baseRecords, options);
+  return finishAbsorb({
+    result: merge.result,
+    oursRecords: merge.oursRecords,
+    theirsRecords: merge.theirsRecords,
+    mappings: merge.mappings,
+    copies: merge.decisionPlan.copies,
     abandon: options.abandon,
     dryRun: options.dryRun,
     outputFile: options.outputFile,
     allowConflict: options.allowConflict,
     followupMessage: options.followupMessage,
     repairDecisionHistory: options.repairDecisionHistory,
-    outcomeCount: streams.theirsNew.filter((record) => ['begin', 'import'].includes(record.event.type)).length,
+    outcomeCount: merge.outcomeCount,
   });
 }
 
@@ -4998,6 +5069,9 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
     gitFindCommitForFile(theirsFile, '.seal/outcomes/events.jsonl') ||
     gitFindCommitForFile(theirsFile, '.intent-log/events.jsonl');
   const mergeBase = otherHead ? gitMergeBaseFor('HEAD', otherHead) : null;
+  // Driver merge remaps the jsonl only. Decision copies stay with a later
+  // worktree absorb so Git can finish merging MADR files first.
+  const merge = planAbsorbMerge(ours.records, theirs.records, base.records, {});
   let followupMessage = null;
   if (!otherHead) {
     followupMessage =
@@ -5020,18 +5094,23 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
       followupMessage =
         'decision ids require worktree repair; run driftseal absorb, then stage the repaired logs';
     } else {
-      const streams = mergeRecordStreams(ours.records, theirs.records, base.records);
-      const remapped = remapTheirsRecords(streams.theirsNew, ours.records.map((record) => record.event), new Map());
-      const outcomes = reconciliationOutcomes([...ours.records, ...remapped.records]);
-      if ([...oursDecisionEntries, ...theirsDecisionEntries].some((entry) =>
-        rewriteDecisionHistory(entry.content, entry.id, outcomes).repairs > 0
+      const overlay = previewParkedOverlay(merge.result, oursFile);
+      const worktreeEntries = listDecisionEntries(decisionDir(), { allowDuplicates: true });
+      if (decisionHistoryNeedsRepair(
+        [...merge.result, ...overlay],
+        [...oursDecisionEntries, ...theirsDecisionEntries, ...worktreeEntries]
       )) {
         followupMessage =
           'decision history requires worktree repair; run driftseal absorb, then stage the repaired logs';
       }
     }
   }
-  return absorbFromStreams(ours.records, theirs.records, base.records, {
+  return finishAbsorb({
+    result: merge.result,
+    oursRecords: merge.oursRecords,
+    theirsRecords: merge.theirsRecords,
+    mappings: merge.mappings,
+    copies: merge.decisionPlan.copies,
     abandon,
     dryRun,
     outputFile: oursFile,
@@ -5040,6 +5119,7 @@ function absorbGit(baseFile, oursFile, theirsFile, { abandon, dryRun }) {
     // Git owns the worktree MADR merge. Stop for a normal absorb when history
     // needs repair rather than racing Git by writing other paths from its driver.
     repairDecisionHistory: false,
+    outcomeCount: merge.outcomeCount,
   });
 }
 
@@ -6765,6 +6845,8 @@ const commands = {
         ...sourceLanguages.flatMap((source) => [
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source), eol),
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source, true), eol),
+          protocolEol(intentProtocolBlockV21AbsorbCollisions(PROTOCOL_VERSION, source), eol),
+          protocolEol(intentProtocolBlockV21AbsorbCollisions(PROTOCOL_VERSION, source, true), eol),
           protocolEol(intentProtocolBlockV20(source), eol),
           protocolEol(intentProtocolBlockV20(source, true), eol),
           protocolEol(v1IntentProtocolBlock(14, source), eol),
@@ -6799,6 +6881,8 @@ const commands = {
         ...sourceLanguages.flatMap((source) => [
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source), eol),
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source, true), eol),
+          protocolEol(decisionProtocolBlockAbsorbCollisions(PROTOCOL_VERSION, source), eol),
+          protocolEol(decisionProtocolBlockAbsorbCollisions(PROTOCOL_VERSION, source, true), eol),
           protocolEol(decisionProtocolBlock('2.0', source), eol),
           protocolEol(decisionProtocolBlock('2.0', source, true), eol),
           protocolEol(v1DecisionProtocolBlock(14, source), eol),
@@ -6900,6 +6984,7 @@ usage:
   driftseal absorb [other-events.jsonl] [--decisions <dir>]
                  [--abandon-theirs | --abandon-ours] [--dry-run]
                                  merge another outcome log, remapping colliding ids
+                                 and repairing stale MADR Decision History references
   driftseal absorb --git <base> <ours> <theirs>
                                  git merge driver for .seal/outcomes/events.jsonl
   driftseal decision add "<title>" --context "..." --outcome "..." [options]

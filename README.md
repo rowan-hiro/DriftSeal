@@ -216,7 +216,7 @@ driftseal decision update 1 --status accepted --note "Confirmed by the final imp
 | `driftseal lane add\|switch\|assign\|show` | Partition history by long-lived capability. |
 | `driftseal reclaim [id ...] --reason "..." [--force]` | Hide meaningless closed records with append-only markers. |
 | `driftseal unreclaim <id> --reason "..."` | Restore a reclaimed record. |
-| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | Merge another lineage and remap colliding outcome or MADR ids. |
+| `driftseal absorb [other-events.jsonl] [--decisions dir] [--abandon-theirs\|--abandon-ours]` | Merge another lineage, remap colliding ids, and repair stale MADR Decision History references. |
 | `driftseal decision add\|update\|list\|show` | Manage MADR records. |
 | `driftseal migrate v1-to-v2 inspect --json [migration paths]` | Normalize v1 state for model-assisted grouping. |
 | `driftseal migrate v1-to-v2 apply --plan <file> [migration paths]` | Validate a grouping plan and stage the v2 seal beside v1. |
