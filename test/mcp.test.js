@@ -323,6 +323,8 @@ test('stdio MCP exposes the complete v2 workflow, resources, and repository boun
     });
     assert.equal(absorbDryRun.isError, undefined);
     assert.equal(absorbDryRun.structuredContent.result.mappings.length, 2);
+    assert.ok(absorbDryRun.structuredContent.result.repairs >= 1);
+    assert.match(absorbDryRun.content[0].text, /decision history repair/);
     assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.outcomes.length, 2);
 
     const absorbed = await call(client, 'driftseal_absorb', absorbInput);
@@ -333,6 +335,8 @@ test('stdio MCP exposes the complete v2 workflow, resources, and repository boun
       ['decision', 'outcome']
     );
     assert.equal(absorbed.structuredContent.result.exitCode, 0);
+    assert.ok(absorbed.structuredContent.result.repairs >= 1);
+    assert.match(absorbed.content[0].text, /decision history repair/);
     assert.equal((await call(client, 'driftseal_log', { last: 10 })).structuredContent.outcomes.length, 3);
     assert.equal(
       fs.readdirSync(path.join(root, '.seal', 'madr')).some((file) => /^0002-/.test(file)),

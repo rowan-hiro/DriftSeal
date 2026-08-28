@@ -135,6 +135,7 @@ function registerTools(server, api, z) {
     abandoned: z.string().nullable(),
     copies: z.array(z.string()),
     outputFile: z.string(),
+    repairs: z.number().int().nonnegative(),
     exitCode: z.number().int(),
   });
   const closedStatus = z.enum(END_STATUSES);
@@ -416,7 +417,7 @@ function registerTools(server, api, z) {
     {
       title: 'Absorb another DriftSeal lineage',
       description:
-        'Repair the fixed repository after a merge collision or absorb another worktree\'s outcome and MADR logs, remapping colliding IDs.',
+        'Repair the fixed repository after a merge collision or absorb another worktree\'s outcome and MADR logs, remapping colliding IDs and repairing stale Decision History outcome references. Run with no incoming log after Git stops for decision-id or decision-history worktree repair.',
       inputSchema: {
         otherLog: z
           .string()
@@ -439,9 +440,16 @@ function registerTools(server, api, z) {
       guarded(() => {
         const result = api.absorb(input);
         const action = input.dryRun ? 'Absorb dry run' : 'Absorb';
+        const parts = [];
+        if (result.mappings.length > 0) {
+          parts.push(`${result.mappings.length} ID remapping(s)`);
+        }
+        if (result.repairs > 0) {
+          parts.push(`${result.repairs} decision history repair(s)`);
+        }
         return success(
           { root: api.root, result },
-          `${action} completed with ${result.mappings.length} ID remapping(s).`
+          `${action} completed with ${parts.join(' and ') || 'nothing to apply'}.`
         );
       })
   );

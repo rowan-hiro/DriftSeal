@@ -44,8 +44,12 @@ driftseal help
 ## After a merge
 
 If `status` or `log` fails with a duplicate id or with `multiple outcomes in
-progress`, or the outcome log has conflict markers, run `driftseal absorb`
-instead of editing `.seal/outcomes/events.jsonl`. When both sides still have an
+progress`, or the outcome log has conflict markers, or Git stops because
+decision ids or Decision History need worktree repair, run `driftseal absorb`
+instead of editing `.seal/outcomes/events.jsonl`. A merge can leave the log
+healthy while MADR Decision History still quotes pre-merge outcome ids; `absorb`
+(and `absorb --dry-run`) repairs those references even when ids are already
+unique. When both sides still have an
 open outcome, add `--abandon-theirs` or `--abandon-ours`; this works whether your
 open outcome sits in the log or is parked beside the WAL. `driftseal init` also
 configures the local git merge driver; clones need `init` again for that driver.
