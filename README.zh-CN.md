@@ -41,6 +41,9 @@ npm install --global driftseal
 driftseal --version
 ```
 
+安装后也可以用短别名 `ds`，它与 `driftseal` 使用同一个 CLI 入口。
+例如，`ds status` 等同于 `driftseal status`。
+
 在源码 checkout 中使用：
 
 ```sh

@@ -47,6 +47,9 @@ npm install --global driftseal
 driftseal --version
 ```
 
+The package also installs `ds` as a short alias for `driftseal`. Both commands use
+the same CLI; for example, `ds status` is equivalent to `driftseal status`.
+
 From a source checkout:
 
 ```sh

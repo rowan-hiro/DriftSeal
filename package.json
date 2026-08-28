@@ -1,6 +1,6 @@
 {
   "name": "driftseal",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Seal outcomes, verification, and decisions into an auditable workflow for agentic coding",
   "keywords": [
     "driftseal",
@@ -26,6 +26,7 @@
   "main": "index.js",
   "bin": {
     "driftseal": "bin/driftseal.js",
+    "ds": "bin/driftseal.js",
     "driftseal-mcp": "bin/driftseal-mcp.js"
   },
   "directories": {

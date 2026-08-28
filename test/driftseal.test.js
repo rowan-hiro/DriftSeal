@@ -326,6 +326,7 @@ test('package metadata identifies the DriftSeal CLI, ownership, and support URLs
   assert.equal(metadata.name, 'driftseal');
   assert.deepEqual(metadata.bin, {
     driftseal: 'bin/driftseal.js',
+    ds: 'bin/driftseal.js',
     'driftseal-mcp': 'bin/driftseal-mcp.js',
   });
   assert.deepEqual(metadata.repository, {
@@ -345,6 +346,7 @@ test('--version and -V print the package version', () => {
   const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.equal(run(['--version']), `${metadata.version}\n`);
   assert.equal(run(['-V']), `${metadata.version}\n`);
+  assert.match(run(['help']), /The ds command is an alias for driftseal/);
   assert.match(run(['help']), /driftseal --version \| -V/);
   assert.match(run(['help']), /driftseal init \[--lang <tag>\] \[--local-log\]/);
   assert.match(run(['help']), /driftseal verify/);

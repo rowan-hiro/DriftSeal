@@ -112,16 +112,32 @@ try {
     DRIFTSEAL_HOME: home,
     DRIFTSEAL_DECISION_HOME: path.join(home, 'madr'),
   };
+  for (const name of ['driftseal', 'ds', 'driftseal-mcp']) {
+    const executable = process.platform === 'win32' ? `${name}.cmd` : name;
+    assert.equal(
+      fs.existsSync(path.join(consumer, 'node_modules', '.bin', executable)),
+      true,
+      `${name} is installed as an executable`
+    );
+  }
+  function runInstalled(name, args) {
+    return runNpm(['exec', '--offline', '--prefix', consumer, '--', name, ...args], {
+      cwd: sandbox,
+      env,
+    });
+  }
+  const metadata = require(path.join(installed, 'package.json'));
+  for (const name of ['driftseal', 'ds']) {
+    assert.equal(runInstalled(name, ['--version']), `${metadata.version}\n`);
+  }
+  const help = runInstalled('driftseal', ['--help']);
+  assert.match(help, /The ds command is an alias for driftseal/);
+  assert.equal(runInstalled('ds', ['--help']), help);
+
   const cli = path.join(installed, 'bin', 'driftseal.js');
-  run(process.execPath, [cli, 'begin', 'packaged sqlite smoke'], {
-    cwd: sandbox,
-    env,
-  });
-  run(
-    process.execPath,
-    [cli, 'end', '--status', 'abandoned', '--note', 'packaged smoke'],
-    { cwd: sandbox, env }
-  );
+  runInstalled('ds', ['begin', 'packaged sqlite smoke']);
+  assert.match(runInstalled('driftseal', ['status']), /packaged sqlite smoke/);
+  runInstalled('driftseal', ['end', '--status', 'abandoned', '--note', 'packaged smoke']);
   const logged = spawnSync(process.execPath, [cli, 'log', '--last', '1'], {
     cwd: sandbox,
     env,
@@ -130,6 +146,7 @@ try {
   });
   assert.equal(logged.status, 0, logged.stderr);
   assert.match(logged.stdout, /packaged sqlite smoke/);
+  assert.equal(runInstalled('ds', ['log', '--last', '1']), logged.stdout);
   assert.doesNotMatch(logged.stderr, /SQLite is an experimental feature/);
   assert.equal(fs.existsSync(indexFile), true);
   fs.writeFileSync(indexFile, 'corrupt package smoke index');

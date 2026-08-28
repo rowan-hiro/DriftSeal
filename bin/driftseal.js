@@ -6781,6 +6781,8 @@ const commands = {
 
 Outcome-level write-ahead log for agent sessions.
 
+The ds command is an alias for driftseal; all commands and options are identical.
+
 usage:
   driftseal begin "<outcome>" [--accept "<observable result>"] [--verify "<command>"]
                  [--decision <id>] [--force]

@@ -29,3 +29,12 @@ Use DriftSeal consistently for the product, npm package, repository, CLI, protoc
 
 * The first public release has one coherent DriftSeal brand.
 * Development checkouts using the old binary or environment variables must migrate.
+
+## Decision History
+
+<!-- driftseal-reconciliation: ab261f00-7c6f-4103-b27d-595bfe3cc0bb -->
+### 2026-08-28T08:17:34.421Z — Outcome `2026-08-28-001`
+
+Status: Accepted → Accepted
+
+Add ds as an optional short alias for the existing driftseal CLI. DriftSeal remains the product and package identity, driftseal remains the canonical command, and no pre-release binary or environment-variable aliases are restored.
