@@ -3132,6 +3132,14 @@ function previousDecisionProtocolBlock(version, language = DEFAULT_LOG_LANGUAGE,
   return v8.replace(' --driver "<decision driver>"', '');
 }
 
+function customizedProtocolBlockError(marker) {
+  return (
+    `cannot safely upgrade customized protocol block beginning with ${marker}; ` +
+    'the block may come from a newer DriftSeal release even when its protocol version matches ' +
+    `(current client: ${PACKAGE_VERSION}); upgrade DriftSeal and retry`
+  );
+}
+
 function upgradeManagedBlock({
   content,
   marker,
@@ -3182,7 +3190,7 @@ function upgradeManagedBlock({
       key === protocolBlockKey(replacement) ||
       knownManagedBlocks.some((known) => key === protocolBlockKey(known));
     if (!recognized) {
-      fail(`cannot safely upgrade customized protocol block beginning with ${marker}`);
+      fail(customizedProtocolBlockError(marker));
     }
     return {
       content: content.slice(0, start) + replacement + content.slice(after),
@@ -3197,7 +3205,7 @@ function upgradeManagedBlock({
       found: true,
     };
   }
-  fail(`cannot safely upgrade customized protocol block beginning with ${marker}`);
+  fail(customizedProtocolBlockError(marker));
 }
 
 const MCP_TARGETS = ['codex', 'kimi-code', 'opencode', 'claude-code', 'cursor'];

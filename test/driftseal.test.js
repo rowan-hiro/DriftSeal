@@ -3336,6 +3336,30 @@ test('init upgrades 2.1 protocol that only mentioned absorb collisions', () => {
   assert.equal(fs.readFileSync(agentsFile, 'utf8'), current);
 });
 
+test('init suggests upgrading when a same-version protocol block is unrecognized', () => {
+  const { run, runFail } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-newer-client-protocol-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+  run(['init'], { cwd });
+  const fromNewerClient = fs
+    .readFileSync(agentsFile, 'utf8')
+    .replace(
+      'This repository uses DriftSeal (`driftseal`) to prevent agent drift.',
+      'This repository uses DriftSeal (`driftseal`) to prevent agent drift safely.'
+    );
+  fs.writeFileSync(agentsFile, fromNewerClient);
+
+  const failure = runFail(['init'], { cwd });
+  assert.match(failure.stderr, /cannot safely upgrade customized protocol block/);
+  assert.match(
+    failure.stderr,
+    /may come from a newer DriftSeal release even when its protocol version matches/
+  );
+  assert.match(failure.stderr, /current client: \d+\.\d+\.\d+/);
+  assert.match(failure.stderr, /upgrade DriftSeal and retry/);
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), fromNewerClient);
+});
+
 test('init upgrades the released v1.4 protocol to protocol 2.1', () => {
   const { run, runFail } = setup();
   const fixture = fs.readFileSync(
