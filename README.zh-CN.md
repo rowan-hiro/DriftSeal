@@ -2,10 +2,12 @@
 
 > **Seal the outcome. Stop the drift.**
 
-DriftSeal 是一套跟随 repo 保存的协议与工具，用来让 coding agent 始终围绕一个
-完整的交付 outcome 工作。它要求在持久改动开始前记录 outcome，允许以 append-only
-方式补充同一 outcome 的后续步骤，把验证结果绑定到累计 contract，并只为确实需要
-长期保留理由的选择建立 MADR。
+![DriftSeal：精密金属封印将工程文档锚定在同一个交付目标上。](docs/images/driftseal-hero.png)
+
+DriftSeal 是一套面向 Agent 独立执行长任务的工程化协议与工具链，状态随 repo 保存。
+它让 coding agent 始终围绕一个完整的交付 outcome 工作：在持久改动开始前记录
+outcome，以 append-only 方式补充同一 outcome 的后续步骤，把验证结果绑定到累计
+contract 和工作区，并只为确实需要长期保留理由的选择建立 MADR。
 
 ```text
 开启 outcome → 扩展同一 outcome → 验证累计 contract → 关闭
@@ -13,6 +15,16 @@ DriftSeal 是一套跟随 repo 保存的协议与工具，用来让 coding agent
 
 一个 worktree 只持有一个 open outcome。Git 记录最终落地了什么；DriftSeal 记录这轮
 工作想交付什么、如何证明完成，以及长期 decision 背后的理由。
+
+## 什么时候使用 DriftSeal
+
+当 Agent 需要在缺少人持续引导的情况下，独立推进并完成多步骤工程任务时，适合使用
+DriftSeal。明确的验收标准、累计验证和 decision reconciliation 为交付提供结构化
+约束，也让 Agent 在上下文丢失或交接后，可以回到同一份交付约定继续执行。
+
+这些工程化约束也会增加流程成本。如果有人持续审阅进展、澄清范围并引导 Agent，
+推荐使用更轻量的 [Inkan](https://github.com/rowan-hiro/inkan)。它记录交付意图、
+过程中的变更和结束时声明的结果，把结果判断留给人和仓库原有的测试流程。
 
 ## v2 的变化
 
@@ -68,6 +80,8 @@ attribute，并配置本地 Git merge driver。Git config 不会随 clone 传播
 
 ## 基本工作流
 
+![同一个 outcome 依次经过 begin、extend、verify 和 end，累积变更后统一验证。](docs/images/driftseal-workflow.png)
+
 在修改持久项目内容前，先开启完整的交付 outcome：
 
 ```sh
@@ -108,6 +122,8 @@ acceptance-bound outcome 只有在最新 verification 成功后才能关闭为 `
 driftseal status
 driftseal log --last 3
 ```
+
+![通过 driftseal status 和 driftseal log --last 3 读取持久记录，在上下文中断后继续同一个交付目标。](docs/images/driftseal-continuity.png)
 
 ## 哪些工作需要 outcome
 

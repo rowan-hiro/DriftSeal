@@ -2,11 +2,14 @@
 
 > **Seal the outcome. Stop the drift.**
 
-DriftSeal is a repository-local protocol and toolchain for keeping coding agents
-anchored to a coherent delivery outcome. It records the outcome before durable
-work begins, permits append-only extensions toward that same outcome, binds
-verification to the accumulated contract, and preserves only the decisions that
-need durable rationale.
+![DriftSeal: a precision metal seal anchors engineering documents to one delivery outcome.](docs/images/driftseal-hero.png)
+
+DriftSeal is an engineering protocol and toolchain for coding agents executing
+long tasks independently, with state kept in the repository. It keeps work
+anchored to a coherent delivery outcome: record the outcome before durable work
+begins, append extensions toward that same outcome, bind verification to the
+accumulated contract and workspace, and preserve the decisions that need durable
+rationale.
 
 ```text
 begin an outcome → extend the same outcome → verify the cumulative contract → close
@@ -15,6 +18,19 @@ begin an outcome → extend the same outcome → verify the cumulative contract 
 One worktree owns one open outcome. Git records what landed; DriftSeal records
 what the work was meant to achieve, how completion was proved, and why durable
 decisions were made.
+
+## When to use DriftSeal
+
+Use DriftSeal when an agent needs to carry a multi-step engineering task through
+to completion without continuous human guidance. Explicit acceptance criteria,
+cumulative verification, and decision reconciliation provide a structured way to
+track delivery and resume the same contract after context loss or handoff.
+
+That rigor adds process overhead. When a person is actively reviewing progress,
+clarifying scope, and guiding the agent, we recommend
+[Inkan](https://github.com/rowan-hiro/inkan) as the lighter option. It records
+delivery intent, changes, and declared results while leaving evaluation to the
+person and the repository's normal tests.
 
 ## What changed in v2
 
@@ -75,6 +91,8 @@ may still write `.seal/outcomes/.gitignore` so derived sidecars stay untracked.
 
 ## Core workflow
 
+![One outcome progresses through begin, extend, verify, and end, accumulating changes before verification.](docs/images/driftseal-workflow.png)
+
 Open the coherent delivery outcome before changing durable project content:
 
 ```sh
@@ -117,6 +135,8 @@ After context loss or handoff, re-anchor before changing durable content:
 driftseal status
 driftseal log --last 3
 ```
+
+![Resume the same outcome across a context boundary by reading driftseal status and driftseal log --last 3.](docs/images/driftseal-continuity.png)
 
 ## What needs an outcome
 
