@@ -56,7 +56,7 @@ const LOG_VERSION = 2;
 const EVENT_SCHEMA_VERSION = 2;
 const DEFAULT_WRITE_SCHEMA_VERSION = 1;
 const LEGACY_EVENT_SCHEMA_VERSION = 4;
-const PROTOCOL_VERSION = '2.1';
+const PROTOCOL_VERSION = '2.2';
 const DEFAULT_LOG_LANGUAGE = 'en';
 const DEFAULT_LANE = 'main';
 const LANE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
@@ -2698,17 +2698,31 @@ Seal root: \`.seal/\` (override with \`$DRIFTSEAL_HOME\`); outcome log:
 ${INTENT_PROTOCOL_END}`;
 }
 
-function intentProtocolBlockV21(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+function intentProtocolBlockV21(version = '2.1', language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: true });
 }
 
-function intentProtocolBlockV21AbsorbCollisions(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+function intentProtocolBlockV21AbsorbCollisions(version = '2.1', language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: false });
+}
+
+const PLAN_MODE_PROTOCOL_STEP = `5. **Plan mode writes the commands, then runs them first.** When the agent is
+   in plan mode, write every \`driftseal\` command this work will run into the
+   plan file as an explicit command. As soon as plan mode ends, run the
+   opening commands (re-anchor when required, then \`begin\` or \`extend\`) before
+   any other action.`;
+
+function intentProtocolBlockV22(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: true }).replace(
+    '\n\n**Log access goes only through DriftSeal.**',
+    `\n${PLAN_MODE_PROTOCOL_STEP}\n\n**Log access goes only through DriftSeal.**`
+  );
 }
 
 function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
   if (String(version) === '2.0') return intentProtocolBlockV20(language, localLog);
-  return intentProtocolBlockV21(version, language, localLog);
+  if (String(version) === '2.1') return intentProtocolBlockV21(version, language, localLog);
+  return intentProtocolBlockV22(version, language, localLog);
 }
 
 function v1IntentProtocolBlock(version = 14, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
@@ -6853,8 +6867,10 @@ const commands = {
         ...sourceLanguages.flatMap((source) => [
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source), eol),
           protocolEol(intentProtocolBlock(PROTOCOL_VERSION, source, true), eol),
-          protocolEol(intentProtocolBlockV21AbsorbCollisions(PROTOCOL_VERSION, source), eol),
-          protocolEol(intentProtocolBlockV21AbsorbCollisions(PROTOCOL_VERSION, source, true), eol),
+          protocolEol(intentProtocolBlock('2.1', source), eol),
+          protocolEol(intentProtocolBlock('2.1', source, true), eol),
+          protocolEol(intentProtocolBlockV21AbsorbCollisions('2.1', source), eol),
+          protocolEol(intentProtocolBlockV21AbsorbCollisions('2.1', source, true), eol),
           protocolEol(intentProtocolBlockV20(source), eol),
           protocolEol(intentProtocolBlockV20(source, true), eol),
           protocolEol(v1IntentProtocolBlock(14, source), eol),
@@ -6889,8 +6905,10 @@ const commands = {
         ...sourceLanguages.flatMap((source) => [
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source), eol),
           protocolEol(decisionProtocolBlock(PROTOCOL_VERSION, source, true), eol),
-          protocolEol(decisionProtocolBlockAbsorbCollisions(PROTOCOL_VERSION, source), eol),
-          protocolEol(decisionProtocolBlockAbsorbCollisions(PROTOCOL_VERSION, source, true), eol),
+          protocolEol(decisionProtocolBlock('2.1', source), eol),
+          protocolEol(decisionProtocolBlock('2.1', source, true), eol),
+          protocolEol(decisionProtocolBlockAbsorbCollisions('2.1', source), eol),
+          protocolEol(decisionProtocolBlockAbsorbCollisions('2.1', source, true), eol),
           protocolEol(decisionProtocolBlock('2.0', source), eol),
           protocolEol(decisionProtocolBlock('2.0', source, true), eol),
           protocolEol(v1DecisionProtocolBlock(14, source), eol),

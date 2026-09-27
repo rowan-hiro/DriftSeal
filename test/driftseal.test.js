@@ -2261,7 +2261,7 @@ test('v1-to-v2 migration validates model grouping, copies MADRs, and never delet
     fs.readFileSync(path.join(cwd, '.seal', 'madr', '0001-preserve-exact-bytes.md')).equals(madrBytes),
     true
   );
-  assert.match(fs.readFileSync(path.join(cwd, 'AGENTS.md'), 'utf8'), /driftseal-version: 2\.1/);
+  assert.match(fs.readFileSync(path.join(cwd, 'AGENTS.md'), 'utf8'), /driftseal-version: 2\.2/);
   assert.equal(
     fs.readFileSync(path.join(cwd, '.gitattributes'), 'utf8'),
     '.seal/outcomes/events.jsonl merge=driftseal\n'
@@ -3294,13 +3294,17 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
 
   runIn(['init']);
   const first = fs.readFileSync(agentsFile, 'utf8');
-  assert.match(first, /driftseal-version: 2\.1/);
+  assert.match(first, /driftseal-version: 2\.2/);
   assert.match(first, /Agent protocol: outcome write-ahead log/);
   assert.match(first, /driftseal extend/);
   assert.match(first, /Every extension invalidates earlier verification/);
   assert.match(first, /current contract hash and Git-visible workspace/);
   assert.match(first, /One open outcome belongs to one worktree/);
   assert.match(first, /named lane/);
+  assert.match(first, /Plan mode writes the commands, then runs them first/);
+  assert.match(first, /write every `driftseal` command this work will run into the/);
+  assert.match(first, /As soon as plan mode ends, run the/);
+  assert.match(first, /opening commands \(re-anchor when required, then `begin` or `extend`\) before/);
   assert.match(first, /\.seal\/outcomes\/events\.jsonl/);
   assert.match(first, /\.seal\/madr/);
   assert.match(first, /commit `\.seal\/` with the code/);
@@ -3315,13 +3319,40 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   );
 });
 
-test('init upgrades 2.1 protocol that only mentioned absorb collisions', () => {
+test('init upgrades the released 2.1 protocol to protocol 2.2', () => {
+  const { run } = setup();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v21-upgrade-'));
+  const agentsFile = path.join(cwd, 'AGENTS.md');
+  fs.copyFileSync(path.join(__dirname, 'fixtures', 'AGENTS.v2.1.md'), agentsFile);
+  run(['init'], { cwd });
+  const upgraded = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(upgraded, /^# Agent instructions/);
+  assert.match(upgraded, /driftseal-version: 2\.2/);
+  assert.match(upgraded, /driftseal-decisions-version: 2\.2/);
+  assert.match(upgraded, /Plan mode writes the commands, then runs them first/);
+  assert.match(upgraded, /named lane/);
+  assert.doesNotMatch(upgraded, /driftseal-version: 2\.1/);
+  run(['init'], { cwd });
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), upgraded);
+
+  const localCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v21-local-upgrade-'));
+  const localAgents = path.join(localCwd, 'AGENTS.md');
+  fs.copyFileSync(path.join(__dirname, 'fixtures', 'AGENTS.v2.1.local.md'), localAgents);
+  run(['init'], { cwd: localCwd });
+  const local = fs.readFileSync(localAgents, 'utf8');
+  assert.match(local, /driftseal-version: 2\.2/);
+  assert.match(local, /driftseal-decisions-version: 2\.2/);
+  assert.match(local, /Plan mode writes the commands, then runs them first/);
+  assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
+  assert.match(local, /keep `\.seal\/` local and untracked\./);
+});
+
+test('init upgrades a 2.1 protocol that only mentioned absorb collisions', () => {
   const { run } = setup();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v21-absorb-upgrade-'));
   const agentsFile = path.join(cwd, 'AGENTS.md');
-  run(['init'], { cwd });
-  const current = fs.readFileSync(agentsFile, 'utf8');
-  const previous = current
+  const released = fs.readFileSync(path.join(__dirname, 'fixtures', 'AGENTS.v2.1.md'), 'utf8');
+  const previous = released
     .replace(
       'collisions or when Decision History outcome references are stale',
       'collisions'
@@ -3330,10 +3361,31 @@ test('init upgrades 2.1 protocol that only mentioned absorb collisions', () => {
       'remaps colliding ids and repairs managed Decision History\noutcome references; it never auto-merges concurrent edits of a shared MADR.',
       'remaps colliding ids; it never auto-merges concurrent\nedits of a shared MADR.'
     );
-  assert.notEqual(previous, current);
+  assert.notEqual(previous, released);
+  assert.match(previous, /driftseal-version: 2\.1/);
+  assert.doesNotMatch(previous, /Decision History outcome references are stale/);
   fs.writeFileSync(agentsFile, previous);
   run(['init'], { cwd });
-  assert.equal(fs.readFileSync(agentsFile, 'utf8'), current);
+  const upgraded = fs.readFileSync(agentsFile, 'utf8');
+  assert.match(upgraded, /driftseal-version: 2\.2/);
+  assert.match(upgraded, /driftseal-decisions-version: 2\.2/);
+  assert.match(upgraded, /Decision History outcome references are stale/);
+  assert.match(upgraded, /Plan mode writes the commands, then runs them first/);
+  run(['init'], { cwd });
+  assert.equal(fs.readFileSync(agentsFile, 'utf8'), upgraded);
+});
+
+test('repository guides document protocol 2.2 plan mode', () => {
+  const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  const zh = fs.readFileSync(path.join(__dirname, '..', 'README.zh-CN.md'), 'utf8');
+  assert.match(readme, /protocol series is `2\.2`/);
+  assert.match(readme, /recognized `2\.0` and `2\.1` blocks/);
+  assert.match(readme, /When the agent is in plan mode, write every `driftseal` command this work will/);
+  assert.match(readme, /As soon as plan mode ends, run/);
+  assert.match(zh, /新协议版本是 `2\.2`/);
+  assert.match(zh, /可识别的 `2\.0` 和 `2\.1` block/);
+  assert.match(zh, /Agent 处于 plan 模式时/);
+  assert.match(zh, /plan 模式一结束/);
 });
 
 test('init suggests upgrading when a same-version protocol block is unrecognized', () => {
@@ -3360,7 +3412,7 @@ test('init suggests upgrading when a same-version protocol block is unrecognized
   assert.equal(fs.readFileSync(agentsFile, 'utf8'), fromNewerClient);
 });
 
-test('init upgrades the released v1.4 protocol to protocol 2.1', () => {
+test('init upgrades the released v1.4 protocol to protocol 2.2', () => {
   const { run, runFail } = setup();
   const fixture = fs.readFileSync(
     path.join(__dirname, 'fixtures', 'AGENTS.v1.4.md'),
@@ -3373,8 +3425,8 @@ test('init upgrades the released v1.4 protocol to protocol 2.1', () => {
   run(['init'], { cwd });
   const upgraded = fs.readFileSync(agentsFile, 'utf8');
   assert.match(upgraded, /^# Existing repository instructions/);
-  assert.match(upgraded, /driftseal-version: 2\.1/);
-  assert.match(upgraded, /driftseal-decisions-version: 2\.1/);
+  assert.match(upgraded, /driftseal-version: 2\.2/);
+  assert.match(upgraded, /driftseal-decisions-version: 2\.2/);
   assert.match(upgraded, /Agent protocol: outcome write-ahead log/);
   assert.doesNotMatch(upgraded, /\.intent-log|\.decision-log/);
 
@@ -3518,7 +3570,7 @@ test('init --local-log persists the local, untracked log mode', () => {
   run(['init', '--local-log'], { cwd });
   const local = fs.readFileSync(agentsFile, 'utf8');
   assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
-  assert.match(local, /driftseal-version: 2\.1/);
+  assert.match(local, /driftseal-version: 2\.2/);
   assert.match(local, /keep `\.seal\/` local and untracked\./);
   assert.match(local, /Keep `\.seal\/madr\/` local and untracked\./);
   assert.doesNotMatch(local, /commit it with the code/);
@@ -3561,7 +3613,7 @@ test('init --local-log enables local mode on an already-current repository', () 
   run(['init', '--local-log'], { cwd }); // same-version default -> local is an upgrade, not a customization
   const local = fs.readFileSync(agentsFile, 'utf8');
   assert.equal((local.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
-  assert.match(local, /driftseal-version: 2\.1/);
+  assert.match(local, /driftseal-version: 2\.2/);
   assert.match(local, /keep `\.seal\/` local and untracked\./);
   assert.match(local, /Keep `\.seal\/madr\/` local and untracked\./);
 
@@ -3638,8 +3690,8 @@ test('init --local-log --lang upgrades a v11 English protocol to local mode in o
 
   run(['init', '--local-log', '--lang', 'zh-CN'], { cwd });
   const upgraded = fs.readFileSync(agentsFile, 'utf8');
-  assert.match(upgraded, /driftseal-version: 2\.1/);
-  assert.match(upgraded, /driftseal-decisions-version: 2\.1/);
+  assert.match(upgraded, /driftseal-version: 2\.2/);
+  assert.match(upgraded, /driftseal-decisions-version: 2\.2/);
   assert.match(upgraded, /driftseal-log-language: zh-CN/);
   assert.equal((upgraded.match(/<!-- driftseal-local-log: true -->/g) || []).length, 2);
   assert.match(upgraded, /local and untracked/);
@@ -5820,7 +5872,7 @@ test('absorb rejects incompatible flags', () => {
   assert.match(runFail(['absorb', '--git', 'a']).stderr, /usage: driftseal absorb/);
 });
 
-test('init upgrades the released 2.0 protocol to protocol 2.1', () => {
+test('init upgrades the released 2.0 protocol to protocol 2.2', () => {
   const { run } = setup();
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'driftseal-v20-upgrade-'));
   const agentsFile = path.join(cwd, 'AGENTS.md');
@@ -5828,8 +5880,8 @@ test('init upgrades the released 2.0 protocol to protocol 2.1', () => {
   run(['init'], { cwd });
   const upgraded = fs.readFileSync(agentsFile, 'utf8');
   assert.match(upgraded, /^# Existing 2.0 repository instructions/);
-  assert.match(upgraded, /driftseal-version: 2\.1/);
-  assert.match(upgraded, /driftseal-decisions-version: 2\.1/);
+  assert.match(upgraded, /driftseal-version: 2\.2/);
+  assert.match(upgraded, /driftseal-decisions-version: 2\.2/);
   assert.match(upgraded, /named lane/);
   assert.match(upgraded, /Both follow the/);
 });

@@ -1,13 +1,7 @@
 # Agent instructions
 
-This repository is the DriftSeal source (see `bin/driftseal.js` and
-`README.md`), and it follows its own protocol for every coherent delivery
-outcome. DriftSeal v2 state lives under `.seal/`: outcome events in
-`.seal/outcomes/events.jsonl` and MADR records in `.seal/madr/`. Both are meant
-to be committed; `$DRIFTSEAL_HOME` overrides the complete seal root.
-
 <!-- driftseal -->
-<!-- driftseal-version: 2.2 -->
+<!-- driftseal-version: 2.1 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: outcome write-ahead log
@@ -55,11 +49,6 @@ names, flags, status tokens, ids, and lane names in English.
    current lane. Resume the open outcome when it still matches; otherwise close
    it and begin a new one. If the requested work belongs to a different existing
    lane, switch first.
-5. **Plan mode writes the commands, then runs them first.** When the agent is
-   in plan mode, write every `driftseal` command this work will run into the
-   plan file as an explicit command. As soon as plan mode ends, run the
-   opening commands (re-anchor when required, then `begin` or `extend`) before
-   any other action.
 
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 `.seal/outcomes/events.jsonl` (or its configured equivalent) directly. Use
@@ -71,7 +60,7 @@ Seal root: `.seal/` (override with `$DRIFTSEAL_HOME`); outcome log:
 <!-- /driftseal -->
 
 <!-- driftseal-decisions -->
-<!-- driftseal-decisions-version: 2.2 -->
+<!-- driftseal-decisions-version: 2.1 -->
 <!-- driftseal-log-language: en -->
 
 ## Agent protocol: decision log
@@ -94,35 +83,3 @@ merge, `driftseal absorb` remaps colliding ids and repairs managed Decision Hist
 outcome references; it never auto-merges concurrent edits of a shared MADR.
 Commit `.seal/madr/` with the code.
 <!-- /driftseal-decisions -->
-
-## Cursor Cloud specific instructions
-
-DriftSeal is a dependency-light Node.js (CommonJS, `>=22.13`) CLI with **no build
-step** and **no linter/formatter config**. The startup update script runs
-`npm install`; nothing else is required to develop.
-
-- **Test:** `npm test` (runs `node --test test/*.test.js`). The suite spawns the
-  real CLI and MCP server as subprocesses, so it takes a while — wait for it
-  rather than assuming a hang.
-- **Static checks:** there is no ESLint/Prettier. Reuse the same static gate the
-  repo's own DriftSeal verifiers use: `node --check bin/driftseal.js`,
-  `node --check bin/driftseal-mcp.js`, `node --check lib/*.js`, and
-  `git diff --check`.
-- **Index benchmark:** `npm run benchmark:recent-log -- --quick` validates the
-  synthetic workload and SQLite query plan; omit `--quick` for the 10k-outcome
-  development benchmark and use `--large` for the 100k-outcome profile.
-- **Package smoke:** `npm run test:package` packs and installs the npm tarball,
-  then exercises the packaged SQLite-backed CLI.
-- **Run the CLI:** `node bin/driftseal.js <command>` always works from the repo
-  root. `npm link` is also wired up so `driftseal` and `driftseal-mcp` are on
-  `PATH` in this environment.
-- **MCP server:** `driftseal-mcp --root <abs-path>` is a **stdio** server. It
-  exits immediately on stdin EOF, so a naive backgrounded start (`... &`) looks
-  like it "exited early"; that is expected, not a crash. Its behavior is covered
-  by `test/mcp.test.js`.
-- **This repo dogfoods its own protocol.** The DriftSeal outcome/decision
-  protocol above is mandatory: before changing durable project content, open an
-  outcome with `driftseal begin`, then `driftseal verify` and `driftseal end`.
-  The v2 seal state under `.seal/` (`.seal/outcomes/events.jsonl` and
-  `.seal/madr/`) is committed with the code — never edit it by hand; go through
-  the `driftseal` CLI.
