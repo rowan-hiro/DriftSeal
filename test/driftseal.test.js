@@ -2,6 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const Module = require('node:module');
 const { execFileSync, execSync, spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -3303,8 +3304,14 @@ test('init injects the protocol into AGENTS.md, idempotently', () => {
   assert.match(first, /named lane/);
   assert.match(first, /Plan mode writes the commands, then runs them first/);
   assert.match(first, /write every `driftseal` command this work will run into the/);
-  assert.match(first, /As soon as plan mode ends, run the/);
-  assert.match(first, /opening commands \(re-anchor when required, then `begin` or `extend`\) before/);
+  assert.match(first, /Closing commands may leave status and note/);
+  assert.match(first, /as placeholders/);
+  assert.match(first, /As soon as plan mode ends, re-anchor before any other/);
+  assert.match(first, /End an unrelated open outcome before any lane switch/);
+  assert.match(first, /Switch lanes/);
+  assert.match(first, /when this work belongs to another lane/);
+  assert.match(first, /`begin` or `extend` to match/);
+  assert.match(first, /that re-anchored state/);
   assert.match(first, /\.seal\/outcomes\/events\.jsonl/);
   assert.match(first, /\.seal\/madr/);
   assert.match(first, /commit `\.seal\/` with the code/);
@@ -3381,11 +3388,52 @@ test('repository guides document protocol 2.2 plan mode', () => {
   assert.match(readme, /protocol series is `2\.2`/);
   assert.match(readme, /recognized `2\.0` and `2\.1` blocks/);
   assert.match(readme, /When the agent is in plan mode, write every `driftseal` command this work will/);
-  assert.match(readme, /As soon as plan mode ends, run/);
+  assert.match(readme, /Closing commands may leave/);
+  assert.match(readme, /status and note as placeholders/);
+  assert.match(readme, /As soon as plan mode ends, re-anchor before/);
+  assert.match(readme, /End an unrelated open outcome before any lane switch/);
   assert.match(zh, /新协议版本是 `2\.2`/);
   assert.match(zh, /可识别的 `2\.0` 和 `2\.1` block/);
   assert.match(zh, /Agent 处于 plan 模式时/);
   assert.match(zh, /plan 模式一结束/);
+  assert.match(zh, /status 和 note 可以写成占位符/);
+  assert.match(zh, /在切换 lane 之前结束它/);
+});
+
+test('protocol generators stamp only released series', () => {
+  const source = fs.readFileSync(DRIFTSEAL, 'utf8').replace(/^#!.*\n/, '').replace(
+    'module.exports = {',
+    'module.exports = { intentProtocolBlock, intentProtocolBlockV22, decisionProtocolBlock, decisionProtocolBlockAbsorbCollisions,'
+  );
+  const loaded = new Module(DRIFTSEAL, module);
+  loaded.filename = DRIFTSEAL;
+  loaded.paths = Module._nodeModulePaths(path.dirname(DRIFTSEAL));
+  loaded._compile(source, DRIFTSEAL);
+  const {
+    intentProtocolBlock,
+    intentProtocolBlockV22,
+    decisionProtocolBlock,
+    decisionProtocolBlockAbsorbCollisions,
+  } = loaded.exports;
+
+  const current = intentProtocolBlock();
+  assert.match(current, /driftseal-version: 2\.2/);
+  assert.match(current, /Closing commands may leave status and note/);
+  assert.match(intentProtocolBlock('2.1'), /driftseal-version: 2\.1/);
+  assert.doesNotMatch(intentProtocolBlock('2.1'), /Plan mode writes the commands/);
+  assert.throws(() => intentProtocolBlock('2.3'), /unsupported outcome protocol version "2\.3"/);
+  assert.throws(() => intentProtocolBlockV22('2.1'), /protocol block 2\.2 cannot be stamped as version 2\.1/);
+
+  const absorbDefault = decisionProtocolBlockAbsorbCollisions();
+  assert.match(absorbDefault, /driftseal-decisions-version: 2\.1/);
+  assert.doesNotMatch(absorbDefault, /repairs managed Decision History/);
+  assert.match(decisionProtocolBlock('2.0'), /driftseal-decisions-version: 2\.0/);
+  assert.match(decisionProtocolBlock(), /driftseal-decisions-version: 2\.2/);
+  assert.throws(
+    () => decisionProtocolBlockAbsorbCollisions('2.2'),
+    /absorb-collisions decision protocol cannot be stamped as version 2\.2/
+  );
+  assert.throws(() => decisionProtocolBlock('2.3'), /unsupported decision protocol version "2\.3"/);
 });
 
 test('init suggests upgrading when a same-version protocol block is unrecognized', () => {

@@ -104,8 +104,9 @@ acceptance 的 extend 可以沿用原 verifier，也可以替换它。任何 ext
 machine evidence 失效。如果交付目标本身变了，应诚实关闭当前 outcome，再开启新的。
 
 Agent 处于 plan 模式时，要把这次工作将要运行的每条 `driftseal` 命令作为显式命令
-写进计划文件。plan 模式一结束，先运行其中的开场命令（需要时先重新锚定，然后
-`begin` 或 `extend`），再做其他动作。
+写进计划文件。结束命令的 status 和 note 可以写成占位符。plan 模式一结束，先重新
+锚定，再做其他动作。若已有无关的 open outcome，在切换 lane 之前结束它。工作属于
+另一条 lane 时再切换。然后按重新锚定后的状态执行 `begin` 或 `extend`。
 
 完成前依次执行：
 

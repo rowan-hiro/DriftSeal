@@ -2699,30 +2699,39 @@ ${INTENT_PROTOCOL_END}`;
 }
 
 function intentProtocolBlockV21(version = '2.1', language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: true });
+  if (String(version) !== '2.1') fail(`protocol block 2.1 cannot be stamped as version ${version}`);
+  return intentProtocolBlockV21Text('2.1', language, localLog, { historyRepair: true });
 }
 
 function intentProtocolBlockV21AbsorbCollisions(version = '2.1', language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: false });
+  if (String(version) !== '2.1') fail(`protocol block 2.1 cannot be stamped as version ${version}`);
+  return intentProtocolBlockV21Text('2.1', language, localLog, { historyRepair: false });
 }
 
 const PLAN_MODE_PROTOCOL_STEP = `5. **Plan mode writes the commands, then runs them first.** When the agent is
    in plan mode, write every \`driftseal\` command this work will run into the
-   plan file as an explicit command. As soon as plan mode ends, run the
-   opening commands (re-anchor when required, then \`begin\` or \`extend\`) before
-   any other action.`;
+   plan file as an explicit command. Closing commands may leave status and note
+   as placeholders. As soon as plan mode ends, re-anchor before any other
+   action. End an unrelated open outcome before any lane switch. Switch lanes
+   when this work belongs to another lane. Then \`begin\` or \`extend\` to match
+   that re-anchored state.`;
 
 function intentProtocolBlockV22(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  return intentProtocolBlockV21Text(version, language, localLog, { historyRepair: true }).replace(
+  if (String(version) !== String(PROTOCOL_VERSION)) {
+    fail(`protocol block ${PROTOCOL_VERSION} cannot be stamped as version ${version}`);
+  }
+  return intentProtocolBlockV21Text(PROTOCOL_VERSION, language, localLog, { historyRepair: true }).replace(
     '\n\n**Log access goes only through DriftSeal.**',
     `\n${PLAN_MODE_PROTOCOL_STEP}\n\n**Log access goes only through DriftSeal.**`
   );
 }
 
 function intentProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  if (String(version) === '2.0') return intentProtocolBlockV20(language, localLog);
-  if (String(version) === '2.1') return intentProtocolBlockV21(version, language, localLog);
-  return intentProtocolBlockV22(version, language, localLog);
+  const requested = String(version);
+  if (requested === '2.0') return intentProtocolBlockV20(language, localLog);
+  if (requested === '2.1') return intentProtocolBlockV21('2.1', language, localLog);
+  if (requested === String(PROTOCOL_VERSION)) return intentProtocolBlockV22(PROTOCOL_VERSION, language, localLog);
+  fail(`unsupported outcome protocol version "${version}"`);
 }
 
 function v1IntentProtocolBlock(version = 14, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
@@ -3016,13 +3025,22 @@ function protocolEol(content, eol) {
   return eol === '\n' ? content : content.replace(/\n/g, eol);
 }
 
-function decisionProtocolBlockAbsorbCollisions(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  return decisionProtocolBlockText(version, language, localLog, { historyRepair: false });
+function decisionProtocolBlockAbsorbCollisions(version = '2.1', language = DEFAULT_LOG_LANGUAGE, localLog = false) {
+  const requested = String(version);
+  if (requested !== '2.0' && requested !== '2.1') {
+    fail(`absorb-collisions decision protocol cannot be stamped as version ${version}`);
+  }
+  return decisionProtocolBlockText(requested, language, localLog, { historyRepair: false });
 }
 
 function decisionProtocolBlock(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false) {
-  if (String(version) === '2.0') return decisionProtocolBlockAbsorbCollisions(version, language, localLog);
-  return decisionProtocolBlockText(version, language, localLog, { historyRepair: true });
+  const requested = String(version);
+  if (requested === '2.0') return decisionProtocolBlockAbsorbCollisions('2.0', language, localLog);
+  if (requested === '2.1') return decisionProtocolBlockText('2.1', language, localLog, { historyRepair: true });
+  if (requested === String(PROTOCOL_VERSION)) {
+    return decisionProtocolBlockText(PROTOCOL_VERSION, language, localLog, { historyRepair: true });
+  }
+  fail(`unsupported decision protocol version "${version}"`);
 }
 
 function decisionProtocolBlockText(version = PROTOCOL_VERSION, language = DEFAULT_LOG_LANGUAGE, localLog = false, { historyRepair = true } = {}) {

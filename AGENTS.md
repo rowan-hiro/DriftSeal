@@ -57,9 +57,11 @@ names, flags, status tokens, ids, and lane names in English.
    lane, switch first.
 5. **Plan mode writes the commands, then runs them first.** When the agent is
    in plan mode, write every `driftseal` command this work will run into the
-   plan file as an explicit command. As soon as plan mode ends, run the
-   opening commands (re-anchor when required, then `begin` or `extend`) before
-   any other action.
+   plan file as an explicit command. Closing commands may leave status and note
+   as placeholders. As soon as plan mode ends, re-anchor before any other
+   action. End an unrelated open outcome before any lane switch. Switch lanes
+   when this work belongs to another lane. Then `begin` or `extend` to match
+   that re-anchored state.
 
 **Log access goes only through DriftSeal.** Never read, edit, move, or delete
 `.seal/outcomes/events.jsonl` (or its configured equivalent) directly. Use
