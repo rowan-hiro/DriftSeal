@@ -46,8 +46,8 @@ DriftSeal v2 is an outcome log rather than an intent-per-step log.
   and MADR reconciliation.
 - Stored events use `logVersion: 2`. Compatible clients accept `schemaVersion`
   `1` or `2`; lane events and non-default `begin.lane` use `schemaVersion: 2`.
-- The generated `AGENTS.md` protocol series is `2.1`. `driftseal init` upgrades
-  recognized `2.0` blocks.
+- The generated `AGENTS.md` protocol series is `2.2`. `driftseal init` upgrades
+  recognized `2.0` and `2.1` blocks.
 - Named lanes partition outcome history on the same WAL. The default lane is
   `main`; `driftseal log` follows the current lane.
 - The public CLI, Node API, MCP tools, and MCP resources use outcome terminology.
@@ -115,6 +115,13 @@ accumulated contract. An extension without new acceptance may keep the existing
 verifier or replace it. Every extension invalidates previous machine evidence.
 If the delivery outcome itself changes, close the current outcome honestly and
 begin another one.
+
+When the agent is in plan mode, write every `driftseal` command this work will
+run into the plan file as an explicit command. Closing commands may leave
+status and note as placeholders. As soon as plan mode ends, re-anchor before
+any other action. End an unrelated open outcome before any lane switch. Switch
+lanes when this work belongs to another lane. Then `begin` or `extend` to
+match that re-anchored state.
 
 Before completion:
 

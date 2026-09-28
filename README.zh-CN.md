@@ -37,7 +37,7 @@ DriftSeal v2 从“按步骤记录 intent”改为“按交付记录 outcome”�
 - 每次 extend 都会改变 contract hash，并让之前的 verification 与 MADR reconciliation 失效。
 - event 使用 `logVersion: 2`。兼容客户端接受 `schemaVersion` `1` 或 `2`；lane
   事件以及非默认的 `begin.lane` 使用 `schemaVersion: 2`。
-- `AGENTS.md` 的新协议版本是 `2.1`。`driftseal init` 会升级可识别的 `2.0` block。
+- `AGENTS.md` 的新协议版本是 `2.2`。`driftseal init` 会升级可识别的 `2.0` 和 `2.1` block。
 - 具名 lane 在同一条 WAL 上切分 outcome 历史。默认 lane 是 `main`；`driftseal log`
   跟随当前 lane。
 - CLI、Node API、MCP tool 与 resource 全部使用 outcome 命名；v1 名称和路径不会作为
@@ -102,6 +102,11 @@ driftseal extend "Document recovery-link expiry" \
 新增 acceptance 时，必须提供一个能证明完整累计 contract 的替代 verifier。没有新增
 acceptance 的 extend 可以沿用原 verifier，也可以替换它。任何 extend 都会让之前的
 machine evidence 失效。如果交付目标本身变了，应诚实关闭当前 outcome，再开启新的。
+
+Agent 处于 plan 模式时，要把这次工作将要运行的每条 `driftseal` 命令作为显式命令
+写进计划文件。结束命令的 status 和 note 可以写成占位符。plan 模式一结束，先重新
+锚定，再做其他动作。若已有无关的 open outcome，在切换 lane 之前结束它。工作属于
+另一条 lane 时再切换。然后按重新锚定后的状态执行 `begin` 或 `extend`。
 
 完成前依次执行：
 
